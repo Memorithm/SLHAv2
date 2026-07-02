@@ -138,7 +138,7 @@ pub fn quantize_latent_mixed(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
 pub fn quantize_latent_tq3(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
 ```
 
-`LatentCodec { Int4Single, Int4Grouped, Nf4, Mixed, Tq3 }` sélectionne le codec
+`LatentCodec { Int4Single, Int4Grouped, Nf4, Mixed, Tq3, Mix3 }` sélectionne le codec
 via `LearnedModel::encode_with(key, pos, warm, codec)`.
 
 ## `safety` — Filtre de sécurité géométrique latent

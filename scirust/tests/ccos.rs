@@ -1,6 +1,6 @@
 //! Integration tests for the CCOS elastic KV-cache manager (§4 Soft-Paging).
 
-use scirust::attention::slha_v2::{LatentCodec, TQ3_CORR_BYTES};
+use scirust::attention::slha_v2::{LatentCodec, MIX3_CORR_BYTES, TQ3_CORR_BYTES};
 use scirust::ccos::{
     ElasticKvCache, EvictionPolicy, PageOutPolicy, TileState, HOT_BYTES, WARM_BYTES,
 };
@@ -18,10 +18,10 @@ fn assert_invariants(cache: &ElasticKvCache, budget: usize) {
         cache.live_bytes()
     );
     // (2) Byte accounting is consistent with the HOT/WARM/COLD counts and the
-    //     paged-out TQ3 correction planes.
+    //     paged-out separable correction planes (16 B TQ3 / 14 B MIX3).
     let (h, w, _c) = cache.counts();
     assert_eq!(
-        h * HOT_BYTES + w * WARM_BYTES - cache.nocorr_count() * TQ3_CORR_BYTES,
+        h * HOT_BYTES + w * WARM_BYTES - cache.reclaimed_correction_bytes(),
         cache.live_bytes(),
         "counts ({h} HOT, {w} WARM, {} ¬corr) inconsistent with live_bytes",
         cache.nocorr_count()
@@ -411,16 +411,21 @@ fn importance_eviction_with_no_sinks_is_pure_h2o() {
 
 // --- TQ3 finer paging rung (FLAG_TQ3_NOCORR) --------------------------------
 
-/// `n` TQ3-encoded tiles, all inserted HOT.
-fn tq3_cache(n: usize, budget: usize) -> ElasticKvCache {
+/// `n` tiles of `codec`, all inserted HOT.
+fn codec_cache(n: usize, budget: usize, codec: LatentCodec) -> ElasticKvCache {
     let d = 256;
     let keys = gen_keys(7, n, d, 16, 0.93, 0.02);
     let model = LearnedModel::fit(&keys, d, 0xC0FFEE, false);
     let mut cache = ElasticKvCache::with_budget(budget);
     for (i, k) in keys.iter().enumerate() {
-        cache.insert(model.encode_with(k, i as u32, false, LatentCodec::Tq3));
+        cache.insert(model.encode_with(k, i as u32, false, codec));
     }
     cache
+}
+
+/// `n` TQ3-encoded tiles, all inserted HOT.
+fn tq3_cache(n: usize, budget: usize) -> ElasticKvCache {
+    codec_cache(n, budget, LatentCodec::Tq3)
 }
 
 #[test]
@@ -505,4 +510,35 @@ fn tq3_ladder_is_deterministic() {
     b.enforce_budget();
     assert_eq!(a.live_bytes(), b.live_bytes());
     assert_eq!(fingerprint(&a), fingerprint(&b));
+}
+
+#[test]
+fn mix3_correction_rung_reclaims_fourteen_bytes() {
+    // The MIX3 separable plane is 14 bytes: the rung must satisfy an
+    // all-HOT-minus-planes budget without paging or evicting, with exact
+    // accounting.
+    let n = 32;
+    let budget = n * (HOT_BYTES - MIX3_CORR_BYTES); // 114·n
+    let mut cache = codec_cache(n, budget, LatentCodec::Mix3);
+    assert_eq!(cache.live_bytes(), n * HOT_BYTES);
+    cache.enforce_budget();
+    assert_invariants(&cache, budget);
+    assert_eq!(cache.counts(), (n, 0, 0), "no tile paged or evicted");
+    assert_eq!(cache.nocorr_count(), n, "every correction plane dropped");
+    assert_eq!(cache.reclaimed_correction_bytes(), n * MIX3_CORR_BYTES);
+    assert_eq!(cache.live_bytes(), budget);
+}
+
+#[test]
+fn mixed_codec_has_no_correction_rung() {
+    // The nibble mixed codec has no separable plane: same budget forces
+    // paging instead.
+    let n = 16;
+    let budget = n * (HOT_BYTES - MIX3_CORR_BYTES);
+    let mut cache = codec_cache(n, budget, LatentCodec::Mixed);
+    cache.enforce_budget();
+    assert_invariants(&cache, budget);
+    assert_eq!(cache.nocorr_count(), 0, "no plane to drop on mixed tiles");
+    let (h, w, _) = cache.counts();
+    assert!(w > 0 && h + w == n, "mixed fell back to HOT->WARM paging");
 }

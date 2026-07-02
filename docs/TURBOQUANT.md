@@ -130,6 +130,29 @@ différent (WikiText-2 ici, corpus non archivé pour §5). La chaîne qualitativ
 est identique — INT4 uniforme NO-GO, mixte la relève, la jointe aide l'INT4 —
 et la conclusion TQ3 ne dépend pas du corpus.
 
+## 3ter. La synthèse MIX3 — la réponse au NO-GO, mesurée
+
+Le diagnostic du §3bis (« le goulot est la grille, pas le sous-espace »)
+appelait sa synthèse : **`LatentCodec::Mix3`** = la tête 8-bit du codec mixte
+(8 dims où est l'énergie) + un corps TQ3 (112 dims à 3 bits, plan de
+correction 1 bit **séparable** de 14 o), queue lâchée — 8 + 42 + 14 =
+**64 octets pile**. Rejoué sur le même protocole GPT-2 (held-out, jointe) :
+
+| codec (HOT, held-out jointe) | cos↑ | relL2↓ | KL↓ |
+|---|---|---|---|
+| mixte 8/4 | 0,9846 | 0,1492 | 0,0553 |
+| **MIX3** | **0,9835** | 0,1552 | 0,0599 |
+| TQ3 | 0,7908 | 0,6078 | 1,0956 |
+
+MIX3 est **au niveau du mixte sur activations réelles** (écart 0,001 de
+cosinus — le coût de la grille sans zéro sur le corps) tout en offrant ce
+que le mixte ne peut pas : le **barreau de pagination CCOS** (échelle
+HOT 128 → HOT¬corr 114 → WARM 96 → WARM¬corr 82 → COLD 0, via le même
+`FLAG_TQ3_NOCORR`/`drop_correction`, comptabilité 14 o testée). Synthétique :
+GO sur tous les régimes (cos 0,9976–0,9999). Le KL strict (≤ 0,03) reste
+au-dessus du seuil pour *tous* les codecs sur ce dump, mixte compris — c'est
+la frontière projection/protocole, pas le codec.
+
 ## 4. Bug amont trouvé pendant le portage
 
 L'implémentation Rust de TurboQuant (`turboquant-core/src/qjl.rs`) avait une
@@ -154,12 +177,11 @@ let tile = model.encode_with(&key, pos, /*warm=*/ false, LatentCodec::Tq3);
 let score = tile.compute_score(&q_coarse, &q_sign); // SIMD dédié (AVX2/AVX-512/NEON)
 ```
 
-Limites actuelles : **NO-GO mesuré comme codec HOT sur activations réelles**
-(§3bis — la grille uniforme sans zéro s'effondre sur les spectres raides ;
-préférer le codec mixte là-dessus). TQ3 reste pertinent sur distributions
-plates et comme démonstrateur du barreau de pagination à plans séparables
-(§3, `ccos`). Le décodage SIMD (AVX2/AVX-512/NEON) et l'état « correction
-lâchée » sont, eux, implémentés et testés.
+Limites actuelles : TQ3 pur est **NO-GO mesuré comme codec HOT sur
+activations réelles** (§3bis) — sur spectres réels, utiliser **MIX3**
+(§3ter), qui garde le barreau de pagination à plan séparable au niveau de
+qualité du mixte. TQ3 reste pertinent sur distributions plates. Décodage
+SIMD : TQ3 l'a (AVX2/AVX-512/NEON) ; MIX3 décode en scalaire (suivi).
 
 ## 6. Licence
 

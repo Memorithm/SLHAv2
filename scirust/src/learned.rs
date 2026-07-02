@@ -21,9 +21,9 @@
 //! *unchanged* fixed-size tile and kernel.
 
 use crate::attention::slha_v2::{
-    quantize_latent, quantize_latent_grouped, quantize_latent_mixed, quantize_latent_nf4,
-    quantize_latent_tq3, LatentCodec, SciRustSlhaTile, D_C, D_S, FLAG_MIXED, FLAG_NF4, FLAG_TQ3,
-    FLAG_WARM, N_GROUPS, RESIDUAL_WORDS,
+    quantize_latent, quantize_latent_grouped, quantize_latent_mix3, quantize_latent_mixed,
+    quantize_latent_nf4, quantize_latent_tq3, LatentCodec, SciRustSlhaTile, D_C, D_S, FLAG_MIX3,
+    FLAG_MIXED, FLAG_NF4, FLAG_TQ3, FLAG_WARM, N_GROUPS, RESIDUAL_WORDS,
 };
 use crate::incoherence::HadamardIncoherence;
 use crate::linalg::jacobi_eigh;
@@ -326,6 +326,10 @@ impl LearnedModel {
             LatentCodec::Tq3 => {
                 let (l, s, gs) = quantize_latent_tq3(&h);
                 (l, s, gs, FLAG_TQ3)
+            }
+            LatentCodec::Mix3 => {
+                let (l, s, gs) = quantize_latent_mix3(&h);
+                (l, s, gs, FLAG_MIX3)
             }
         };
         let recon = self.reconstruct(&h);
