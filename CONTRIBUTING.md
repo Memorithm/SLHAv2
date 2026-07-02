@@ -3,6 +3,17 @@
 Merci de votre intérêt ! Le dépôt est un **workspace Cargo** (le crate vit dans
 `scirust/`). Toutes les commandes se lancent depuis la racine.
 
+## Licence des contributions (CLA)
+
+Le dépôt est en **double licence** (PolyForm Noncommercial 1.0.0 +
+licence commerciale — voir [`LICENSING.md`](LICENSING.md)) ; SLHAv2 et
+TurboQuant sont des modules compagnons de **CCOS**. Pour préserver ce
+modèle, toute contribution externe n'est acceptée que sous un **accord de
+licence de contributeur (CLA)** accordant au détenteur du copyright le
+droit d'utiliser la contribution sous les deux licences. En ouvrant une
+PR, signalez votre accord dans la description ; le CLA vous sera proposé
+avant merge (contact : contact@checkupauto.fr).
+
 ## Avant d'ouvrir une PR
 
 La CI exige que ces commandes passent — lancez-les en local :

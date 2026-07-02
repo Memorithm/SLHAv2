@@ -6,3 +6,4 @@ build-backend = "maturin"
 name = "slha_core"
 requires-python = ">=3.8"
 dependencies = []
+license = {text = "PolyForm-Noncommercial-1.0.0"}

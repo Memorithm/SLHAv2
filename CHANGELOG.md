@@ -5,6 +5,16 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 
 ## [Unreleased]
 ### Added
+- **Positionnement CCOS et périmètre commercial documentés** : SLHAv2 et
+  [TurboQuant](https://github.com/CHECKUPAUTO/TurboQuant) sont des modules
+  compagnons de **CCOS**, et la licence commerciale est offerte pour les
+  déploiements CCOS (`LICENSING.md`, README, FAQ de
+  `docs/GETTING_STARTED.md`, `docs/TURBOQUANT.md` §6). TurboQuant adopte la
+  **même double licence** (PolyForm NC 1.0.0 + commerciale) dans son propre
+  dépôt. `CONTRIBUTING.md` documente désormais l'exigence de CLA que
+  `LICENSING.md` §4 posait sans relais contributeur ; le pointeur licence
+  du README corrigé (`LICENSE.md` → `LICENSING.md` pour l'arm commercial) ;
+  `slha-python/pyproject.toml` déclare enfin sa licence.
 - **Barreau de pagination CCOS « correction lâchée »** (`FLAG_TQ3_NOCORR`,
   `ElasticKvCache::drop_correction`) : le plan de correction de 16 o des
   tuiles TQ3 se page indépendamment — échelle HOT 128 → HOT¬corr 112 →
