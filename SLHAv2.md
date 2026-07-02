@@ -110,7 +110,7 @@ Pour maximiser la localité spatiale et temporelle, nous définissons une struct
 
 Par ailleurs, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
 
-Le même budget de 64 octets admet **quatre codecs latents** interchangeables, sélectionnés par les drapeaux de la tuile (`FLAG_NF4`, `FLAG_MIXED`, `FLAG_TQ3` ; sinon INT4 uniforme, à échelle simple ou par groupe) : INT4, NF4 (§7.8), mixte 8/4 bits (8 dims à 8 bits + 112 à 4 bits, queue lâchée), et **TQ3** — le port du codec KV de TurboQuant, 128 codes de 3 bits + un plan séparable de correction de signe 1 bit (§7.12, [`docs/TURBOQUANT.md`](docs/TURBOQUANT.md)). L'invariant tuile 128 o est préservé dans tous les cas ; NF4, mixte et TQ3 décodent par le chemin scalaire.
+Le même budget de 64 octets admet **quatre codecs latents** interchangeables, sélectionnés par les drapeaux de la tuile (`FLAG_NF4`, `FLAG_MIXED`, `FLAG_TQ3` ; sinon INT4 uniforme, à échelle simple ou par groupe) : INT4, NF4 (§7.8), mixte 8/4 bits (8 dims à 8 bits + 112 à 4 bits, queue lâchée), et **TQ3** — le port du codec KV de TurboQuant, 128 codes de 3 bits + un plan séparable de correction de signe 1 bit (§7.12, [`docs/TURBOQUANT.md`](docs/TURBOQUANT.md)). L'invariant tuile 128 o est préservé dans tous les cas ; NF4 et mixte décodent par le chemin scalaire, TQ3 dispose de kernels SIMD dédiés (AVX2/AVX-512/NEON, équivalence ≤ 1e-3 testée).
 
 > **État :** l'option « zéro gaspillage » est désormais **implémentée** dans le crate `scirust` (les 24 anciens octets de padding portent des métadonnées, test à l'appui). Reste ouverte une variante **SoA** (latent 64 o dans un flux, résidu + métadonnées dans un autre) si l'on veut ramener le balayage à **une seule** ligne de cache par tuile.
 
@@ -538,7 +538,7 @@ tient **exactement** dans le budget latent de 64 o de la tuile : 128 dims ×
 niveau zéro**) + 128 × 1 bit = 16 o de signes de correction (le bit déplace le
 niveau décodé de ±0,25 pas) — implémenté sous `LatentCodec::Tq3` / `FLAG_TQ3`,
 avec les mêmes échelles par groupe que les autres codecs et un décodage
-**scalaire uniquement** (routé comme NF4/mixte). La rotation pré-quantification
+**SIMD dédié** (AVX2/AVX-512/NEON, équivalence scalaire ≤ 1e-3 testée ; NF4/mixte restent scalaires). La rotation pré-quantification
 de TurboQuant (PolarQuant) n'est **pas** portée : le blanchiment de
 `LearnedModel` et la RHT opt-in (A2, §7.10) jouent déjà ce rôle sur le latent
 et le résidu respectivement.

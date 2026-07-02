@@ -94,7 +94,8 @@ impl SciRustSlhaTile {
     /// Score fusionné (eq. 2.3) :
     ///   <q_coarse, dequant(latent)> + λ·(d_s − 2·popcount(q_sign ⊕ B))
     /// Dispatch runtime : AVX-512 > AVX2 > scalaire (x86_64), NEON (aarch64).
-    /// Les tuiles NF4, mixtes et TQ3 passent par le chemin scalaire. En WARM,
+    /// Les tuiles NF4 et mixtes passent par le chemin scalaire ; TQ3 a ses
+    /// kernels SIMD dédiés (AVX2/AVX-512/NEON). En WARM,
     /// le terme binaire est supprimé.
     pub fn compute_score(&self, q_coarse: &[f32; 128], q_sign: &[u64; 4]) -> f32;
 

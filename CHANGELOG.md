@@ -5,16 +5,42 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 
 ## [Unreleased]
 ### Added
+- **Barreau de pagination CCOS « correction lâchée »** (`FLAG_TQ3_NOCORR`,
+  `ElasticKvCache::drop_correction`) : le plan de correction de 16 o des
+  tuiles TQ3 se page indépendamment — échelle HOT 128 → HOT¬corr 112 →
+  WARM 96 → WARM¬corr 80 → COLD 0, dureté strictement croissante,
+  comptabilité `live_bytes` exacte, déterminisme testé. Accesseurs
+  `tile()`/`nocorr_count()`.
+- **Kernels SIMD dédiés au codec TQ3** (AVX2/AVX-512/NEON) : correction 1 bit
+  repliée algébriquement (`code − 3,75 + corr/2`, exact en f32),
+  `FLAG_TQ3_NOCORR` honoré, sûreté de la lecture de queue documentée ;
+  équivalence scalaire ≤ 1e-3 testée par ISA (mesuré ~1e-6). NF4/mixte
+  restent scalaires.
+- **`slha.compress` (MCP) : paramètre `codec` optionnel**
+  (`int4|grouped|nf4|mixed|tq3`, défaut `int4` = comportement antérieur) ;
+  la réponse rapporte `codec`, `flags`, `group_scales`.
+- **Validation TQ3 sur activations réelles (GPT-2 c6, WikiText-2, held-out)** :
+  **NO-GO mesuré** comme codec HOT (cos 0,78–0,83, KL ≈ 0,9–1,1 contre
+  0,9846/0,0553 pour le codec mixte) — la grille uniforme sans zéro
+  s'effondre sur le spectre raide réel ; la projection jointe relève l'INT4
+  groupé mais pas TQ3 (goulot = grille, pas sous-espace). Tableau complet et
+  protocole reproductible dans `docs/TURBOQUANT.md` §3bis, post-scriptum dans
+  `FINDINGS.md` §5. TQ3 reste pertinent sur distributions plates et pour son
+  barreau de pagination à plans séparables.
+- Docs : TQ3 dans `docs/api.md` (avec le codec mixte, absent lui aussi),
+  `SLHAv2.md` §3.1/§5.1/§7.12, `paper/slhav2.tex` (énumération + table
+  d'ablation), `docs/MCP.md`.
 - **Codec latent TQ3 (portage TurboQuant)** : `LatentCodec::Tq3` / `FLAG_TQ3` —
   grille 3 bits symétrique (8 niveaux, sans zéro) + plan de correction de signe
   1 bit par dimension, échelles par groupe comme les autres codecs. 48 o de
   codes + 16 o de corrections = le budget latent de 64 o exactement ; la tuile
-  reste 128 o, zéro padding. Décodage scalaire (comme NF4/mixte). Exposé dans
+  reste 128 o, zéro padding. Décodage scalaire à ce stade (kernels SIMD
+  ajoutés ensuite — cf. entrée ci-dessus). Exposé dans
   `offline_validation --codec tq3` et `measure_learned`. Mesuré au niveau des
   codecs 4 bits existants (cos HOT 0,9979–0,9999, Spearman 0,881 vs 0,884
   INT4 groupé) ; trade-off documenté (pas de niveau zéro → MSE ~1,3–1,6× INT4
   sur gaussien, testé ≤ 2×) contre un plan de correction **séparable**
-  (futur état de pagination CCOS plus fin que HOT→WARM). Voir
+  (barreau de pagination CCOS implémenté ensuite — cf. entrée ci-dessus). Voir
   [`docs/TURBOQUANT.md`](docs/TURBOQUANT.md). Le portage a mis au jour un bug
   de grille dans TurboQuant amont (valeurs positives écrasées à 0) — corrigé
   là-bas, garde-fou `tq3_positive_values_do_not_collapse` ici.
