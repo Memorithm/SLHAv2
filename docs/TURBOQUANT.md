@@ -181,7 +181,7 @@ Limites actuelles : TQ3 pur est **NO-GO mesuré comme codec HOT sur
 activations réelles** (§3bis) — sur spectres réels, utiliser **MIX3**
 (§3ter), qui garde le barreau de pagination à plan séparable au niveau de
 qualité du mixte. TQ3 reste pertinent sur distributions plates. Décodage
-SIMD : TQ3 l'a (AVX2/AVX-512/NEON) ; MIX3 décode en scalaire (suivi).
+SIMD : les cinq codecs ont leurs kernels dédiés (AVX2/AVX-512/NEON).
 
 ## 6. Licence
 
