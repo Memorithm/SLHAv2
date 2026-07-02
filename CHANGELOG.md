@@ -4,6 +4,17 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 [SemVer](https://semver.org/). Ce fichier décrit l'état **réel** du code.
 
 ## [Unreleased]
+### Added
+- **Kernels SIMD pour NF4, mixte et MIX3** (AVX2/AVX-512/NEON) : les cinq
+  codecs latents décodent désormais en SIMD avec repli scalaire portable.
+  NF4 : lookup du codebook 16 entrées (`permutevar8x32`×2 / `permutexvar`
+  / `vqtbl4q`) ; mixte et MIX3 : tête 8-bit vectorisée + corps
+  nibble/3-bit ; MIX3 réutilise le pli algébrique des kernels TQ3
+  (décodage par dimension bit-identique au scalaire, `FLAG_TQ3_NOCORR`
+  honoré, sûreté des fenêtres de queue documentée). Équivalence ≤ 1e-3
+  testée par ISA (mesuré ~1e-6/1e-7) ; les tests de routage scalaire
+  deviennent des tests d'accord de chemins. 155 tests workspace.
+
 ### Fixed
 - **`LICENSE.md` n'était pas le vrai texte PolyForm NC 1.0.0** : une
   paraphrase à 11 sections (sur 15) — sans « Noncommercial Purposes »,
