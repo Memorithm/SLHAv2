@@ -28,6 +28,9 @@ codec and the CCOS Soft-Paging correction rung). Standalone commercial
 licensing outside CCOS is not offered.
 
 To obtain a commercial license, contact: contact@checkupauto.fr
+A draft commercial license template — pending review by qualified legal
+counsel, and of no legal effect until executed — is available at
+[legal/COMMERCIAL_LICENSE_DRAFT.md](legal/COMMERCIAL_LICENSE_DRAFT.md).
 
 ## 3. Prior versions
 
