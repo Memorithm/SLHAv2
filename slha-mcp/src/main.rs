@@ -12,7 +12,10 @@
 //! or build it (`cargo build --release -p slha-mcp`) and point the client at the
 //! binary `target/release/slha-mcp`.
 
-use scirust::attention::slha_v2::quantize_latent;
+use scirust::attention::slha_v2::{
+    quantize_latent, quantize_latent_grouped, quantize_latent_mixed, quantize_latent_nf4,
+    quantize_latent_tq3, FLAG_HOT, FLAG_MIXED, FLAG_NF4, FLAG_TQ3, N_GROUPS,
+};
 use scirust::json::{obj, Json};
 use scirust::metrics::dot;
 use scirust::scenario::{build_tile, generate, ContextToken, Projection};
@@ -175,8 +178,29 @@ fn tool_definitions() -> Json {
         ),
         tool(
             "slha.compress",
-            "Quantize a 128-dim key vector into the INT4 latent of a 128-byte tile and report the compression vs FP32.",
-            vec![("key", vec_schema("128 numbers (the key vector)"))],
+            "Quantize a 128-dim key vector into the 64-byte latent of a 128-byte tile and report the compression vs FP32. Optional `codec` selects the latent quantizer (default int4 = single-scale INT4).",
+            vec![
+                ("key", vec_schema("128 numbers (the key vector)")),
+                (
+                    "codec",
+                    obj(vec![
+                        ("type", Json::str("string")),
+                        (
+                            "enum",
+                            Json::Arr(
+                                ["int4", "grouped", "nf4", "mixed", "tq3"]
+                                    .into_iter()
+                                    .map(Json::str)
+                                    .collect(),
+                            ),
+                        ),
+                        (
+                            "description",
+                            Json::str("latent codec (default int4: uniform INT4, single scale). grouped = per-group MX scales; nf4 = normal-float codebook; mixed = 8 dims @8-bit + 112 @4-bit; tq3 = TurboQuant port, 3-bit grid + 1-bit sign-correction plane."),
+                        ),
+                    ]),
+                ),
+            ],
             vec!["key"],
         ),
         tool(
@@ -231,13 +255,18 @@ fn explain_text() -> String {
     "SLHA v2 (Sub-Low-rank Hybrid Attention) compresses each transformer KV entry \
 into a 128-byte, cache-line-aware tile so long-context inference fits in CPU cache \
 instead of GPU VRAM.\n\n\
-Each tile (exactly 128 bytes, zero padding) stores: a 64-byte INT4 low-rank latent \
+Each tile (exactly 128 bytes, zero padding) stores: a 64-byte low-rank latent \
 (128 dims), a 32-byte 1-bit sign-LSH residual (256 bits) that corrects what the \
 low-rank base misses, plus metadata (scale, lambda, sigma_E, ids, flags, MX group \
-scales). The attention score fuses a continuous dot product over the dequantized \
-latent with a branchless popcount term over the residual: score = <q, dequant(latent)> \
+scales). The latent codec is selectable via flags, same 64-byte budget: uniform INT4 \
+(single or per-group scales), an NF4 codebook, a mixed 8/4-bit layout, or TQ3 — a \
+port of the TurboQuant KV codec storing all 128 dims as 3-bit codes (48 bytes) plus \
+a separable per-dim 1-bit sign-correction plane (16 bytes). The attention score \
+fuses a continuous dot product over the dequantized latent with a branchless \
+popcount term over the residual: score = <q, dequant(latent)> \
 + lambda * (d_s - 2 * popcount(q_sign XOR B)). SIMD paths (AVX2/AVX-512/NEON) are \
-runtime-dispatched and proven bit-equivalent to a scalar reference.\n\n\
+runtime-dispatched and proven bit-equivalent to a scalar reference; NF4/mixed/TQ3 \
+tiles decode on the scalar path.\n\n\
 An elastic KV cache (CCOS Soft-Paging) bounds memory by paging HOT->WARM (drop the \
 32-byte residual) and evicting ->COLD by age. Use `slha.audit` for live invariants, \
 `slha.compress`/`slha.score` to exercise the kernel, and `slha.benchmark` for host \
@@ -247,7 +276,41 @@ throughput."
 
 fn tool_compress(args: &Json) -> Result<String, String> {
     let key = f32_dims(args, "key")?;
-    let (latent, scale) = quantize_latent(&key);
+    let codec = match args.get("codec") {
+        None => "int4",
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| "'codec' must be a string".to_string())?,
+    };
+    // Same codec -> (quantizer, FLAG_*) mapping as `LearnedModel::encode_with`
+    // and the `offline_validation --codec` example.
+    let (latent, scale, group_scales, flags) = match codec {
+        "int4" => {
+            let (l, s) = quantize_latent(&key);
+            (l, s, [255u8; N_GROUPS], FLAG_HOT)
+        }
+        "grouped" => {
+            let (l, s, gs) = quantize_latent_grouped(&key);
+            (l, s, gs, FLAG_HOT)
+        }
+        "nf4" => {
+            let (l, s, gs) = quantize_latent_nf4(&key);
+            (l, s, gs, FLAG_NF4)
+        }
+        "mixed" => {
+            let (l, s, gs) = quantize_latent_mixed(&key);
+            (l, s, gs, FLAG_MIXED)
+        }
+        "tq3" => {
+            let (l, s, gs) = quantize_latent_tq3(&key);
+            (l, s, gs, FLAG_TQ3)
+        }
+        other => {
+            return Err(format!(
+                "unknown codec '{other}': expected int4 | grouped | nf4 | mixed | tq3"
+            ))
+        }
+    };
     let preview: Vec<Json> = latent
         .iter()
         .take(8)
@@ -258,11 +321,17 @@ fn tool_compress(args: &Json) -> Result<String, String> {
         ("input_bytes_f32", Json::Num((DIMS * 4) as f64)),
         ("tile_bytes", Json::Num(128.0)),
         ("latent_bytes", Json::Num(latent.len() as f64)),
+        ("codec", Json::str(codec)),
+        ("flags", Json::Num(flags as f64)),
         (
             "compression_ratio_vs_fp32_key",
             Json::Num((DIMS * 4) as f64 / 128.0),
         ),
         ("scale", Json::Num(scale as f64)),
+        (
+            "group_scales",
+            Json::Arr(group_scales.iter().map(|&g| Json::Num(g as f64)).collect()),
+        ),
         ("latent_first_8_bytes", Json::Arr(preview)),
     ])
     .to_pretty())
@@ -478,6 +547,82 @@ mod tests {
         assert_eq!(
             j.get("compression_ratio_vs_fp32_key").unwrap().as_f64(),
             Some(4.0)
+        );
+    }
+
+    /// Call `slha.compress` on a fixed 128-dim key, with an optional codec.
+    fn compress_with(codec: Option<&str>) -> Json {
+        let key = Json::Arr(
+            (0..128)
+                .map(|i| Json::Num((i as f64 / 128.0) - 0.5))
+                .collect(),
+        );
+        let mut args = vec![("key", key)];
+        if let Some(c) = codec {
+            args.push(("codec", Json::str(c)));
+        }
+        let params = obj(vec![
+            ("name", Json::str("slha.compress")),
+            ("arguments", obj(args)),
+        ]);
+        call("tools/call", params, 7)
+    }
+
+    /// Parse the JSON text payload of a successful compress result.
+    fn compress_json(r: &Json) -> Json {
+        let res = r.get("result").unwrap();
+        assert_eq!(res.get("isError").unwrap().as_bool(), Some(false));
+        let text = res.get("content").unwrap().as_array().unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        Json::parse(text).unwrap()
+    }
+
+    #[test]
+    fn compress_default_codec_is_single_scale_int4() {
+        let j = compress_json(&compress_with(None));
+        assert_eq!(j.get("codec").unwrap().as_str(), Some("int4"));
+        assert_eq!(j.get("flags").unwrap().as_f64(), Some(FLAG_HOT as f64));
+        // Single-scale INT4: every group micro-scale is the identity (255).
+        let gs = j.get("group_scales").unwrap().as_array().unwrap();
+        assert_eq!(gs.len(), N_GROUPS);
+        assert!(gs.iter().all(|g| g.as_f64() == Some(255.0)));
+    }
+
+    #[test]
+    fn compress_codec_sets_matching_flags() {
+        for (codec, flag) in [
+            ("int4", FLAG_HOT),
+            ("grouped", FLAG_HOT),
+            ("nf4", FLAG_NF4),
+            ("mixed", FLAG_MIXED),
+            ("tq3", FLAG_TQ3),
+        ] {
+            let j = compress_json(&compress_with(Some(codec)));
+            assert_eq!(j.get("codec").unwrap().as_str(), Some(codec));
+            assert_eq!(
+                j.get("flags").unwrap().as_f64(),
+                Some(flag as f64),
+                "wrong flags for codec {codec}"
+            );
+            // Every codec spends the same budgets: 64-byte latent, 128-byte tile.
+            assert_eq!(j.get("latent_bytes").unwrap().as_f64(), Some(64.0));
+            assert_eq!(j.get("tile_bytes").unwrap().as_f64(), Some(128.0));
+            assert_eq!(
+                j.get("compression_ratio_vs_fp32_key").unwrap().as_f64(),
+                Some(4.0)
+            );
+        }
+    }
+
+    #[test]
+    fn compress_rejects_unknown_codec() {
+        let r = compress_with(Some("fp8"));
+        assert_eq!(
+            r.get("result").unwrap().get("isError").unwrap().as_bool(),
+            Some(true)
         );
     }
 

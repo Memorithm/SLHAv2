@@ -197,7 +197,9 @@ discards, and ties the layout to the cache line.
 GPTQ~\cite{gptq}, AWQ~\cite{awq}, and KIVI~\cite{kivi} quantize weights
 or KV entries to low bit-width. NF4 (from QLoRA~\cite{qlora}) uses a
 normal-float codebook. SLHA~v2 uses signed INT4 (with optional grouped
-micro-scaling and NF4) for the latent, but our ablation
+micro-scaling, an NF4 codebook, and TQ3, a port of the
+TurboQuant\footnote{\url{https://github.com/CHECKUPAUTO/TurboQuant}} KV
+codec) for the latent, but our ablation
 (\S\ref{sec:ablation}) shows quantization width is not the limiting
 factor here.
 
@@ -688,8 +690,12 @@ a real model.
 \subsection{Ablation: quantization is not the bottleneck}
 \label{sec:ablation}
 The latent can also be NF4 (normal-float codebook, same 4-bit budget,
-same 128-byte tile). We add an INT8 reference (coarse only, hypothetical
-192-byte tile) to isolate bit-width (Table~\ref{tab:ablation}).
+same 128-byte tile), or TQ3---a port of the TurboQuant KV codec into the
+same 64-byte latent: all 128 dims as 3-bit codes (48 bytes, symmetric
+grid with no zero level) plus a separable per-dim 1-bit sign correction
+(16 bytes, $\pm 0.25$ step). We add an INT8 reference (coarse only,
+hypothetical 192-byte tile) to isolate bit-width
+(Table~\ref{tab:ablation}).
 
 \begin{table}[t]
 \centering
@@ -703,13 +709,22 @@ Latent codec & \textsc{hot} Spearman & \textsc{warm} Spearman \\
 INT4 uniform (1 scale) & 0.879 & 0.603 \\
 INT4 grouped (MX)      & 0.884 & 0.609 \\
 NF4 grouped            & 0.885 & 0.610 \\
+TQ3 (3-bit $+$ 1-bit corr.) & 0.881 & 0.598 \\
 \textbf{INT8} (ref, $2\times$ bytes) & --- & \textbf{0.606} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 NF4 lowers reconstruction error (test-proven) but the end-to-end gain is
-null-to-marginal ($0.884 \to 0.885$). Crucially, INT8 does \emph{not}
+null-to-marginal ($0.884 \to 0.885$). TQ3 lands at the level of the
+4-bit codecs (expected: $3+1$ bits of information per dim, same
+$0.25$-step worst-case error) despite its zero-free grid costing
+$1.3$--$1.6\times$ the MSE of grouped INT4 on a Gaussian latent
+(test-bounded at $\le 2\times$); what it buys instead is separability:
+dropping the 16-byte correction plane degrades gracefully to a pure
+3-bit tile, a paging state finer than
+\textsc{hot}$\to$\textsc{warm} (not yet wired into the cache manager).
+Crucially, INT8 does \emph{not}
 beat INT4 on \textsc{warm} ($\approx 0.61$): doubling the bits does not
 lift the coarse ceiling. \textbf{The limiting factor is therefore the
 low-rank projection, not latent quantization.} This corrects an earlier

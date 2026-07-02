@@ -110,6 +110,8 @@ Pour maximiser la localité spatiale et temporelle, nous définissons une struct
 
 Par ailleurs, le **bloc latent INT4 occupe à lui seul exactement 64 octets**, soit **une** ligne de cache pleine pour 128 dimensions sémantiques : c'est ce sous-bloc — et non la tuile entière — qui sature l'unité arithmétique en un unique chargement de ligne. Lors d'un calcul d'attention, SciRust pré-charge les vecteurs de requêtes dans le cache L1, puis balaie les tuiles de contexte séquentiellement.
 
+Le même budget de 64 octets admet **quatre codecs latents** interchangeables, sélectionnés par les drapeaux de la tuile (`FLAG_NF4`, `FLAG_MIXED`, `FLAG_TQ3` ; sinon INT4 uniforme, à échelle simple ou par groupe) : INT4, NF4 (§7.8), mixte 8/4 bits (8 dims à 8 bits + 112 à 4 bits, queue lâchée), et **TQ3** — le port du codec KV de TurboQuant, 128 codes de 3 bits + un plan séparable de correction de signe 1 bit (§7.12, [`docs/TURBOQUANT.md`](docs/TURBOQUANT.md)). L'invariant tuile 128 o est préservé dans tous les cas ; NF4, mixte et TQ3 décodent par le chemin scalaire.
+
 > **État :** l'option « zéro gaspillage » est désormais **implémentée** dans le crate `scirust` (les 24 anciens octets de padding portent des métadonnées, test à l'appui). Reste ouverte une variante **SoA** (latent 64 o dans un flux, résidu + métadonnées dans un autre) si l'on veut ramener le balayage à **une seule** ligne de cache par tuile.
 
 ### 3.2 Calibration Dynamique du Facteur d'Échelle λ
@@ -264,7 +266,7 @@ Les limitations de la v1 sont **levées** dans le crate `scirust` (`cargo test` 
 - ✅ **Chemins SIMD : AVX2, AVX-512 (x86_64) + NEON (aarch64).** Dispatch runtime (AVX-512 > AVX2 > scalaire), chacun avec un test d'équivalence ≡ scalaire (AVX2 ×11,5, AVX-512 ×14,1, §7.4). NEON **vérifié par cross-compilation** (`aarch64-unknown-linux-gnu`) ; son équivalence runtime tourne sur matériel ARM.
 - ✅ **Outillage de durcissement** : tests randomisés **property / fuzz** (équivalence SIMD, finitude des scores, lois du softmax, bornes de déquantification), micro-benchs **criterion**, et **CI** (fmt + clippy `-D warnings` + tests + compilation des benches + cross-compile NEON).
 - ✅/◑ **Projection bas-rang apprise** : PCA (§7.3) **et** une projection *task-aware* entraînée par SGD (§7.7) qui bat nettement la PCA sous décalage Q/K (WARM 0,16 → 0,86). Reste l'entraînement **conjoint** avec un vrai modèle.
-- ✅ **Codecs latents INT4 (MX) et NF4** (même tuile 128 o). Ils réduisent l'erreur de reconstruction mais le gain end-to-end est marginal ; une **référence INT8 confirme que la quantification n'est pas le goulot** — c'est la projection bas-rang (§7.8).
+- ✅ **Codecs latents INT4 (MX), NF4, mixte 8/4 bits et TQ3 (port TurboQuant, §7.12)** (même tuile 128 o). Ils réduisent l'erreur de reconstruction mais le gain end-to-end est marginal ; une **référence INT8 confirme que la quantification n'est pas le goulot** — c'est la projection bas-rang (§7.8).
 - ✅ **Filtre de sécurité géométrique latent** (`scirust::safety`, `LatentSafetyGuard`). Classifieur ultra-léger (~200 cycles, zéro allocation) opérant **directement sur les vecteurs latents compressés** (`[u8; 64]`, INT4) avant décompression : trois signaux — déviation angulaire (cosinus vs référence), isolation orthogonale (classifieur linéaire optionnel), dérive glissante (moyenne du cosinus sur une fenêtre pleine) — pour bloquer injections/jailbreaks/dérives avant la génération du token. Module **additif**, n'altère ni la tuile ni les kernels SIMD ; fonctionne sur toutes architectures (cf. `docs/api.md`).
 - ✅ **Allocation alignée + politique NUMA + épinglage de thread** (`scirust::numa`). Deux niveaux : (1) `AlignedBuffer` — allocation heap alignée 128 o (ligne de cache), **portable, zéro dépendance**, disponible par défaut sur toutes cibles ; (2) feature optionnelle **`numa`** (Linux + `libc` en dépendance optionnelle — la configuration par défaut reste **sans dépendance externe**) : `NumaBuffer` (région `mmap` page-alignée + `mbind(MPOL_BIND)` vers le nœud local), `pin_current_thread_to_cpu`/`pin_current_thread_local` (`sched_setaffinity`), introspection CPU/nœud via sysfs. Repli gracieux hors Linux / sans la feature (`NumaError::Unavailable`). **Intégration first-touch** exposée sur l'arena KV-cache (`ElasticKvCache::pin_caller_to_local_numa`) : épingler le thread d'inférence à son CPU local avant le warm-up place les pages du `Vec` sur le bon nœud sans `mbind` (le `Vec` n'étant pas page-aligné). Sur Jetson Thor (mémoire unifiée, mono-NUMA), `numa_available()` rend `false` et l'épinglage reste utile (évite les migrations). CI : job dédié `numa-check` (check + clippy + test + doc + cross-check aarch64, tout avec `--features numa`). Phase 2 de la feuille de route d'optimisation matérielle (cf. `docs/api.md`).
 
@@ -527,6 +529,35 @@ direction, pas une domination. La graduation Soft-Paging **HOT2** (`b`-bit) →
 **HOT1** (MSB = sign 1-bit) → **WARM** est un masquage de bits des mêmes 32 o
 (O(1), invariant tuile préservé ; le kernel lit le MSB seul en HOT1 —
 intégration Phase 3). Voir `examples/multibit_residual.rs`.
+
+### 7.12 Codec latent TQ3 (port TurboQuant : 3 bits + correction de signe 1 bit)
+
+Le codec KV de [TurboQuant](https://github.com/CHECKUPAUTO/TurboQuant) (QJL)
+tient **exactement** dans le budget latent de 64 o de la tuile : 128 dims ×
+3 bits = 48 o de codes (grille symétrique à 8 niveaux `code − 3,5`, **sans
+niveau zéro**) + 128 × 1 bit = 16 o de signes de correction (le bit déplace le
+niveau décodé de ±0,25 pas) — implémenté sous `LatentCodec::Tq3` / `FLAG_TQ3`,
+avec les mêmes échelles par groupe que les autres codecs et un décodage
+**scalaire uniquement** (routé comme NF4/mixte). La rotation pré-quantification
+de TurboQuant (PolarQuant) n'est **pas** portée : le blanchiment de
+`LearnedModel` et la RHT opt-in (A2, §7.10) jouent déjà ce rôle sur le latent
+et le résidu respectivement.
+
+**Mesuré** (`offline_validation --codec tq3` et `measure_learned`, synthétique,
+graines fixes) : cosinus de la sortie d'attention HOT **0,9979–0,9999** — GO
+sur les quatre régimes, au niveau de l'INT4 groupé (0,9981–0,9999) ; Spearman
+end-to-end **0,881** vs 0,884 pour l'INT4 groupé. Attendu : 3 + 1 = 4 bits
+d'information par dimension, même erreur pire-cas de 0,25 pas. **Trade-off
+honnête** : sans niveau zéro, toute valeur proche de 0 paie ≥ 0,25 pas — sur
+latent gaussien la MSE vaut ≈ **1,3–1,6×** celle de l'INT4 groupé (testé,
+garde-fou ≤ 2×) ; cohérent avec le §7.8 (« la quantification n'est pas le
+goulot »), la différence end-to-end est dans le bruit. Ce que TQ3 achète en
+échange, qu'aucun codec à nibbles ne peut offrir : ses deux plans sont
+**séparables** — lâcher les 16 o de correction dégrade gracieusement vers une
+tuile 3 bits pure, un état de pagination CCOS *plus fin* que HOT→WARM
+(candidat : HOT → TQ3-sans-correction → WARM → COLD ; non branché dans `ccos`,
+suivi en roadmap). Étude complète, portage et bug amont trouvé :
+[`docs/TURBOQUANT.md`](docs/TURBOQUANT.md).
 
 **Conclusion partielle.** Le mécanisme est **mathématiquement correct** (tests, dont les équivalences scalaire/AVX2) et **directionnellement validé** : HOT ≥ WARM, Soft-Paging quasi sans perte à faible `rho`, SIMD ×13, **~2,5× de tokens/s vs bf16** (§7.5), **sortie d'attention à cosinus 0,95–0,997** (§7.6), **projection apprise > PCA** sous décalage Q/K (§7.7), et **λ calibrée** (forme `∝σ_E` validée, constante corrigée ~4,2× → `C_emp ≈ 0,33`, §7.9). Le §7.8 corrige une idée reçue : le plafond du *score coarse* tient à la **projection bas-rang**, non à la quantification. Leviers réels : **meilleure projection** et **résidu 1-bit** (correctement pondéré une fois `λ` calibrée) ; pistes restantes : `d_s` plus grand et entraînement conjoint avec un vrai modèle.
 
