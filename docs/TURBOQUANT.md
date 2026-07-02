@@ -67,9 +67,68 @@ le goulot » sur données synthétiques.
 
 **Ce que TQ3 apporte qu'aucun codec nibble ne peut offrir** : ses deux plans
 sont **séparables**. Lâcher les 16 o de correction dégrade gracieusement vers
-une tuile 3 bits pure — un état de pagination CCOS *plus fin* que HOT→WARM
-(candidat : HOT → TQ3-sans-correction → WARM → COLD). Non implémenté côté
-`ccos` ; suivi dans la roadmap.
+une tuile 3 bits pure — un barreau de pagination CCOS *plus fin* que HOT→WARM,
+**implémenté** : `FLAG_TQ3_NOCORR` + `ElasticKvCache::drop_correction`,
+échelle HOT 128 → HOT¬corr 112 → WARM 96 → WARM¬corr 80 → COLD 0 (ordre de
+dureté strictement croissant, déterminisme testé).
+
+## 3bis. Activations réelles (GPT-2 c6) — mesuré, NO-GO
+
+Le §3 ci-dessus est **synthétique**. Rejoué le 2026-07-02 sur le protocole
+« activations réelles » de [`FINDINGS.md`](../FINDINGS.md) §5 : GPT-2 small,
+couche 6 (hook `c_attn`, d=768 pleine largeur), corpus train/test **disjoints**
+de 1024 tokens chacun tirés de WikiText-2-raw-v1 (split *train* → `train.txt`,
+split *test* → `test.txt`), projection entraînée sur le train et scorée
+**tenue à l'écart** sur le test (`--weights`). Trois codecs, mêmes dumps,
+lignes HOT (WARM ≈ HOT sur ce dump, écarts < 0,001) :
+
+| protocole (HOT) | codec | cos↑ | relL2↓ | KL↓ | verdict |
+|---|---|---|---|---|---|
+| self-fit (optimiste) | INT4 groupé | 0,8056 | 0,6395 | 1,0431 | NO-GO ❌ |
+| self-fit (optimiste) | mixte 8/4 | 0,9859 | 0,1531 | 0,0492 | NO-GO ❌ (KL seul) |
+| self-fit (optimiste) | **TQ3** | 0,8347 | 0,6430 | 0,9053 | NO-GO ❌ |
+| held-out, PCA-clés | INT4 groupé | 0,7582 | 0,6672 | 1,1616 | NO-GO ❌ |
+| held-out, PCA-clés | mixte 8/4 | 0,9701 | 0,2102 | 0,1053 | NO-GO ❌ |
+| held-out, PCA-clés | **TQ3** | 0,7831 | 0,6542 | 1,0768 | NO-GO ❌ |
+| held-out, **JOINTE** (protocole §5) | INT4 groupé | 0,8835 | 0,4386 | 0,5804 | NO-GO ❌ |
+| held-out, **JOINTE** (protocole §5) | mixte 8/4 | **0,9846** | 0,1492 | 0,0553 | NO-GO ❌ (KL seul) |
+| held-out, **JOINTE** (protocole §5) | **TQ3** | **0,7908** | 0,6078 | 1,0956 | NO-GO ❌ |
+
+Seuils GO (HOT) : cos ≥ 0,98 **et** KL ≤ 0,03 (`GO_COSINE`, `GO_KL`).
+
+**Lecture honnête.** Le « TQ3 ≈ INT4 groupé » du §3 ne survit **pas** aux
+activations réelles : sur le spectre raide de GPT-2 (40 % de l'énergie dans une
+direction, 56× de dynamique dans un groupe de scaling — FINDINGS §5), la grille
+uniforme 8 niveaux sans zéro s'effondre comme l'INT4 uniforme — cos 0,78–0,83,
+KL ≈ 0,9–1,1, très loin des seuils GO et du codec mixte (0,9846 / 0,0553),
+construit précisément pour cette dynamique. Fait notable : la projection jointe
+relève l'INT4 groupé (0,758 → 0,884) mais laisse TQ3 quasi inchangé
+(0,783 → 0,791) — le goulot est la **grille**, pas le sous-espace ; ni la
+correction 1 bit (±0,25 pas) ni le blanchiment `1/s_k` ne couvrent la dynamique
+intra-groupe. Verdict : TQ3 est un **NO-GO mesuré comme codec HOT sur
+activations réelles** ; le codec mixte reste le choix pour les spectres réels,
+TQ3 garde son intérêt propre (plans séparables → rung de pagination, §3) sur
+les distributions plates où il est au niveau des codecs 4 bits.
+
+Reproduction (mêmes chiffres, graines fixes dans les exemples — 0x5107 pour
+l'entraînement, 0x5C0FF pour le self-fit ; le dump lui-même est déterministe,
+pas d'échantillonnage ; torch 2.12.1 CPU, transformers 5.12.1) :
+
+```bash
+# corpus : WikiText-2-raw-v1, split train → train.txt, split test → test.txt (disjoints)
+python scripts/dump_activations.py --model gpt2 --layer 6 --out DUMPS/train --file train.txt --max-tokens 1024
+python scripts/dump_activations.py --model gpt2 --layer 6 --out DUMPS/test  --file test.txt  --max-tokens 1024
+cargo run --release --example train_on_real_activations -- --dump DUMPS/train --joint --out p_joint.slhw
+for c in grouped mixed tq3; do
+  cargo run --release --example offline_validation -- --dump DUMPS/test --weights p_joint.slhw --codec $c
+done
+```
+
+Les chiffres absolus diffèrent légèrement du tableau de FINDINGS §5 (mixte
+joint 0,9846 ici vs 0,966 là-bas ; INT4 PCA-clés 0,758 vs 0,834) : corpus
+différent (WikiText-2 ici, corpus non archivé pour §5). La chaîne qualitative
+est identique — INT4 uniforme NO-GO, mixte la relève, la jointe aide l'INT4 —
+et la conclusion TQ3 ne dépend pas du corpus.
 
 ## 4. Bug amont trouvé pendant le portage
 
@@ -92,9 +151,12 @@ cargo run --release --example measure_learned
 ```rust
 use scirust::attention::slha_v2::LatentCodec;
 let tile = model.encode_with(&key, pos, /*warm=*/ false, LatentCodec::Tq3);
-let score = tile.compute_score(&q_coarse, &q_sign); // chemin scalaire (comme NF4/mixte)
+let score = tile.compute_score(&q_coarse, &q_sign); // SIMD dédié (AVX2/AVX-512/NEON)
 ```
 
-Limites actuelles : décodage **scalaire uniquement** (comme NF4 et mixte — le
-décodage SIMD 3 bits est un suivi) ; l'état de pagination « correction lâchée »
-n'est pas encore branché dans `ccos::ElasticKvCache`.
+Limites actuelles : **NO-GO mesuré comme codec HOT sur activations réelles**
+(§3bis — la grille uniforme sans zéro s'effondre sur les spectres raides ;
+préférer le codec mixte là-dessus). TQ3 reste pertinent sur distributions
+plates et comme démonstrateur du barreau de pagination à plans séparables
+(§3, `ccos`). Le décodage SIMD (AVX2/AVX-512/NEON) et l'état « correction
+lâchée » sont, eux, implémentés et testés.

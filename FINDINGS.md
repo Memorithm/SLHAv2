@@ -151,6 +151,20 @@ cargo run --release --example train_on_real_activations -- --dump /tmp/train --j
 cargo run --release --example offline_validation -- --dump /tmp/test --weights p.slhw --codec mixed
 ```
 
+**Post-scriptum (2026-07-02) — TQ3 sur le même protocole.** Le codec TQ3
+(portage TurboQuant, `docs/TURBOQUANT.md`), au niveau des codecs 4 bits sur
+synthétique, a été mesuré sur le même protocole held-out (GPT-2 couche 6,
+corpus disjoints de 1024 tokens — WikiText-2 cette fois, d'où de légers écarts
+absolus : mixte 0,985 / 0,055 ici vs 0,966 / 0,12 ci-dessus). Projection
+jointe tenue à l'écart : **TQ3 cos 0,791 / KL 1,10**, contre INT4 groupé
+0,884 / 0,58 et mixte **0,985 / 0,055** ; et la jointe, qui relève l'INT4
+groupé (0,758 → 0,884), laisse TQ3 quasi inchangé (0,783 → 0,791). Verdict :
+la grille uniforme 8 niveaux sans zéro s'effondre sur le spectre raide réel
+comme l'INT4 uniforme — **NO-GO comme codec HOT sur activations réelles** ; le
+mixte reste le codec des spectres réels, TQ3 garde son intérêt propre (plans
+séparables, pagination) sur distributions plates. Tableau complet (9 configs) :
+`docs/TURBOQUANT.md` §3bis.
+
 ## 6. Prochaines étapes (hors périmètre sandbox)
 
 1. **Entraîner conjointement** `W_down`/`W_up` avec un vrai modèle (le §7.7 en
