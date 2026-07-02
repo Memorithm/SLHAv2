@@ -1,8 +1,10 @@
 //! Integration tests for the CCOS elastic KV-cache manager (§4 Soft-Paging).
 
+use scirust::attention::slha_v2::{LatentCodec, TQ3_CORR_BYTES};
 use scirust::ccos::{
     ElasticKvCache, EvictionPolicy, PageOutPolicy, TileState, HOT_BYTES, WARM_BYTES,
 };
+use scirust::learned::{gen_keys, LearnedModel};
 use scirust::rng::Rng;
 use scirust::scenario::{build_tile, generate, Projection};
 
@@ -15,12 +17,14 @@ fn assert_invariants(cache: &ElasticKvCache, budget: usize) {
         "footprint {} exceeds budget {budget}",
         cache.live_bytes()
     );
-    // (2) Byte accounting is consistent with the HOT/WARM/COLD counts.
+    // (2) Byte accounting is consistent with the HOT/WARM/COLD counts and the
+    //     paged-out TQ3 correction planes.
     let (h, w, _c) = cache.counts();
     assert_eq!(
-        h * HOT_BYTES + w * WARM_BYTES,
+        h * HOT_BYTES + w * WARM_BYTES - cache.nocorr_count() * TQ3_CORR_BYTES,
         cache.live_bytes(),
-        "counts ({h} HOT, {w} WARM) inconsistent with live_bytes"
+        "counts ({h} HOT, {w} WARM, {} ¬corr) inconsistent with live_bytes",
+        cache.nocorr_count()
     );
 }
 
@@ -403,4 +407,102 @@ fn importance_eviction_with_no_sinks_is_pure_h2o() {
             "low-importance slot (pos {i}) should be evicted with sink_window=0"
         );
     }
+}
+
+// --- TQ3 finer paging rung (FLAG_TQ3_NOCORR) --------------------------------
+
+/// `n` TQ3-encoded tiles, all inserted HOT.
+fn tq3_cache(n: usize, budget: usize) -> ElasticKvCache {
+    let d = 256;
+    let keys = gen_keys(7, n, d, 16, 0.93, 0.02);
+    let model = LearnedModel::fit(&keys, d, 0xC0FFEE, false);
+    let mut cache = ElasticKvCache::with_budget(budget);
+    for (i, k) in keys.iter().enumerate() {
+        cache.insert(model.encode_with(k, i as u32, false, LatentCodec::Tq3));
+    }
+    cache
+}
+
+#[test]
+fn tq3_correction_rung_comes_before_paging() {
+    // Budget = exactly all-HOT-without-corrections: enforce must satisfy it
+    // purely by dropping correction planes — zero WARM, zero COLD.
+    let n = 32;
+    let budget = n * (HOT_BYTES - TQ3_CORR_BYTES); // 112·n
+    let mut cache = tq3_cache(n, budget);
+    assert_eq!(cache.live_bytes(), n * HOT_BYTES);
+    cache.enforce_budget();
+    assert_invariants(&cache, budget);
+    assert_eq!(cache.counts(), (n, 0, 0), "no tile paged or evicted");
+    assert_eq!(cache.nocorr_count(), n, "every correction plane dropped");
+    assert_eq!(cache.live_bytes(), budget);
+}
+
+#[test]
+fn tq3_single_drop_reclaims_exactly_one_plane() {
+    // One correction plane short of budget: exactly one tile degrades.
+    let n = 16;
+    let budget = n * HOT_BYTES - TQ3_CORR_BYTES;
+    let mut cache = tq3_cache(n, budget);
+    cache.enforce_budget();
+    assert_invariants(&cache, budget);
+    assert_eq!(cache.counts(), (n, 0, 0));
+    assert_eq!(cache.nocorr_count(), 1);
+}
+
+#[test]
+fn tq3_ladder_reaches_warm_after_corrections() {
+    // Budget below all-¬corr (112·n) forces phase 2: some tiles page to WARM
+    // (already ¬corr from phase 1 → 80 B each), the rest stay HOT¬corr (112 B).
+    let n = 32;
+    let budget = n * 96;
+    let mut cache = tq3_cache(n, budget);
+    cache.enforce_budget();
+    assert_invariants(&cache, budget);
+    let (h, w, c) = cache.counts();
+    assert_eq!(c, 0, "budget reachable without eviction");
+    assert_eq!(h + w, n);
+    assert!(w > 0, "some tiles must have paged to WARM");
+    assert_eq!(
+        cache.nocorr_count(),
+        n,
+        "phase 1 dropped every correction before paging"
+    );
+}
+
+#[test]
+fn non_tq3_tiles_skip_the_correction_rung() {
+    // Grouped-INT4 tiles: the correction rung is a no-op and behavior is
+    // exactly the pre-TQ3 two-phase ladder.
+    let proj = Projection::new(0xB0D);
+    let n = 16;
+    let budget = n * 112; // between all-HOT and all-WARM
+    let mut cache = ElasticKvCache::with_budget(budget);
+    let (_q, toks) = generate(3, n, 0.3);
+    for (i, t) in toks.iter().enumerate() {
+        cache.insert(build_tile(&proj, t, i as u32, false));
+    }
+    cache.enforce_budget();
+    assert_invariants(&cache, budget);
+    assert_eq!(cache.nocorr_count(), 0, "no TQ3 tile, no correction drop");
+    let (h, w, _) = cache.counts();
+    assert!(w > 0 && h + w == n, "paging fell back to HOT->WARM");
+}
+
+#[test]
+fn tq3_ladder_is_deterministic() {
+    // Same tiles + same budget, twice: identical per-slot states and flags.
+    let n = 24;
+    let budget = n * 100;
+    let fingerprint = |cache: &ElasticKvCache| -> Vec<(TileState, u16)> {
+        (0..n)
+            .map(|s| (cache.state(s), cache.tile(s).flags))
+            .collect()
+    };
+    let mut a = tq3_cache(n, budget);
+    let mut b = tq3_cache(n, budget);
+    a.enforce_budget();
+    b.enforce_budget();
+    assert_eq!(a.live_bytes(), b.live_bytes());
+    assert_eq!(fingerprint(&a), fingerprint(&b));
 }

@@ -48,6 +48,12 @@ pub const FLAG_MIXED: u16 = 1 << 2;
 /// Latent uses the TurboQuant TQ3 layout: 3-bit codes ([`TQ3_CODE_BYTES`])
 /// plus a 1-bit sign-correction plane ([`TQ3_CORR_BYTES`]) — same 64 bytes.
 pub const FLAG_TQ3: u16 = 1 << 3;
+/// TQ3 elastic paging (CCOS): the 16-byte correction plane is considered
+/// freed; decode falls back to the bare 3-bit grid (worst-case error 0.5
+/// step instead of 0.25). Only meaningful with [`FLAG_TQ3`]. Sticky — the
+/// Soft-Paging ladder only degrades. Set by
+/// [`crate::ccos::ElasticKvCache::drop_correction`].
+pub const FLAG_TQ3_NOCORR: u16 = 1 << 4;
 
 // --- Mixed-precision latent layout (FLAG_MIXED) ------------------------------
 // Real transformer keys concentrate energy in a few directions (GPT-2 layer 6:
@@ -215,6 +221,13 @@ impl SciRustSlhaTile {
         self.flags & FLAG_TQ3 != 0
     }
 
+    /// True if the TQ3 correction plane has been paged out (see
+    /// [`FLAG_TQ3_NOCORR`]): decode uses the bare 3-bit grid.
+    #[inline]
+    pub fn is_tq3_nocorr(&self) -> bool {
+        self.flags & FLAG_TQ3_NOCORR != 0
+    }
+
     /// Effective dequant scale for dimension `d`: global scale × the dim's
     /// per-group micro-scale.
     #[inline]
@@ -266,6 +279,8 @@ impl SciRustSlhaTile {
     /// TQ3 layout: dim `d`'s 3-bit code is bits `[3d, 3d+3)` of the code
     /// plane; its correction sign is bit `d` of the correction plane. Decoded
     /// level = `(code − 3.5) ± TQ3_CORRECTION`, times the dim's group scale.
+    /// With [`FLAG_TQ3_NOCORR`] the correction plane is considered freed and
+    /// the bare grid level is returned.
     #[inline]
     fn dequant_at_tq3(&self, d: usize) -> f32 {
         let bit = 3 * d;
@@ -280,9 +295,12 @@ impl SciRustSlhaTile {
             0
         };
         let code = ((lo | hi) >> shift) & 0x7;
-        let corr = (self.latent_kv[TQ3_CODE_BYTES + (d >> 3)] >> (d & 7)) & 1;
-        let sign = if corr == 1 { 1.0 } else { -1.0 };
-        let level = (code as f32 - TQ3_HALF_RANGE) + sign * TQ3_CORRECTION;
+        let mut level = code as f32 - TQ3_HALF_RANGE;
+        if !self.is_tq3_nocorr() {
+            let corr = (self.latent_kv[TQ3_CODE_BYTES + (d >> 3)] >> (d & 7)) & 1;
+            let sign = if corr == 1 { 1.0 } else { -1.0 };
+            level += sign * TQ3_CORRECTION;
+        }
         level * self.group_scale(d)
     }
 
@@ -1096,6 +1114,40 @@ mod tests {
                 "seed {seed}: TQ3 err {e_tq3} way above INT4 err {e_int4}"
             );
         }
+    }
+
+    #[test]
+    fn tq3_nocorr_decodes_the_bare_grid() {
+        // With FLAG_TQ3_NOCORR the decoder must ignore the correction plane
+        // (even a zeroed one, which would otherwise bias every dim by
+        // −TQ3_CORRECTION): the error bound relaxes to half a step, and the
+        // corrected tile must reconstruct at least as well on aggregate.
+        let v = steep_latent(29);
+        let (packed, global, gs) = quantize_latent_tq3(&v);
+        let mut with_corr = tile_from(packed, global, gs);
+        with_corr.flags |= FLAG_TQ3;
+        let mut nocorr = with_corr;
+        nocorr.flags |= FLAG_TQ3_NOCORR;
+        // CCOS masks the plane when paging it out; emulate that too.
+        for b in nocorr.latent_kv[TQ3_CODE_BYTES..].iter_mut() {
+            *b = 0;
+        }
+        let (mut e_corr, mut e_bare) = (0.0f32, 0.0f32);
+        for d in 0..D_C {
+            let eff = global * (gs[d / GROUP_DIM] as f32 / 255.0);
+            let err = (nocorr.dequant_at(d) - v[d]).abs();
+            assert!(
+                err <= 0.5 * eff + 1e-5,
+                "dim {d}: bare-grid error {err} > half step {}",
+                0.5 * eff
+            );
+            e_corr += (with_corr.dequant_at(d) - v[d]).powi(2);
+            e_bare += (nocorr.dequant_at(d) - v[d]).powi(2);
+        }
+        assert!(
+            e_corr < e_bare,
+            "correction must help on aggregate: {e_corr} !< {e_bare}"
+        );
     }
 
     #[test]
