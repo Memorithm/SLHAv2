@@ -48,12 +48,20 @@ pub const FLAG_MIXED: u16 = 1 << 2;
 /// Latent uses the TurboQuant TQ3 layout: 3-bit codes ([`TQ3_CODE_BYTES`])
 /// plus a 1-bit sign-correction plane ([`TQ3_CORR_BYTES`]) — same 64 bytes.
 pub const FLAG_TQ3: u16 = 1 << 3;
-/// TQ3 elastic paging (CCOS): the 16-byte correction plane is considered
-/// freed; decode falls back to the bare 3-bit grid (worst-case error 0.5
-/// step instead of 0.25). Only meaningful with [`FLAG_TQ3`]. Sticky — the
-/// Soft-Paging ladder only degrades. Set by
+/// Separable-plane elastic paging (CCOS): the codec's 1-bit correction
+/// plane is considered freed; decode falls back to the bare 3-bit grid
+/// (worst-case error 0.5 step instead of 0.25 on the covered dims). Only
+/// meaningful with [`FLAG_TQ3`] (16-byte plane) or [`FLAG_MIX3`] (14-byte
+/// plane). Sticky — the Soft-Paging ladder only degrades. Set by
 /// [`crate::ccos::ElasticKvCache::drop_correction`].
 pub const FLAG_TQ3_NOCORR: u16 = 1 << 4;
+/// Latent uses the MIX3 synthesis layout: mixed-precision head (top
+/// [`MIXED_HI_DIMS`] dims at 8-bit) + TQ3 body ([`MIXED_LO_DIMS`] dims at
+/// 3-bit with a separable 1-bit correction plane) — same 64 bytes. Built
+/// after the measured NO-GO of uniform grids on real activations: the
+/// 8-bit head covers the steep spectrum like [`FLAG_MIXED`], while the
+/// separable plane keeps the CCOS paging rung TQ3 introduced.
+pub const FLAG_MIX3: u16 = 1 << 5;
 
 // --- Mixed-precision latent layout (FLAG_MIXED) ------------------------------
 // Real transformer keys concentrate energy in a few directions (GPT-2 layer 6:
@@ -121,6 +129,26 @@ pub const TQ3_CORRECTION: f32 = 0.25;
 const _: () = assert!(TQ3_CODE_BYTES + TQ3_CORR_BYTES == LATENT_BYTES);
 const _: () = assert!(D_C.is_multiple_of(8)); // both planes are byte-aligned
 
+// --- MIX3 latent layout (FLAG_MIX3): mixed head × TQ3 body -------------------
+// The GPT-2 measurement (docs/TURBOQUANT.md §3bis) showed the bottleneck of
+// uniform grids on real activations is the missing 8-bit head, not the
+// subspace. MIX3 combines both worlds in the same 64 bytes: the mixed
+// codec's 8-bit head where the energy is, and a TQ3 body whose 1-bit
+// correction plane stays separable — so the codec keeps near-mixed quality
+// on steep spectra AND the CCOS correction-drop paging rung.
+/// Byte where the MIX3 3-bit code plane starts (after the 8-bit head).
+pub const MIX3_CODES_OFF: usize = MIXED_HI_DIMS; // 8
+/// Bytes of packed 3-bit codes for the [`MIXED_LO_DIMS`] body dims.
+pub const MIX3_CODE_BYTES: usize = MIXED_LO_DIMS * 3 / 8; // 42
+/// Byte where the MIX3 correction plane starts.
+pub const MIX3_CORR_OFF: usize = MIX3_CODES_OFF + MIX3_CODE_BYTES; // 50
+/// Bytes of the separable 1-bit correction plane (one bit per body dim).
+pub const MIX3_CORR_BYTES: usize = MIXED_LO_DIMS / 8; // 14
+
+// The MIX3 layout must spend exactly the 64-byte latent budget.
+const _: () = assert!(MIXED_HI_DIMS + MIX3_CODE_BYTES + MIX3_CORR_BYTES == LATENT_BYTES);
+const _: () = assert!(MIXED_LO_DIMS.is_multiple_of(8)); // both planes byte-aligned
+
 /// NF4 codebook: 16 levels at the quantiles of `N(0, 1)`, normalised to
 /// `[-1, 1]` (denser near 0, where most latent mass lies). Ascending order.
 pub const NF4_CODEBOOK: [f32; 16] = [
@@ -147,6 +175,11 @@ pub enum LatentCodec {
     /// as INT4 in the same 64 bytes; the correction plane can be paged out
     /// independently (see [`FLAG_TQ3`]).
     Tq3,
+    /// MIX3 synthesis: the mixed codec's 8-bit head (top [`MIXED_HI_DIMS`]
+    /// dims) + a TQ3 body ([`MIXED_LO_DIMS`] dims at 3-bit with a separable
+    /// correction plane), tail dropped. Near-mixed quality on steep real
+    /// spectra with the TQ3 paging rung (see [`FLAG_MIX3`]).
+    Mix3,
 }
 
 /// A single SLHA v2 context tile.
@@ -228,6 +261,25 @@ impl SciRustSlhaTile {
         self.flags & FLAG_TQ3_NOCORR != 0
     }
 
+    /// True if the latent uses the MIX3 (mixed head × TQ3 body) layout.
+    #[inline]
+    pub fn is_mix3(&self) -> bool {
+        self.flags & FLAG_MIX3 != 0
+    }
+
+    /// Size in bytes of this tile's separable correction plane (0 when the
+    /// codec has none). This is what the CCOS correction-drop rung reclaims.
+    #[inline]
+    pub fn separable_corr_bytes(&self) -> usize {
+        if self.is_tq3() {
+            TQ3_CORR_BYTES
+        } else if self.is_mix3() {
+            MIX3_CORR_BYTES
+        } else {
+            0
+        }
+    }
+
     /// Effective dequant scale for dimension `d`: global scale × the dim's
     /// per-group micro-scale.
     #[inline]
@@ -245,6 +297,9 @@ impl SciRustSlhaTile {
         }
         if self.is_tq3() {
             return self.dequant_at_tq3(d);
+        }
+        if self.is_mix3() {
+            return self.dequant_at_mix3(d);
         }
         let byte = self.latent_kv[d >> 1];
         let nib = (if d & 1 == 0 { byte & 0x0F } else { byte >> 4 }) as usize;
@@ -304,6 +359,45 @@ impl SciRustSlhaTile {
         level * self.group_scale(d)
     }
 
+    /// MIX3 layout: dims `0..MIXED_HI_DIMS` decode exactly like the mixed
+    /// head (signed bytes, `group_scales[0]`); dims
+    /// `MIXED_HI_DIMS..MIXED_DIMS` decode like a TQ3 body — 3-bit code at
+    /// bits `[3·ld, 3·ld+3)` of the plane starting at [`MIX3_CODES_OFF`],
+    /// correction bit `ld` of the plane at [`MIX3_CORR_OFF`] (skipped with
+    /// [`FLAG_TQ3_NOCORR`]) — scaled by `group_scales[1..]`; the dropped
+    /// tail decodes to 0.
+    #[inline]
+    fn dequant_at_mix3(&self, d: usize) -> f32 {
+        if d < MIXED_HI_DIMS {
+            let level = self.latent_kv[d] as i32 - 128;
+            return level as f32 * (self.scale * self.group_scales[0] as f32 / 255.0);
+        }
+        if d >= MIXED_DIMS {
+            return 0.0;
+        }
+        let ld = d - MIXED_HI_DIMS;
+        let bit = 3 * ld;
+        let byte = MIX3_CODES_OFF + (bit >> 3);
+        let shift = bit & 7;
+        // A 3-bit field spans at most two bytes; the last code (ld = 111)
+        // ends exactly on the plane boundary, so guard the second read.
+        let lo = u16::from(self.latent_kv[byte]);
+        let hi = if byte + 1 < MIX3_CORR_OFF {
+            u16::from(self.latent_kv[byte + 1]) << 8
+        } else {
+            0
+        };
+        let code = ((lo | hi) >> shift) & 0x7;
+        let mut level = code as f32 - TQ3_HALF_RANGE;
+        if !self.is_tq3_nocorr() {
+            let corr = (self.latent_kv[MIX3_CORR_OFF + (ld >> 3)] >> (ld & 7)) & 1;
+            let sign = if corr == 1 { 1.0 } else { -1.0 };
+            level += sign * TQ3_CORRECTION;
+        }
+        let g = 1 + ld / GROUP_DIM;
+        level * (self.scale * self.group_scales[g] as f32 / 255.0)
+    }
+
     /// Materialise the full dequantised latent vector (mostly for tests).
     pub fn dequant_latent(&self) -> [f32; D_C] {
         let mut out = [0.0f32; D_C];
@@ -324,11 +418,12 @@ impl SciRustSlhaTile {
     #[inline]
     pub fn compute_score(&self, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
         // The SIMD paths decode the uniform-INT4 nibble layout and the TQ3
-        // (3-bit code + 1-bit correction) layout; NF4 and mixed-precision
-        // tiles use the scalar path (SIMD decode of those is a follow-up).
+        // (3-bit code + 1-bit correction) layout; NF4, mixed-precision and
+        // MIX3 tiles use the scalar path (SIMD decode of those is a
+        // follow-up).
         #[cfg(target_arch = "x86_64")]
         {
-            if !self.is_nf4() && !self.is_mixed() {
+            if !self.is_nf4() && !self.is_mixed() && !self.is_mix3() {
                 if self.is_tq3() {
                     if std::is_x86_feature_detected!("avx512f") {
                         // SAFETY: guarded by runtime feature detection.
@@ -353,7 +448,7 @@ impl SciRustSlhaTile {
         #[cfg(target_arch = "aarch64")]
         {
             // NEON is baseline on aarch64 — no runtime detection needed.
-            if !self.is_nf4() && !self.is_mixed() {
+            if !self.is_nf4() && !self.is_mixed() && !self.is_mix3() {
                 if self.is_tq3() {
                     // SAFETY: NEON is always available on this target.
                     return unsafe { self.compute_score_neon_tq3(q_coarse, q_sign) };
@@ -1076,6 +1171,65 @@ pub fn quantize_latent_tq3(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8; N_G
     (out, global, gs)
 }
 
+/// MIX3 quantisation (see [`FLAG_MIX3`]): the top [`MIXED_HI_DIMS`] dims as
+/// signed bytes (zero-point 128, step `max|·|/127`, scale byte `gs[0]`) —
+/// exactly the mixed codec's head — then [`MIXED_LO_DIMS`] dims on the TQ3
+/// grid (3-bit codes at [`MIX3_CODES_OFF`] + separable 1-bit correction
+/// plane at [`MIX3_CORR_OFF`], per-group scales `gs[1..]`, step `max|·|/3.5`),
+/// remaining tail **dropped**. Returns `(bytes, global, gs)`.
+pub fn quantize_latent_mix3(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8; N_GROUPS]) {
+    // Per-section quantisation steps (head like mixed, body like TQ3).
+    let mut steps = [0.0f32; N_GROUPS];
+    let hi_max = v[..MIXED_HI_DIMS]
+        .iter()
+        .fold(0.0f32, |m, &x| m.max(x.abs()));
+    steps[0] = hi_max / 127.0;
+    for g in 0..MIXED_LO_GROUPS {
+        let base = MIXED_HI_DIMS + g * GROUP_DIM;
+        let mut mx = 0.0f32;
+        for d in base..base + GROUP_DIM {
+            mx = mx.max(v[d].abs());
+        }
+        steps[1 + g] = mx / TQ3_HALF_RANGE;
+    }
+    let global = steps.iter().copied().fold(0.0f32, f32::max);
+    let global = if global > 0.0 { global } else { 1.0 };
+
+    let mut gs = [0u8; N_GROUPS];
+    for g in 0..N_GROUPS {
+        gs[g] = (steps[g] / global * 255.0).round().clamp(1.0, 255.0) as u8;
+    }
+
+    let mut out = [0u8; LATENT_BYTES];
+    // 8-bit head: one signed byte per dim, zero-point 128.
+    let eff_hi = global * (gs[0] as f32 / 255.0);
+    for d in 0..MIXED_HI_DIMS {
+        let q = (v[d] / eff_hi).round() as i32;
+        out[d] = (q.clamp(-128, 127) + 128) as u8;
+    }
+    // TQ3 body: 3-bit codes + correction signs, grouped like the mixed body.
+    for ld in 0..MIXED_LO_DIMS {
+        let d = MIXED_HI_DIMS + ld;
+        let eff = global * (gs[1 + ld / GROUP_DIM] as f32 / 255.0);
+        let t = v[d] / eff; // value in grid-step units, within ±3.5
+        let code = ((t + TQ3_HALF_RANGE).round() as i32).clamp(0, 7) as u8;
+        let bit = 3 * ld;
+        let byte = MIX3_CODES_OFF + (bit >> 3);
+        let shift = bit & 7;
+        out[byte] |= code << shift;
+        if shift > 5 {
+            out[byte + 1] |= code >> (8 - shift);
+        }
+        // Correction sign: 1 ⇒ the true value sits above the decoded level.
+        let level = f32::from(code) - TQ3_HALF_RANGE;
+        if t - level > 0.0 {
+            out[MIX3_CORR_OFF + (ld >> 3)] |= 1 << (ld & 7);
+        }
+    }
+    // Tail dims MIXED_DIMS..D_C are dropped (decode to 0).
+    (out, global, gs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1458,6 +1612,150 @@ mod tests {
             push(&steep_latent(300 + seed), [!0, 0, !0, 0], seed as usize);
         }
         (q, q_sign, tiles)
+    }
+
+    #[test]
+    fn mix3_dequant_roundtrips_and_drops_tail() {
+        let v = steep_latent(41);
+        let (packed, global, gs) = quantize_latent_mix3(&v);
+        let mut tile = tile_from(packed, global, gs);
+        tile.flags |= FLAG_MIX3;
+        let dq = tile.dequant_latent();
+        // 8-bit head: error within one 8-bit step (identical to mixed).
+        let eff_hi = global * (gs[0] as f32 / 255.0);
+        for d in 0..MIXED_HI_DIMS {
+            assert!(
+                (dq[d] - v[d]).abs() <= eff_hi + 1e-6,
+                "hi dim {d}: |{} - {}| > step {eff_hi}",
+                dq[d],
+                v[d]
+            );
+        }
+        // TQ3 body: within one grid step of its group (same convention as
+        // the grouped/TQ3 tests; the corrected bound is quarter-step when
+        // gs rounding is exact).
+        for d in MIXED_HI_DIMS..MIXED_DIMS {
+            let g = 1 + (d - MIXED_HI_DIMS) / GROUP_DIM;
+            let eff = global * (gs[g] as f32 / 255.0);
+            assert!(
+                (dq[d] - v[d]).abs() <= eff + 1e-6,
+                "lo dim {d}: |{} - {}| > step {eff}",
+                dq[d],
+                v[d]
+            );
+        }
+        // Dropped tail decodes to exactly 0.
+        for d in MIXED_DIMS..D_C {
+            assert_eq!(dq[d], 0.0, "tail dim {d} must decode to 0");
+        }
+    }
+
+    #[test]
+    fn mix3_stays_in_the_mixed_error_class_and_beats_uniform() {
+        // The whole point of the synthesis: on the steep spectrum the codec
+        // was built for, MIX3 must (a) clearly beat uniform INT4 (the 8-bit
+        // head does the work, like mixed), and (b) stay in the mixed codec's
+        // error class — its body spends the same 4 bits/dim (3-bit grid +
+        // 1-bit correction), paying only the zero-free-grid penalty.
+        let sq_err = |t: &SciRustSlhaTile, v: &[f32; D_C]| -> f32 {
+            let dq = t.dequant_latent();
+            (0..D_C).map(|d| (dq[d] - v[d]).powi(2)).sum()
+        };
+        for seed in 0..8u64 {
+            let v = steep_latent(300 + seed);
+            let (p0, s0, g0) = quantize_latent_grouped(&v);
+            let e_uniform = sq_err(&tile_from(p0, s0, g0), &v);
+            let (p1, s1, g1) = quantize_latent_mixed(&v);
+            let mut mixed = tile_from(p1, s1, g1);
+            mixed.flags |= FLAG_MIXED;
+            let e_mixed = sq_err(&mixed, &v);
+            let (p2, s2, g2) = quantize_latent_mix3(&v);
+            let mut mix3 = tile_from(p2, s2, g2);
+            mix3.flags |= FLAG_MIX3;
+            let e_mix3 = sq_err(&mix3, &v);
+            assert!(
+                e_mix3 < e_uniform,
+                "seed {seed}: MIX3 err {e_mix3} not < uniform {e_uniform}"
+            );
+            assert!(
+                e_mix3 <= e_mixed * 2.0,
+                "seed {seed}: MIX3 err {e_mix3} way above mixed {e_mixed}"
+            );
+        }
+    }
+
+    #[test]
+    fn mix3_nocorr_decodes_the_bare_grid() {
+        // With FLAG_TQ3_NOCORR the body decodes without correction (head
+        // untouched): body error relaxes to half a step, and the corrected
+        // tile must reconstruct at least as well on aggregate.
+        let v = steep_latent(43);
+        let (packed, global, gs) = quantize_latent_mix3(&v);
+        let mut with_corr = tile_from(packed, global, gs);
+        with_corr.flags |= FLAG_MIX3;
+        let mut nocorr = with_corr;
+        nocorr.flags |= FLAG_TQ3_NOCORR;
+        for b in nocorr.latent_kv[MIX3_CORR_OFF..].iter_mut() {
+            *b = 0;
+        }
+        let (mut e_corr, mut e_bare) = (0.0f32, 0.0f32);
+        for d in MIXED_HI_DIMS..MIXED_DIMS {
+            let g = 1 + (d - MIXED_HI_DIMS) / GROUP_DIM;
+            let eff = global * (gs[g] as f32 / 255.0);
+            let err = (nocorr.dequant_at(d) - v[d]).abs();
+            assert!(
+                err <= 0.5 * eff + 1e-5,
+                "dim {d}: bare-grid error {err} > half step {}",
+                0.5 * eff
+            );
+            e_corr += (with_corr.dequant_at(d) - v[d]).powi(2);
+            e_bare += (nocorr.dequant_at(d) - v[d]).powi(2);
+        }
+        // Head decode identical with and without the flag.
+        for d in 0..MIXED_HI_DIMS {
+            assert_eq!(
+                with_corr.dequant_at(d).to_bits(),
+                nocorr.dequant_at(d).to_bits()
+            );
+        }
+        assert!(
+            e_corr < e_bare,
+            "correction must help on aggregate: {e_corr} !< {e_bare}"
+        );
+    }
+
+    #[test]
+    fn mix3_tiles_route_to_the_scalar_path() {
+        // No SIMD MIX3 decode yet: the dispatcher must return exactly the
+        // scalar result for MIX3 tiles (HOT and WARM, corr and nocorr).
+        let v = steep_latent(47);
+        let (packed, global, gs) = quantize_latent_mix3(&v);
+        let mut rng = crate::rng::Rng::new(53);
+        let mut q = [0.0f32; D_C];
+        rng.fill_gaussian(&mut q);
+        let q_sign = [
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ];
+        for warm in [false, true] {
+            for nocorr in [false, true] {
+                let mut tile = tile_from(packed, global, gs);
+                tile.dynamic_lambda = 0.37;
+                tile.residual_bitmap = [!0, 0, !0, 0];
+                tile.flags |= FLAG_MIX3
+                    | if warm { FLAG_WARM } else { 0 }
+                    | if nocorr { FLAG_TQ3_NOCORR } else { 0 };
+                let via_dispatch = tile.compute_score(&q, &q_sign);
+                let via_scalar = tile.compute_score_scalar(&q, &q_sign);
+                assert_eq!(
+                    via_dispatch.to_bits(),
+                    via_scalar.to_bits(),
+                    "dispatcher did not use the scalar path (warm={warm}, nocorr={nocorr})"
+                );
+            }
+        }
     }
 
     #[test]

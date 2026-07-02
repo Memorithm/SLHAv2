@@ -18,6 +18,16 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   `LICENSING.md` (le passé MIT/Apache du dépôt restait non documenté là).
 
 ### Added
+- **Codec `LatentCodec::Mix3` / `FLAG_MIX3` — la synthèse post-NO-GO** :
+  tête 8-bit du codec mixte (8 dims) + corps TQ3 (112 dims à 3 bits, plan de
+  correction séparable de 14 o), queue lâchée — 64 o pile. **Mesuré au
+  niveau du mixte sur activations GPT-2 réelles** (held-out jointe :
+  cos 0,9835 vs 0,9846, KL 0,0599 vs 0,0553) là où TQ3 pur était NO-GO
+  (0,79), tout en conservant le barreau de pagination CCOS à plan séparable
+  (échelle 128 → 114 → 96 → 82 → 0). Barreau CCOS généralisé aux deux codecs
+  (`separable_corr_bytes`, `reclaimed_correction_bytes`) ; exposé dans
+  `offline_validation --codec mix3` et `measure_learned` ; décodage scalaire
+  (SIMD MIX3 en suivi). Voir `docs/TURBOQUANT.md` §3ter.
 - **Positionnement CCOS et périmètre commercial documentés** : SLHAv2 et
   [TurboQuant](https://github.com/CHECKUPAUTO/TurboQuant) sont des modules
   compagnons de **CCOS**, et la licence commerciale est offerte pour les

@@ -88,6 +88,7 @@ fn main() {
         ("INT4 groupé", LatentCodec::Int4Grouped),
         ("NF4 groupé", LatentCodec::Nf4),
         ("TQ3 TurboQuant", LatentCodec::Tq3),
+        ("MIX3 tête+corps", LatentCodec::Mix3),
     ] {
         let (h_sp, h_tk, w_sp, _w_tk) = evaluate(&model, 0.93, codec);
         println!("    {label:<12} -> HOT Spearman {h_sp:.3} (top16 {h_tk:.3})   WARM {w_sp:.3}");

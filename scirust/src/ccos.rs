@@ -7,23 +7,25 @@
 //! - **COLD** — evicted from the active set; its slot is recycled on the next
 //!   `insert` (no I/O here; a real CCOS would snapshot it to the EventLog).
 //!
-//! **TQ3 tiles get one extra, finer rung** (orthogonal to the state): their
-//! 16-byte correction plane can be paged out first ([`FLAG_TQ3_NOCORR`],
-//! sticky), degrading the latent from quarter-step to half-step error while
-//! keeping the residual. Ladder: HOT 128 → HOT¬corr 112 → WARM 96 →
-//! WARM¬corr 80 → COLD 0. No nibble codec can offer this rung.
+//! **Separable-plane codecs (TQ3, MIX3) get one extra, finer rung**
+//! (orthogonal to the state): their 1-bit correction plane (16 B for TQ3,
+//! 14 B for MIX3) can be paged out first ([`FLAG_TQ3_NOCORR`], sticky),
+//! degrading the covered dims from quarter-step to half-step error while
+//! keeping the residual. TQ3 ladder: HOT 128 → HOT¬corr 112 → WARM 96 →
+//! WARM¬corr 80 → COLD 0 (MIX3: 128 → 114 → 96 → 82 → 0). No nibble codec
+//! can offer this rung.
 //!
 //! `enforce_budget()` keeps the **logical** footprint under a byte budget by
 //! dropping TQ3 correction planes, then paging HOT→WARM (per
 //! [`PageOutPolicy`]) and, if needed, evicting →COLD.
 //!
 //! Note: tiles physically remain 128 B in the arena `Vec`; `live_bytes()` is the
-//! *elastic* accounting (HOT 128 / WARM 96 / COLD 0, minus 16 for a paged-out
-//! TQ3 correction plane) — i.e. what a packed store would occupy. Masking is
-//! O(1) (zero a few bytes + flip a flag), no allocation.
+//! *elastic* accounting (HOT 128 / WARM 96 / COLD 0, minus the codec's
+//! separable-plane bytes when paged out) — i.e. what a packed store would
+//! occupy. Masking is O(1) (zero a few bytes + flip a flag), no allocation.
 
 use crate::attention::slha_v2::{
-    SciRustSlhaTile, D_C, FLAG_TQ3_NOCORR, FLAG_WARM, LATENT_BYTES, RESIDUAL_WORDS, TQ3_CORR_BYTES,
+    SciRustSlhaTile, D_C, FLAG_TQ3_NOCORR, FLAG_WARM, LATENT_BYTES, RESIDUAL_WORDS,
 };
 
 /// Logical footprint of a full (HOT) tile.
@@ -253,16 +255,20 @@ impl ElasticKvCache {
         }
     }
 
-    /// TQ3-only finer rung: mask/free the 16-byte correction plane (zero it,
-    /// set [`FLAG_TQ3_NOCORR`]) — the decoder falls back to the bare 3-bit
-    /// grid. Sticky (the ladder only degrades), orthogonal to HOT/WARM, no-op
-    /// on non-TQ3 or COLD slots. Returns `true` if bytes were reclaimed.
+    /// Separable-plane finer rung (TQ3 and MIX3): mask/free the codec's
+    /// 1-bit correction plane (zero it, set [`FLAG_TQ3_NOCORR`]) — the
+    /// decoder falls back to the bare 3-bit grid on the covered dims. Sticky
+    /// (the ladder only degrades), orthogonal to HOT/WARM, no-op on codecs
+    /// without a separable plane or on COLD slots. Returns `true` if bytes
+    /// were reclaimed.
     pub fn drop_correction(&mut self, slot: usize) -> bool {
         let t = &mut self.tiles[slot];
-        if self.state[slot] == TileState::Cold || !t.is_tq3() || t.is_tq3_nocorr() {
+        let n = t.separable_corr_bytes();
+        if self.state[slot] == TileState::Cold || n == 0 || t.is_tq3_nocorr() {
             return false;
         }
-        t.latent_kv[LATENT_BYTES - TQ3_CORR_BYTES..].fill(0);
+        // Both layouts put the plane at the end of the 64-byte latent.
+        t.latent_kv[LATENT_BYTES - n..].fill(0);
         t.flags |= FLAG_TQ3_NOCORR;
         true
     }
@@ -276,7 +282,7 @@ impl ElasticKvCache {
     }
 
     /// Elastic logical footprint: Σ over live slots (HOT 128, WARM 96, COLD 0;
-    /// minus [`TQ3_CORR_BYTES`] where the TQ3 correction plane is paged out).
+    /// minus the codec's separable-plane bytes where it is paged out).
     pub fn live_bytes(&self) -> usize {
         self.state
             .iter()
@@ -287,18 +293,32 @@ impl ElasticKvCache {
                     TileState::Warm => WARM_BYTES,
                     TileState::Cold => return 0,
                 };
-                base - if t.is_tq3_nocorr() { TQ3_CORR_BYTES } else { 0 }
+                base - if t.is_tq3_nocorr() {
+                    t.separable_corr_bytes()
+                } else {
+                    0
+                }
             })
             .sum()
     }
 
-    /// Number of live slots whose TQ3 correction plane is paged out.
+    /// Number of live slots whose separable correction plane is paged out.
     pub fn nocorr_count(&self) -> usize {
         self.state
             .iter()
             .zip(&self.tiles)
             .filter(|(s, t)| **s != TileState::Cold && t.is_tq3_nocorr())
             .count()
+    }
+
+    /// Total bytes reclaimed by paged-out correction planes on live slots.
+    pub fn reclaimed_correction_bytes(&self) -> usize {
+        self.state
+            .iter()
+            .zip(&self.tiles)
+            .filter(|(s, t)| **s != TileState::Cold && t.is_tq3_nocorr())
+            .map(|(_, t)| t.separable_corr_bytes())
+            .sum()
     }
 
     /// `(hot, warm, cold)` slot counts.
