@@ -4,6 +4,19 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 [SemVer](https://semver.org/). Ce fichier décrit l'état **réel** du code.
 
 ## [Unreleased]
+### Fixed
+- **`LICENSE.md` n'était pas le vrai texte PolyForm NC 1.0.0** : une
+  paraphrase à 11 sections (sur 15) — sans « Noncommercial Purposes »,
+  « Personal Uses », « Noncommercial Organizations » ni « Definitions »
+  (le terme *permitted purpose* n'y était donc jamais défini), et avec une
+  clause « Violations » réécrite **plus dure** que l'originale (résiliation
+  immédiate au lieu du délai de mise en conformité de 32 jours). Remplacé
+  par le texte canonique (polyformproject.org), Required Notice conservé.
+  Formulations resserrées : l'exclusivité CCOS porte sur l'offre
+  **commerciale** (l'usage non-commercial reste du PolyForm NC standard,
+  sans restriction d'environnement) ; section « Prior versions » ajoutée à
+  `LICENSING.md` (le passé MIT/Apache du dépôt restait non documenté là).
+
 ### Added
 - **Positionnement CCOS et périmètre commercial documentés** : SLHAv2 et
   [TurboQuant](https://github.com/CHECKUPAUTO/TurboQuant) sont des modules
