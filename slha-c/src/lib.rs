@@ -150,9 +150,10 @@ pub unsafe extern "C" fn slha_model_dim(model: *const SlhaModel) -> usize {
 
 /// Encode a `d`-dimensional key vector into a 128-byte tile.
 ///
-/// `codec` selects the latent quantiser (see [`codec_from_int`]). The tile is
-/// written to `*out_tile`. Returns 0 on success; -1 null argument, -2 panic,
-/// -3 dimension mismatch (`d` != model dim), -4 unknown codec.
+/// `codec` selects the latent quantiser: 0=int4-single, 1=int4-grouped,
+/// 2=nf4, 3=mixed, 4=tq3, 5=mix3. The tile is written to `*out_tile`.
+/// Returns 0 on success; -1 null argument, -2 panic, -3 dimension mismatch
+/// (`d` != model dim), -4 unknown codec.
 ///
 /// # Safety
 /// `model` is a valid handle; `key` points to `d` f32s; `out_tile` points to
