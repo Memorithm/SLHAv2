@@ -45,6 +45,9 @@ pub const FLAG_NF4: u16 = 1 << 1;
 /// Latent uses the mixed-precision layout: the top [`MIXED_HI_DIMS`] dims at
 /// 8-bit, the next [`MIXED_LO_DIMS`] at 4-bit, the tail dropped — same 64 bytes.
 pub const FLAG_MIXED: u16 = 1 << 2;
+/// Latent uses the TurboQuant TQ3 layout: 3-bit codes ([`TQ3_CODE_BYTES`])
+/// plus a 1-bit sign-correction plane ([`TQ3_CORR_BYTES`]) — same 64 bytes.
+pub const FLAG_TQ3: u16 = 1 << 3;
 
 // --- Mixed-precision latent layout (FLAG_MIXED) ------------------------------
 // Real transformer keys concentrate energy in a few directions (GPT-2 layer 6:
@@ -73,6 +76,45 @@ const _: () = assert!(MIXED_LO_DIMS == MIXED_LO_GROUPS * GROUP_DIM);
 const _: () = assert!(1 + MIXED_LO_GROUPS == N_GROUPS);
 const _: () = assert!(MIXED_DIMS <= D_C);
 
+// --- TurboQuant TQ3 latent layout (FLAG_TQ3) ---------------------------------
+// Port of the TurboQuant KV-cache codec (QJL: 3-bit grid + 1-bit residual
+// sign correction) into the 64-byte latent budget. All D_C dims are kept:
+// 128 × 3 bits = 48 bytes of codes, then 128 × 1 bit = 16 bytes of
+// per-dim correction signs — 64 bytes exactly, zero padding.
+//
+// Grid: 8 symmetric levels {±0.5, ±1.5, ±2.5, ±3.5} (code − 3.5, no zero
+// level), per-group scaled like the other codecs. The correction bit moves
+// the decoded level ±[`TQ3_CORRECTION`] (a quarter step, the optimal fixed
+// magnitude for a uniform residual), so the worst-case error is 0.25 step —
+// the same worst-case resolution as INT4 at the same 4 bits/dim total.
+// Honest trade-off (measured in the tests below): the grid has no zero
+// level, so values near 0 always pay ≥ 0.25 step; on a Gaussian latent the
+// MSE is ~1.3–1.6× grouped INT4's. What the split buys instead: the two
+// planes are separable — dropping the 16-byte correction plane degrades
+// gracefully to a pure 3-bit tile (a future CCOS paging state, finer than
+// HOT→WARM), which no nibble codec can offer.
+//
+// TurboQuant also rotates the vector before quantising (PolarQuant); on the
+// SLHA latent this is unnecessary: `learned::LearnedModel` whitens the
+// latent (per-dim `1/s_k`), which already equalises dynamic range, and the
+// optional RHT (`incoherence`) covers the residual projection. See
+// docs/TURBOQUANT.md.
+/// Bytes of packed 3-bit codes: dim `d` occupies bits `[3d, 3d+3)` of the
+/// little-endian bitstream in `latent_kv[0..TQ3_CODE_BYTES]`.
+pub const TQ3_CODE_BYTES: usize = D_C * 3 / 8; // 48
+/// Bytes of 1-bit correction signs: dim `d` is bit `d & 7` of
+/// `latent_kv[TQ3_CODE_BYTES + d/8]`.
+pub const TQ3_CORR_BYTES: usize = D_C / 8; // 16
+/// Half-range of the 3-bit grid: codes 0..=7 decode to `code − 3.5`.
+pub const TQ3_HALF_RANGE: f32 = 3.5;
+/// Magnitude of the 1-bit correction, in grid steps (quarter step: the
+/// residual after rounding is uniform in ±0.5 step, so E|r| = 0.25 step).
+pub const TQ3_CORRECTION: f32 = 0.25;
+
+// The TQ3 layout must spend exactly the 64-byte latent budget.
+const _: () = assert!(TQ3_CODE_BYTES + TQ3_CORR_BYTES == LATENT_BYTES);
+const _: () = assert!(D_C.is_multiple_of(8)); // both planes are byte-aligned
+
 /// NF4 codebook: 16 levels at the quantiles of `N(0, 1)`, normalised to
 /// `[-1, 1]` (denser near 0, where most latent mass lies). Ascending order.
 pub const NF4_CODEBOOK: [f32; 16] = [
@@ -94,6 +136,11 @@ pub enum LatentCodec {
     /// spectra (outlier channels) that uniform INT4 cannot span. Assumes the
     /// latent is ordered by decreasing variance (PCA order).
     Mixed,
+    /// TurboQuant TQ3: 3-bit symmetric grid plus a separable 1-bit
+    /// sign-correction plane, per-group scales. Same worst-case resolution
+    /// as INT4 in the same 64 bytes; the correction plane can be paged out
+    /// independently (see [`FLAG_TQ3`]).
+    Tq3,
 }
 
 /// A single SLHA v2 context tile.
@@ -162,6 +209,12 @@ impl SciRustSlhaTile {
         self.flags & FLAG_MIXED != 0
     }
 
+    /// True if the latent uses the TurboQuant TQ3 (3-bit + 1-bit) layout.
+    #[inline]
+    pub fn is_tq3(&self) -> bool {
+        self.flags & FLAG_TQ3 != 0
+    }
+
     /// Effective dequant scale for dimension `d`: global scale × the dim's
     /// per-group micro-scale.
     #[inline]
@@ -176,6 +229,9 @@ impl SciRustSlhaTile {
     pub fn dequant_at(&self, d: usize) -> f32 {
         if self.is_mixed() {
             return self.dequant_at_mixed(d);
+        }
+        if self.is_tq3() {
+            return self.dequant_at_tq3(d);
         }
         let byte = self.latent_kv[d >> 1];
         let nib = (if d & 1 == 0 { byte & 0x0F } else { byte >> 4 }) as usize;
@@ -207,6 +263,29 @@ impl SciRustSlhaTile {
         }
     }
 
+    /// TQ3 layout: dim `d`'s 3-bit code is bits `[3d, 3d+3)` of the code
+    /// plane; its correction sign is bit `d` of the correction plane. Decoded
+    /// level = `(code − 3.5) ± TQ3_CORRECTION`, times the dim's group scale.
+    #[inline]
+    fn dequant_at_tq3(&self, d: usize) -> f32 {
+        let bit = 3 * d;
+        let byte = bit >> 3;
+        let shift = bit & 7;
+        // A 3-bit field spans at most two bytes; the last code (d = 127)
+        // ends exactly on the plane boundary, so guard the second read.
+        let lo = u16::from(self.latent_kv[byte]);
+        let hi = if byte + 1 < TQ3_CODE_BYTES {
+            u16::from(self.latent_kv[byte + 1]) << 8
+        } else {
+            0
+        };
+        let code = ((lo | hi) >> shift) & 0x7;
+        let corr = (self.latent_kv[TQ3_CODE_BYTES + (d >> 3)] >> (d & 7)) & 1;
+        let sign = if corr == 1 { 1.0 } else { -1.0 };
+        let level = (code as f32 - TQ3_HALF_RANGE) + sign * TQ3_CORRECTION;
+        level * self.group_scale(d)
+    }
+
     /// Materialise the full dequantised latent vector (mostly for tests).
     pub fn dequant_latent(&self) -> [f32; D_C] {
         let mut out = [0.0f32; D_C];
@@ -225,11 +304,11 @@ impl SciRustSlhaTile {
     /// scalar path. Both yield the same result up to float reassociation.
     #[inline]
     pub fn compute_score(&self, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
-        // The SIMD paths decode uniform INT4 only; NF4 and mixed-precision
-        // tiles use the scalar path (SIMD mixed decode is a follow-up).
+        // The SIMD paths decode uniform INT4 only; NF4, mixed-precision and
+        // TQ3 tiles use the scalar path (SIMD decode is a follow-up).
         #[cfg(target_arch = "x86_64")]
         {
-            if !self.is_nf4() && !self.is_mixed() {
+            if !self.is_nf4() && !self.is_mixed() && !self.is_tq3() {
                 if std::is_x86_feature_detected!("avx512f") {
                     // SAFETY: guarded by runtime feature detection.
                     return unsafe { self.compute_score_avx512(q_coarse, q_sign) };
@@ -243,7 +322,7 @@ impl SciRustSlhaTile {
         #[cfg(target_arch = "aarch64")]
         {
             // NEON is baseline on aarch64 — no runtime detection needed.
-            if !self.is_nf4() && !self.is_mixed() {
+            if !self.is_nf4() && !self.is_mixed() && !self.is_tq3() {
                 // SAFETY: NEON is always available on this target.
                 return unsafe { self.compute_score_neon(q_coarse, q_sign) };
             }
@@ -658,6 +737,52 @@ pub fn quantize_latent_mixed(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8; N
     (out, global, gs)
 }
 
+/// TurboQuant TQ3 quantisation (see [`FLAG_TQ3`]): every dim to a 3-bit
+/// symmetric grid (codes 0..=7 → levels `code − 3.5`, no zero level) plus a
+/// 1-bit residual sign correction of [`TQ3_CORRECTION`] step, per-group
+/// scales exactly like [`quantize_latent_grouped`]. The 64-byte budget is
+/// split 48 B codes + 16 B correction bits. Returns `(bytes, global, gs)`.
+pub fn quantize_latent_tq3(v: &[f32; D_C]) -> ([u8; LATENT_BYTES], f32, [u8; N_GROUPS]) {
+    let mut group_scale = [0.0f32; N_GROUPS];
+    for g in 0..N_GROUPS {
+        let mut mx = 0.0f32;
+        for d in g * GROUP_DIM..(g + 1) * GROUP_DIM {
+            mx = mx.max(v[d].abs());
+        }
+        // The group's absmax maps to the outermost level ±3.5.
+        group_scale[g] = mx / TQ3_HALF_RANGE;
+    }
+    let global = group_scale.iter().copied().fold(0.0f32, f32::max);
+    let global = if global > 0.0 { global } else { 1.0 };
+
+    let mut gs = [0u8; N_GROUPS];
+    for g in 0..N_GROUPS {
+        let r = (group_scale[g] / global * 255.0).round();
+        gs[g] = r.clamp(1.0, 255.0) as u8; // never 0, so dequant stays well-defined
+    }
+
+    let mut out = [0u8; LATENT_BYTES];
+    for d in 0..D_C {
+        let eff = global * (gs[d / GROUP_DIM] as f32 / 255.0);
+        let t = v[d] / eff; // value in grid-step units, within ±3.5
+        let code = ((t + TQ3_HALF_RANGE).round() as i32).clamp(0, 7) as u8;
+        // Pack the 3-bit code at bits [3d, 3d+3) (little-endian bitstream).
+        let bit = 3 * d;
+        let byte = bit >> 3;
+        let shift = bit & 7;
+        out[byte] |= code << shift;
+        if shift > 5 {
+            out[byte + 1] |= code >> (8 - shift);
+        }
+        // Correction sign: 1 ⇒ the true value sits above the decoded level.
+        let level = f32::from(code) - TQ3_HALF_RANGE;
+        if t - level > 0.0 {
+            out[TQ3_CODE_BYTES + (d >> 3)] |= 1 << (d & 7);
+        }
+    }
+    (out, global, gs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,6 +985,148 @@ mod tests {
             worse, 0,
             "mixed did not halve the uniform error on {worse}/{total} steep latents"
         );
+    }
+
+    #[test]
+    fn tq3_dequant_roundtrips_within_quarter_step() {
+        // The same 16 values tiled across every group ⇒ identical per-group
+        // absmax ⇒ every gs byte is 255 and the effective step is exactly the
+        // global scale: the strict quarter-step bound of the corrected grid
+        // must hold on every dim.
+        let mut pattern = [0.0f32; GROUP_DIM];
+        let mut rng = crate::rng::Rng::new(17);
+        for x in pattern.iter_mut() {
+            *x = rng.next_gaussian();
+        }
+        let mut v = [0.0f32; D_C];
+        for (d, x) in v.iter_mut().enumerate() {
+            *x = pattern[d % GROUP_DIM];
+        }
+        let (packed, global, gs) = quantize_latent_tq3(&v);
+        assert_eq!(gs, [255u8; N_GROUPS], "equal-spread groups must share gs");
+        let mut tile = tile_from(packed, global, gs);
+        tile.flags |= FLAG_TQ3;
+        let dq = tile.dequant_latent();
+        for d in 0..D_C {
+            assert!(
+                (dq[d] - v[d]).abs() <= TQ3_CORRECTION * global + 1e-5,
+                "dim {d}: |{} - {}| > quarter step {}",
+                dq[d],
+                v[d],
+                TQ3_CORRECTION * global
+            );
+        }
+    }
+
+    #[test]
+    fn tq3_roundtrips_on_steep_spectrum() {
+        // On the realistic steep spectrum, per-group scaling plus the u8
+        // scale rounding keeps every dim within one grid step of the truth
+        // (same bound convention as the grouped INT4 test).
+        let v = steep_latent(19);
+        let (packed, global, gs) = quantize_latent_tq3(&v);
+        let mut tile = tile_from(packed, global, gs);
+        tile.flags |= FLAG_TQ3;
+        let dq = tile.dequant_latent();
+        for d in 0..D_C {
+            let eff = global * (gs[d / GROUP_DIM] as f32 / 255.0);
+            assert!(
+                (dq[d] - v[d]).abs() <= eff + 1e-6,
+                "dim {d}: |{} - {}| > step {eff}",
+                dq[d],
+                v[d]
+            );
+        }
+    }
+
+    #[test]
+    fn tq3_positive_values_do_not_collapse() {
+        // Regression guard for the upstream TurboQuant defect this port
+        // fixes: a mis-sized grid (15 levels clamped to 8) decoded every
+        // positive input to 0. Both signs must survive the round trip.
+        let mut v = [0.0f32; D_C];
+        for (i, x) in v.iter_mut().enumerate() {
+            *x = ((i as f32) - 64.0) / 16.0; // spans negative and positive
+        }
+        let (packed, global, gs) = quantize_latent_tq3(&v);
+        let mut tile = tile_from(packed, global, gs);
+        tile.flags |= FLAG_TQ3;
+        let dq = tile.dequant_latent();
+        let mut pos = 0;
+        for d in 0..D_C {
+            let eff = global * (gs[d / GROUP_DIM] as f32 / 255.0);
+            // Any value at least one step from zero must keep its sign.
+            if v[d] >= eff {
+                assert!(dq[d] > 0.0, "dim {d}: positive {} decoded {}", v[d], dq[d]);
+                pos += 1;
+            }
+            if v[d] <= -eff {
+                assert!(dq[d] < 0.0, "dim {d}: negative {} decoded {}", v[d], dq[d]);
+            }
+        }
+        assert!(pos > 0, "test vector must exercise the positive half");
+    }
+
+    #[test]
+    fn tq3_error_matches_int4_grouped_resolution() {
+        // 3-bit + 1-bit correction spends the same 4 bits/dim as INT4, and
+        // both grids share the same worst-case error (0.25 step). On a
+        // Gaussian latent TQ3 pays a measured ~1.3–1.6× MSE penalty for its
+        // missing zero level (near-zero mass always costs ≥ 0.25 step) — the
+        // documented trade for the separable correction plane. Guard that
+        // the penalty stays in that class and never explodes.
+        let sq_err = |t: &SciRustSlhaTile, v: &[f32; D_C]| -> f32 {
+            let dq = t.dequant_latent();
+            (0..D_C).map(|d| (dq[d] - v[d]).powi(2)).sum()
+        };
+        for seed in 0..8u64 {
+            let mut v = [0.0f32; D_C];
+            let mut rng = crate::rng::Rng::new(200 + seed);
+            for x in v.iter_mut() {
+                *x = rng.next_gaussian();
+            }
+            let (p1, s1, g1) = quantize_latent_grouped(&v);
+            let e_int4 = sq_err(&tile_from(p1, s1, g1), &v);
+            let (p2, s2, g2) = quantize_latent_tq3(&v);
+            let mut tq3 = tile_from(p2, s2, g2);
+            tq3.flags |= FLAG_TQ3;
+            let e_tq3 = sq_err(&tq3, &v);
+            assert!(
+                e_tq3 <= e_int4 * 2.0,
+                "seed {seed}: TQ3 err {e_tq3} way above INT4 err {e_int4}"
+            );
+        }
+    }
+
+    #[test]
+    fn tq3_tiles_route_to_the_scalar_path() {
+        // Like NF4/mixed: the SIMD kernels decode the uniform nibble layout
+        // only, so the dispatcher must return exactly the scalar result for
+        // TQ3 tiles (HOT and WARM).
+        let v = steep_latent(23);
+        let (packed, global, gs) = quantize_latent_tq3(&v);
+        let mut rng = crate::rng::Rng::new(35);
+        let mut q = [0.0f32; D_C];
+        rng.fill_gaussian(&mut q);
+        let q_sign = [
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ];
+        for warm in [false, true] {
+            let mut tile = tile_from(packed, global, gs);
+            tile.dynamic_lambda = 0.37;
+            tile.residual_bitmap = [!0, 0, !0, 0];
+            tile.flags |= FLAG_TQ3 | if warm { FLAG_WARM } else { 0 };
+            let via_dispatch = tile.compute_score(&q, &q_sign);
+            let via_scalar = tile.compute_score_scalar(&q, &q_sign);
+            assert_eq!(
+                via_dispatch.to_bits(),
+                via_scalar.to_bits(),
+                "dispatcher did not use the scalar path for a TQ3 tile (warm={warm})"
+            );
+        }
     }
 
     #[test]

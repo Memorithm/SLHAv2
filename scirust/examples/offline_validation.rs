@@ -23,10 +23,12 @@
 //! basis has already seen the test set. `--weights` loads a projection fitted on
 //! a *different* key set, giving the honest, non-optimistic number.
 //!
-//! `--codec {grouped|nf4|mixed}` selects the latent quantiser (default:
+//! `--codec {grouped|nf4|mixed|tq3}` selects the latent quantiser (default:
 //! grouped INT4). `mixed` stores the top 8 latent dims at 8-bit and the next
 //! 112 at 4-bit in the same 64 bytes — built for the steep spectra of real
 //! keys, where uniform INT4's 16 levels cannot span the outlier direction.
+//! `tq3` is the TurboQuant port: 3-bit grid + separable 1-bit correction
+//! plane in the same 64 bytes (see docs/TURBOQUANT.md).
 //!
 //! This is a PROXY, not a real perplexity: it isolates the attention layer with
 //! cached activations. It exists to give a cheap, quantified GO/NO-GO *before*
@@ -142,7 +144,8 @@ fn main() {
         None | Some("grouped") => LatentCodec::Int4Grouped,
         Some("nf4") => LatentCodec::Nf4,
         Some("mixed") => LatentCodec::Mixed,
-        Some(other) => panic!("--codec {other}: expected grouped | nf4 | mixed"),
+        Some("tq3") => LatentCodec::Tq3,
+        Some(other) => panic!("--codec {other}: expected grouped | nf4 | mixed | tq3"),
     };
 
     // Optional held-out projection: score it as-is instead of re-fitting.
@@ -167,6 +170,7 @@ fn main() {
             LatentCodec::Int4Grouped => "INT4 groupé (défaut)",
             LatentCodec::Nf4 => "NF4",
             LatentCodec::Mixed => "MIXTE 8/4-bit (tête 8 dims @8b)",
+            LatentCodec::Tq3 => "TQ3 TurboQuant (3-bit + correction 1-bit)",
             LatentCodec::Int4Single => "INT4 simple",
         }
     );
