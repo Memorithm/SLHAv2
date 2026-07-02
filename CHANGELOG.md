@@ -34,12 +34,13 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
   grille 3 bits symétrique (8 niveaux, sans zéro) + plan de correction de signe
   1 bit par dimension, échelles par groupe comme les autres codecs. 48 o de
   codes + 16 o de corrections = le budget latent de 64 o exactement ; la tuile
-  reste 128 o, zéro padding. Décodage scalaire (comme NF4/mixte). Exposé dans
+  reste 128 o, zéro padding. Décodage scalaire à ce stade (kernels SIMD
+  ajoutés ensuite — cf. entrée ci-dessus). Exposé dans
   `offline_validation --codec tq3` et `measure_learned`. Mesuré au niveau des
   codecs 4 bits existants (cos HOT 0,9979–0,9999, Spearman 0,881 vs 0,884
   INT4 groupé) ; trade-off documenté (pas de niveau zéro → MSE ~1,3–1,6× INT4
   sur gaussien, testé ≤ 2×) contre un plan de correction **séparable**
-  (futur état de pagination CCOS plus fin que HOT→WARM). Voir
+  (barreau de pagination CCOS implémenté ensuite — cf. entrée ci-dessus). Voir
   [`docs/TURBOQUANT.md`](docs/TURBOQUANT.md). Le portage a mis au jour un bug
   de grille dans TurboQuant amont (valeurs positives écrasées à 0) — corrigé
   là-bas, garde-fou `tq3_positive_values_do_not_collapse` ici.
