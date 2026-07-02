@@ -18,15 +18,35 @@
 //! ```text
 //! cargo run --release --example train_on_real_activations -- --dump DIR --joint --out proj.slhw
 //! ```
+//! With `--sgd` the (joint-)PCA solution is then **refined by score-aware SGD**
+//! ([`scirust::learned::train_projection`]) on the real `q.bin`/`k.bin` pairs —
+//! it minimises the *score* error `E[(⟨q,k⟩ − ⟨Pq,Pk⟩)²]`, not reconstruction.
+//! Defaults match the synthetic study (`learn_projection`): 200 epochs,
+//! lr 2e-3 (linear decay), batch 64; override with `--sgd-epochs N`,
+//! `--sgd-lr X`, `--sgd-batch N`.
+//!
+//! ⚠️ **On real activations this lever is a measured negative** (see
+//! `docs/TURBOQUANT.md` §3quater): the synthetic lr (2e-3) diverges to NaN on
+//! GPT-2 magnitudes — real dumps need `--sgd-lr 1e-6` to converge — and even
+//! then the refinement overfits the train-set score error and *degrades*
+//! held-out fidelity below plain joint-PCA. The flag is kept for reproducibility
+//! (it converges on synthetic data), not because it helps on real dumps.
+//! ```text
+//! cargo run --release --example train_on_real_activations -- --dump DIR --joint --sgd --out proj.slhw
+//! ```
 
 // Numeric loops read closer to the math with indexing.
 #![allow(clippy::needless_range_loop)]
 
 use scirust::attention::slha_v2::D_C;
-use scirust::learned::{gen_keys, LearnedModel};
+use scirust::learned::{gen_keys, train_projection, LearnedModel};
 use scirust::metrics::{cosine, dot, softmax_into};
 use scirust::rng::Rng;
 use scirust::weights;
+
+/// Sampling seed of the SGD refinement — same as the synthetic
+/// `learn_projection` study, so the two runs are directly comparable.
+const SGD_SEED: u64 = 7;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -39,6 +59,16 @@ fn main() {
     let dump = opt("--dump");
     let rht = args.iter().any(|a| a == "--rht");
     let joint = args.iter().any(|a| a == "--joint");
+    let sgd = args.iter().any(|a| a == "--sgd");
+    let sgd_epochs: usize = opt("--sgd-epochs")
+        .map(|v| v.parse().expect("--sgd-epochs: entier attendu"))
+        .unwrap_or(200);
+    let sgd_lr: f32 = opt("--sgd-lr")
+        .map(|v| v.parse().expect("--sgd-lr: flottant attendu"))
+        .unwrap_or(2.0e-3);
+    let sgd_batch: usize = opt("--sgd-batch")
+        .map(|v| v.parse().expect("--sgd-batch: entier attendu"))
+        .unwrap_or(64);
     let out = opt("--out").unwrap_or_else(|| {
         std::env::temp_dir()
             .join("slha_projection.slhw")
@@ -55,8 +85,8 @@ fn main() {
         }
         None => {
             assert!(
-                !joint,
-                "--joint nécessite --dump (il apprend sur les VRAIES requêtes q.bin)"
+                !joint && !sgd,
+                "--joint / --sgd nécessitent --dump (ils apprennent sur les VRAIES requêtes q.bin)"
             );
             let d = 256usize;
             let k = gen_keys(1, 2000, d, d, 0.9, 0.02);
@@ -67,8 +97,8 @@ fn main() {
         d > D_C,
         "SLHA needs a key dim > {D_C}; got d={d} (dump a wider key representation)."
     );
-    // Real queries for the joint (score-aware) objective.
-    let queries: Vec<Vec<f32>> = if joint {
+    // Real queries for the joint (score-aware) objective and/or the SGD refine.
+    let queries: Vec<Vec<f32>> = if joint || sgd {
         let dir = dump.as_ref().unwrap();
         let (q, dq) = load_k_bin(&format!("{dir}/q.bin"));
         assert_eq!(dq, d, "q.bin and k.bin must share the key dimension");
@@ -91,8 +121,18 @@ fn main() {
         }
     );
     println!(
-        "  incohérence RHT (A2) : {}\n",
+        "  incohérence RHT (A2) : {}",
         if rht { "activée" } else { "désactivée" }
+    );
+    println!(
+        "  raffinage SGD (§1.3) : {}\n",
+        if sgd {
+            format!(
+                "activé — {sgd_epochs} époques, lr {sgd_lr}, batch {sgd_batch}, graine {SGD_SEED}"
+            )
+        } else {
+            "désactivé".to_string()
+        }
     );
 
     // Train (PCA on keys, or on the pooled keys+queries second moment).
@@ -110,6 +150,30 @@ fn main() {
             ""
         }
     );
+
+    // Optional score-aware SGD refinement, warm-started from the PCA solution.
+    // Same Z seed ⇒ only the projection P differs from the PCA model.
+    let model = if sgd {
+        let (p, hist) = train_projection(
+            &queries,
+            &keys,
+            model.projection().to_vec(),
+            sgd_epochs,
+            sgd_lr,
+            sgd_batch,
+            SGD_SEED,
+        );
+        println!(
+            "  SGD score-aware        : perte {:.4} → {:.4} (min {:.4}) sur {} époques",
+            hist.first().copied().unwrap_or(f32::NAN),
+            hist.last().copied().unwrap_or(f32::NAN),
+            hist.iter().copied().fold(f32::INFINITY, f32::min),
+            hist.len()
+        );
+        LearnedModel::from_projection_with(p, d, seed, rht)
+    } else {
+        model
+    };
 
     // Save → reload → prove the round-trip is exact.
     weights::save(&out, &model, seed, rht).expect("save weights");

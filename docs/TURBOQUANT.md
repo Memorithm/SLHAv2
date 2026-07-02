@@ -153,6 +153,48 @@ GO sur tous les régimes (cos 0,9976–0,9999). Le KL strict (≤ 0,03) reste
 au-dessus du seuil pour *tous* les codecs sur ce dump, mixte compris — c'est
 la frontière projection/protocole, pas le codec.
 
+## 3quater. La frontière projection — SGD score-aware : levier négatif, mesuré
+
+Le §3ter établit que, sur activations réelles, le goulot n'est plus le codec
+(mixte ≈ MIX3) mais la **projection** : le KL du meilleur codec (0,055) reste
+au-dessus du seuil (≤ 0,03) alors que le cosinus (0,984) le passe largement.
+Levier testé : **raffiner la projection jointe (PCA) par SGD score-aware**
+(`train_projection`, objectif = erreur de *score*, plan §1.3), sur le même dump
+GPT-2 held-out. Verdict : **négatif et instable.**
+
+| projection (held-out jointe, HOT) | codec | cos↑ | relL2↓ | KL↓ |
+|---|---|---|---|---|
+| PCA jointe (référence §3ter) | mixte | **0,9846** | 0,1492 | **0,0553** |
+| PCA jointe | MIX3 | 0,9835 | 0,1552 | 0,0599 |
+| + SGD (50 ép., lr 1e-6, *convergé*) | mixte | 0,9210 | 0,3830 | 0,2910 |
+| + SGD (50 ép., lr 1e-6, *convergé*) | MIX3 | 0,9219 | 0,3863 | 0,2890 |
+| + SGD (300 ép. / lr ≥ 1e-5) | tous | *NaN* (diverge) | — | — |
+
+**Deux échecs distincts.** (1) **Instabilité numérique** : le pas d'apprentissage
+réglé sur le synthétique (2e-3) explose immédiatement en NaN sur les magnitudes
+réelles de GPT-2 ; il faut descendre à **lr 1e-6** pour converger, et même là le
+SGD finit par diverger au-delà de ~50 époques. (2) **Sur-apprentissage** : là où
+il converge, le SGD réduit son objectif (erreur de score sur le *train*) mais
+**dégrade la fidélité de sortie held-out** — cos 0,985 → 0,921, KL 0,055 → 0,291.
+Il s'éloigne de l'optimum PCA qui, lui, généralise.
+
+**Conclusion honnête.** À rang 128, la **PCA jointe reste le plafond** ; le seuil
+KL ≤ 0,03 n'est **pas atteignable en raffinant la projection linéaire de rang
+128**. Le sous-espace capte 95,5 % de l'énergie poolée clés+requêtes ; les 4,5 %
+restants sont la borne structurelle qui se lit dans le KL. Franchir le seuil
+demanderait soit un **rang plus élevé** (casse l'invariant tuile 128 o), soit une
+**projection non-linéaire** (hors périmètre) — pas un meilleur réglage du levier
+linéaire. Reproduction : `train_on_real_activations --dump train --joint --sgd
+--sgd-lr 1e-6 --sgd-epochs 50` puis `offline_validation --dump test --weights
+… --codec {mixed|mix3}` (dumps GPT-2 c6 WikiText-2, §3bis). Le drapeau `--sgd`
+est conservé (il converge sur le synthétique, cf. `train_projection_reduces_score_loss`) ;
+son échec sur activations réelles **est** le résultat.
+
+**Ce que cela dit pour la suite.** Le cosinus de sortie (0,984) est déjà
+excellent ; seul le KL reste au-dessus d'un seuil *pré-enregistré et strict*.
+Savoir si ce KL de 0,055 dégrade réellement la perplexité d'un vrai modèle est
+précisément la question de l'intégration llama.cpp (Phase 2, `docs/INTEGRATION.md`).
+
 ## 4. Bug amont trouvé pendant le portage
 
 L'implémentation Rust de TurboQuant (`turboquant-core/src/qjl.rs`) avait une
