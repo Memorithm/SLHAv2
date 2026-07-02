@@ -37,7 +37,7 @@ Do not sign or rely on it in its current form.
    carve-outs, tax clauses and export classification.
 3. Define the **Order Form** (Exhibit A outline) — it is the commercial
    vehicle that gives the agreement effect and records the elected options,
-   including the governing-law choice (France/Paris vs Delaware; one per
+   confirming French law / Paris jurisdiction (Section 12); adapting per
    Order Form).
 4. Execute: both parties sign the final agreement and Order Form (electronic
-   signature per eIDAS / ESIGN acceptable). Only then does anything bind.
+   signature per eIDAS acceptable). Only then does anything bind.

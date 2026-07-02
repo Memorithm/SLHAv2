@@ -5,8 +5,8 @@
 > Le présent document est un **PROJET de modèle de contrat** préparé **sans
 > l'intervention d'un avocat**. Il ne constitue **pas un conseil juridique**.
 > Il doit être **revu, adapté et validé par un conseil juridique qualifié**
-> dans chaque juridiction concernée (notamment Union européenne / France et
-> États-Unis) **avant toute utilisation**. Ce projet **ne crée aucun droit ni
+> dans le cadre du droit applicable (Union européenne, et en particulier le
+> droit français) **avant toute utilisation**. Ce projet **ne crée aucun droit ni
 > aucune obligation** tant qu'un contrat définitif n'a pas été négocié et
 > **signé par les deux parties**. Les mentions entre [CROCHETS] signalent des
 > choix commerciaux ou juridiques restant à arbitrer.
@@ -15,9 +15,9 @@
 >
 > This document is a **DRAFT contract template** prepared **without the
 > involvement of an attorney**. It is **not legal advice**. It must be
-> **reviewed, adapted and approved by qualified legal counsel** in each
-> relevant jurisdiction (in particular the European Union / France and the
-> United States) **before ANY use**. This draft **creates no rights or
+> **reviewed, adapted and approved by qualified legal counsel** under the
+> applicable law (the European Union, and in particular French law) **before
+> ANY use**. This draft **creates no rights or
 > obligations** unless and until a definitive agreement has been negotiated
 > and **executed by both parties**. Text in [BRACKETS] marks business or
 > legal decisions still to be made.
@@ -110,7 +110,7 @@ Licensed Software made by or for Licensee under the license in Section 2.1.
 references this Agreement and specifies at least: the Licensed Software and
 version(s); the deployment option elected under Section 2.2; the scope of
 permitted CCOS Deployments; the fees and payment terms; the initial term and
-any renewal; and the governing-law alternative elected under Section 12. An
+any renewal; the governing law is French law (Section 12). An
 outline is provided in Exhibit A.
 
 1.10 "**Required Notice**" means the plain-text notice line that accompanies
@@ -200,19 +200,13 @@ non-refundable.
 invoice date. Late amounts bear interest at [the statutory rate applicable to
 commercial transactions in the elected governing jurisdiction — e.g., in
 France, the rate under Article L.441-10 of the Code de commerce plus the
-statutory EUR 40 recovery indemnity per invoice; in the United States,
-[1.5]% per month or the maximum rate permitted by law, whichever is lower].
+statutory EUR 40 recovery indemnity per invoice].
 
 4.3 **Taxes — EU.** All fees are exclusive of VAT and any similar indirect
 taxes. Where the reverse-charge mechanism applies (Article 196 of Council
 Directive 2006/112/EC), Licensee shall self-account for VAT in its Member
 State and provide a valid VAT identification number.
 
-4.4 **Taxes — US.** Licensee is responsible for all sales, use and similar
-transaction taxes arising from this Agreement, excluding taxes based on
-Licensor's net income. [If withholding tax applies, amounts payable shall be
-grossed up so that Licensor receives the full invoiced amount — for counsel
-and tax-adviser review.]
 
 ### 5. Intellectual Property; Feedback; Contributions
 
@@ -257,7 +251,8 @@ period]. This warranty does not apply to Modifications not made by Licensor,
 to misuse, or to use outside a CCOS Deployment.] [Alternative: no performance
 warranty — the Licensed Software is provided "AS IS".]
 
-6.3 **Disclaimer (US-style).** EXCEPT AS EXPRESSLY STATED IN THIS SECTION 6,
+6.3 **Disclaimer.** Subject to Section 6.4 and to the extent permitted by
+applicable French and EU law, and except as expressly stated in this Section 6,
 THE LICENSED SOFTWARE IS PROVIDED "AS IS" AND WITH ALL FAULTS, AND LICENSOR
 DISCLAIMS ALL OTHER WARRANTIES AND CONDITIONS, WHETHER EXPRESS, IMPLIED,
 STATUTORY OR OTHERWISE, INCLUDING ANY IMPLIED WARRANTIES OF MERCHANTABILITY,
@@ -342,20 +337,21 @@ survive expiry or termination of this Agreement.
 ### 9. Compliance: Export, Sanctions, Anti-Corruption
 
 9.1 **Export controls.** Each Party shall comply with applicable export
-control laws, including Regulation (EU) 2021/821 on dual-use items and the
-U.S. Export Administration Regulations (EAR), and shall not export, re-export
+control laws, including Regulation (EU) 2021/821 on dual-use items and any other export
+control laws applicable to that Party, and shall not export, re-export
 or transfer the Licensed Software in violation of such laws. [Export
 classification of the Licensed Software to be confirmed.]
 
 9.2 **Sanctions.** Licensee represents that it is not, and is not owned or
 controlled by, a person listed on applicable sanctions lists (including EU
-restrictive measures and U.S. OFAC lists), and shall not use or make the
+restrictive measures and any other sanctions lists applicable to that Party),
+and shall not use or make the
 Licensed Software available in embargoed or comprehensively sanctioned
 territories.
 
 9.3 **Anti-corruption.** Each Party shall comply with applicable
-anti-corruption laws, including the French Sapin II law, the U.S. Foreign
-Corrupt Practices Act and the UK Bribery Act 2010.
+anti-corruption laws, including the French Sapin II law and any other applicable
+anti-corruption laws.
 
 ### 10. Data Protection
 
@@ -371,8 +367,7 @@ Regulation (EU) 2016/679 — GDPR).
 10.3 [If support, maintenance or professional services under an Order Form
 involve access by Licensor to personal data processed by Licensee, the
 Parties shall first execute a data processing agreement meeting the
-requirements of Article 28 GDPR (and, where relevant, applicable U.S. state
-privacy laws).]
+requirements of Article 28 GDPR.]
 
 ### 11. Audit
 
@@ -389,26 +384,21 @@ costs of the audit.
 
 ### 12. Governing Law and Jurisdiction
 
-12.1 The Order Form must elect **exactly one** of the following alternatives.
-The choice must be made deliberately, per Order Form, and **reviewed by
-qualified counsel of both Parties** before execution:
+12.1 **Governing law.** This Agreement is governed by, and construed in
+accordance with, **French law**, to the exclusion of its conflict-of-law
+rules. The Parties record that the Licensed Software is offered under the
+protection of European Union and French law.
 
-> [**Alternative 1 — France.** This Agreement is governed by French law. Any
-> dispute arising out of or in connection with this Agreement shall be
-> subject to the exclusive jurisdiction of the **Tribunal de commerce de
-> Paris** (Paris Commercial Court), including for interim and summary
-> proceedings, notwithstanding plurality of defendants or third-party
-> claims.]
->
-> [**Alternative 2 — United States (Delaware).** This Agreement is governed
-> by the laws of the State of Delaware, without regard to its conflict-of-law
-> rules. The state and federal courts located in Wilmington, Delaware shall
-> have exclusive jurisdiction and venue, and each Party consents to personal
-> jurisdiction there. [Jury-trial waiver — for counsel review.]]
+12.2 **Jurisdiction.** Any dispute arising out of or in connection with this
+Agreement — including its formation, validity, interpretation, performance or
+termination — shall be subject to the **exclusive jurisdiction of the
+competent courts of Paris, France** (the Tribunal de commerce de Paris for
+matters within its competence), including for interim and summary proceedings,
+notwithstanding plurality of defendants or third-party claims. [Venue to be
+confirmed by counsel per Order Form.]
 
-12.2 The United Nations Convention on Contracts for the International Sale of
-Goods (CISG) does not apply to this Agreement. [The Uniform Computer
-Information Transactions Act (UCITA) is excluded where enacted.]
+12.3 The United Nations Convention on Contracts for the International Sale of
+Goods (CISG) does not apply to this Agreement.
 
 ### 13. Miscellaneous
 
@@ -449,8 +439,7 @@ this Agreement creates no partnership, agency or joint venture.
 13.8 **Counterparts; electronic signature.** This Agreement and Order Forms
 may be executed in counterparts and by electronic signature, which shall have
 the same effect as handwritten signatures to the extent permitted by
-applicable law (including Regulation (EU) No 910/2014 (eIDAS) and the U.S.
-ESIGN Act / UETA).
+applicable law (including Regulation (EU) No 910/2014 (eIDAS)).
 
 ### Signature Blocks
 
@@ -477,7 +466,7 @@ Each Order Form referencing this Agreement should specify at least:
    environments / sites]).
 5. Fees, pricing model, payment schedule and currency.
 6. Initial term, renewal and notice periods (Section 8.1).
-7. Governing-law alternative elected (Section 12.1).
+7. Governing law confirmed: French law, Paris jurisdiction (Section 12).
 8. Support / maintenance terms, if any [and DPA if Section 10.3 applies].
 9. Any special terms (which prevail over this Agreement per Section 13.4).
 10. Signatures of both Parties.
