@@ -542,3 +542,112 @@ fn mixed_codec_has_no_correction_rung() {
     let (h, w, _) = cache.counts();
     assert!(w > 0 && h + w == n, "mixed fell back to HOT->WARM paging");
 }
+
+// --- COLD -> EventLog persistence (scirust::eventlog) ------------------------
+
+use scirust::eventlog::{tile_to_bytes, EventLog};
+
+fn el_tmp(name: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!("scirust_ccos_el_{}_{name}", std::process::id()));
+    p
+}
+
+#[test]
+fn evict_snapshots_to_event_log_then_rehydrates_identically() {
+    let proj = Projection::new(0xE7);
+    let path = el_tmp("roundtrip");
+    let _ = std::fs::remove_file(&path);
+
+    let mut cache = ElasticKvCache::with_budget(2 * HOT_BYTES); // room for 2 HOT
+    cache.attach_event_log(EventLog::create(&path).unwrap());
+
+    // Insert 5 HOT tiles; capture their (non-zero) latent so we can prove the
+    // snapshot preserved real content, not zeros.
+    let (_q, toks) = generate(9, 5, 0.4);
+    let mut latents = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let tile = build_tile(&proj, t, i as u32, false);
+        latents.push(tile.latent_kv);
+        cache.insert(tile);
+    }
+    // Force eviction of the oldest down to the 2-HOT budget. Under pressure a
+    // tile is paged HOT->WARM (residual masked, FLAG_WARM set) *before* being
+    // evicted, so the snapshot is the tile's WARM form at eviction time — the
+    // correct persistence semantics.
+    cache.enforce_budget();
+    let (_h, _w, cold) = cache.counts();
+    assert!(cold >= 3, "expected >=3 evictions, got {cold}");
+    assert_eq!(cache.log_errors(), 0);
+
+    let mut log = EventLog::open(&path).unwrap();
+    let recs = log.read_all().unwrap();
+    assert_eq!(recs.len(), cold, "one record per eviction");
+    for r in &recs {
+        // Snapshot preserved the tile's actual latent, and captured its
+        // post-paging WARM state.
+        assert_eq!(
+            r.tile.latent_kv, latents[r.seq as usize],
+            "logged latent for seq {} differs from the inserted latent",
+            r.seq
+        );
+        assert!(
+            r.tile.is_warm(),
+            "evicted tile was paged WARM before eviction"
+        );
+    }
+
+    // Round-trip losslessness: rehydrating a seq returns a tile byte-identical
+    // to its log record, re-admitted as a fresh HOT slot.
+    let logged0 = tile_to_bytes(&recs.iter().find(|r| r.seq == 0).unwrap().tile);
+    let slot = cache.rehydrate(0).unwrap().expect("seq 0 is in the log");
+    assert_eq!(
+        cache.state(slot),
+        TileState::Hot,
+        "rehydrated as a fresh slot"
+    );
+    assert_eq!(
+        tile_to_bytes(cache.tile(slot)),
+        logged0,
+        "rehydrated tile must be byte-identical to its log record"
+    );
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn eviction_order_is_reflected_in_the_log() {
+    // Causal eviction drops oldest-first; the log must record them in that
+    // exact order (seq 0, then 1, ...).
+    let proj = Projection::new(0xA5);
+    let path = el_tmp("order");
+    let _ = std::fs::remove_file(&path);
+    let mut cache = ElasticKvCache::with_budget(HOT_BYTES); // room for 1 HOT
+    cache.attach_event_log(EventLog::create(&path).unwrap());
+    let (_q, toks) = generate(3, 4, 0.3);
+    for (i, t) in toks.iter().enumerate() {
+        cache.insert(build_tile(&proj, t, i as u32, false));
+        cache.enforce_budget();
+    }
+    let mut log = EventLog::open(&path).unwrap();
+    let seqs: Vec<u64> = log.read_all().unwrap().iter().map(|r| r.seq).collect();
+    assert_eq!(seqs, vec![0, 1, 2], "evictions must be logged oldest-first");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn no_event_log_leaves_behavior_and_rehydrate_inert() {
+    // Without a log, evict is pure in-memory and rehydrate is a no-op — the
+    // additive-behavior guarantee.
+    let proj = Projection::new(0x11);
+    let mut cache = ElasticKvCache::with_budget(HOT_BYTES);
+    let (_q, toks) = generate(2, 3, 0.3);
+    for (i, t) in toks.iter().enumerate() {
+        cache.insert(build_tile(&proj, t, i as u32, false));
+    }
+    cache.enforce_budget();
+    assert_eq!(cache.log_errors(), 0);
+    assert!(
+        cache.rehydrate(0).unwrap().is_none(),
+        "no log -> no rehydrate"
+    );
+}
