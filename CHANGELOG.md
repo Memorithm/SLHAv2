@@ -4,8 +4,20 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 [SemVer](https://semver.org/). Ce fichier décrit l'état **réel** du code.
 
 ## [Unreleased]
-
-_(rien pour l'instant — la prochaine version listera ses changements ici.)_
+### Added
+- **Codec latent TQ3 (portage TurboQuant)** : `LatentCodec::Tq3` / `FLAG_TQ3` —
+  grille 3 bits symétrique (8 niveaux, sans zéro) + plan de correction de signe
+  1 bit par dimension, échelles par groupe comme les autres codecs. 48 o de
+  codes + 16 o de corrections = le budget latent de 64 o exactement ; la tuile
+  reste 128 o, zéro padding. Décodage scalaire (comme NF4/mixte). Exposé dans
+  `offline_validation --codec tq3` et `measure_learned`. Mesuré au niveau des
+  codecs 4 bits existants (cos HOT 0,9979–0,9999, Spearman 0,881 vs 0,884
+  INT4 groupé) ; trade-off documenté (pas de niveau zéro → MSE ~1,3–1,6× INT4
+  sur gaussien, testé ≤ 2×) contre un plan de correction **séparable**
+  (futur état de pagination CCOS plus fin que HOT→WARM). Voir
+  [`docs/TURBOQUANT.md`](docs/TURBOQUANT.md). Le portage a mis au jour un bug
+  de grille dans TurboQuant amont (valeurs positives écrasées à 0) — corrigé
+  là-bas, garde-fou `tq3_positive_values_do_not_collapse` ici.
 
 ## [0.2.0] — 2026-06-30
 ### Fixed
