@@ -25,6 +25,7 @@ pub mod adapter;
 pub mod attention;
 pub mod audit;
 pub mod ccos;
+pub mod eventlog;
 pub mod incoherence;
 pub mod json;
 pub mod learned;

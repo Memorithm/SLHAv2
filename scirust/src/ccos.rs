@@ -101,6 +101,12 @@ pub struct ElasticKvCache {
     policy: PageOutPolicy,
     eviction: EvictionPolicy,
     next_seq: u64,
+    /// Optional persistence sink (plan: COLD → EventLog). `None` ⇒ the cache
+    /// behaves exactly as before this field existed — eviction is in-memory
+    /// recycling only. Attach one with [`Self::attach_event_log`].
+    event_log: Option<crate::eventlog::EventLog>,
+    /// Count of failed EventLog appends (see [`Self::evict`] error policy).
+    log_errors: u64,
 }
 
 impl ElasticKvCache {
@@ -115,7 +121,26 @@ impl ElasticKvCache {
             policy,
             eviction: EvictionPolicy::default(),
             next_seq: 0,
+            event_log: None,
+            log_errors: 0,
         }
+    }
+
+    /// Attach an [`EventLog`](crate::eventlog::EventLog) so that evicted
+    /// (COLD) tiles are snapshotted to durable storage before their slot is
+    /// recycled, enabling later [`Self::rehydrate`]. Without one, eviction is
+    /// in-memory only (the historical behaviour). Attaching does not touch
+    /// already-live tiles.
+    pub fn attach_event_log(&mut self, log: crate::eventlog::EventLog) {
+        self.event_log = Some(log);
+    }
+
+    /// Number of EventLog appends that failed during eviction. Eviction never
+    /// fails the in-memory cache; append errors are counted here instead (see
+    /// [`Self::evict`]).
+    #[must_use]
+    pub fn log_errors(&self) -> u64 {
+        self.log_errors
     }
 
     /// Convenience constructor with the recommended default policy (the hybrid
@@ -276,9 +301,43 @@ impl ElasticKvCache {
     /// Evict a slot (→ COLD) and recycle it for a future `insert`.
     pub fn evict(&mut self, slot: usize) {
         if self.state[slot] != TileState::Cold {
+            // Snapshot to the EventLog (if attached) BEFORE the slot is marked
+            // COLD and made recyclable. Error policy: a failed append must NOT
+            // corrupt the in-memory cache — the tile is still evicted (memory
+            // semantics preserved) and the failure is counted in `log_errors`.
+            if let Some(log) = self.event_log.as_mut() {
+                if log
+                    .append(self.seq[slot], slot as u32, &self.tiles[slot])
+                    .is_err()
+                {
+                    self.log_errors += 1;
+                }
+            }
             self.state[slot] = TileState::Cold;
             self.free.push(slot);
         }
+    }
+
+    /// Restore a previously-evicted tile from the attached
+    /// [`EventLog`](crate::eventlog::EventLog) by its eviction `seq`, inserting
+    /// it back into the cache as a fresh HOT tile. Returns the new slot, or
+    /// `None` if no log is attached or no record matches `seq`.
+    ///
+    /// By design the restored tile re-enters as HOT with importance reset (a
+    /// fresh [`Self::insert`]); its stored `flags`/scales/latent are exactly
+    /// those at eviction time. The rehydrated tile gets a **new** insertion
+    /// `seq` — it is treated as a fresh admission, not a rewind of history.
+    ///
+    /// # Errors
+    /// Propagates I/O errors from reading the log.
+    pub fn rehydrate(&mut self, seq: u64) -> std::io::Result<Option<usize>> {
+        let Some(log) = self.event_log.as_mut() else {
+            return Ok(None);
+        };
+        let Some(rec) = log.fetch_by_seq(seq)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.insert(rec.tile)))
     }
 
     /// Elastic logical footprint: Σ over live slots (HOT 128, WARM 96, COLD 0;
