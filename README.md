@@ -56,7 +56,7 @@ SLHA v2 est un **workspace Cargo de 4 crates** (tous en v0.2.0), organisé autou
 
 Le noyau **`scirust`** est à **zéro dépendance externe par défaut** (build offline), avec dispatch SIMD choisi **à l'exécution** (AVX-512 > AVX2 > scalaire sur x86_64, NEON sur aarch64 ; repli scalaire portable, aucun gating à la compilation). L'équivalence SIMD ≡ scalaire du score est garantie **à 1e-3 près** (FMA / accumulation réordonnée, pas bit-pour-bit) ; seul le popcount/Hamming est exact bit-à-bit. Le noyau embarque aussi les modules `safety`, `numa`, `incoherence` (RHT de Hadamard opt-in), `rope`, `residual`, `adapter`, `ccos`, `audit` et `json`, et fournit le binaire `slha-audit`. Les ratios SIMD sont **indicatifs** et dépendent de votre matériel — mesurez les vôtres avec `cargo run --example cycles --release`.
 
-> **Licence :** double licence — **PolyForm Noncommercial 1.0.0** (usage non-commercial et personnel, gratuit) ; **licence commerciale** requise pour tout usage commercial (voir `LICENSING.md`). SLHAv2 et [TurboQuant](https://github.com/CHECKUPAUTO/TurboQuant) sont des modules compagnons de **CCOS**, réservés à cet usage — la licence commerciale est offerte pour les déploiements CCOS.
+> **Licence :** double licence — **PolyForm Noncommercial 1.0.0** (usage non-commercial et personnel, gratuit) ; **licence commerciale** requise pour tout usage commercial (voir `LICENSING.md`). SLHAv2 et [TurboQuant](https://github.com/CHECKUPAUTO/TurboQuant) sont des modules compagnons de **CCOS** ; la licence commerciale est offerte exclusivement pour les déploiements CCOS (l'usage non-commercial reste régi par PolyForm NC, sans restriction d'environnement).
 
 > Le dépôt est un **workspace Cargo** : toutes les commandes ci-dessous se
 > lancent depuis la racine.
