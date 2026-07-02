@@ -160,3 +160,14 @@ préférer le codec mixte là-dessus). TQ3 reste pertinent sur distributions
 plates et comme démonstrateur du barreau de pagination à plans séparables
 (§3, `ccos`). Le décodage SIMD (AVX2/AVX-512/NEON) et l'état « correction
 lâchée » sont, eux, implémentés et testés.
+
+## 6. Licence
+
+TurboQuant et SLHAv2 sont sous la **même double licence** : PolyForm
+Noncommercial 1.0.0 (gratuit, non-commercial) + licence commerciale,
+offerte exclusivement pour les déploiements **CCOS** dont les deux dépôts
+sont les modules compagnons (voir [`LICENSING.md`](../LICENSING.md) ici et
+dans le dépôt TurboQuant). Le portage TQ3 est une réutilisation interne du
+même auteur (Copyright 2026 Tarek Zekriti) — les versions de TurboQuant
+publiées avant l'alignement des licences restent sous leurs termes MIT/
+Apache-2.0 d'origine.

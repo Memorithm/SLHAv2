@@ -207,7 +207,9 @@ d'inférence. Il ne remplace pas le modèle, il optimise sa mémoire.
 **Q : C'est gratuit ?**
 R : Les usages non-commerciaux et personnels sont gratuits sous la licence
 PolyForm Noncommercial 1.0.0 (voir `LICENSE.md`). Tout usage commercial
-requiert une licence commerciale séparée (voir `LICENSING.md`).
+requiert une licence commerciale séparée, offerte pour les déploiements
+**CCOS** — SLHAv2 et TurboQuant sont des modules compagnons de CCOS
+(voir `LICENSING.md`).
 
 ---
 
