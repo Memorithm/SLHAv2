@@ -318,29 +318,46 @@ impl SciRustSlhaTile {
     /// `q_coarse` is `Q · W_up` in the latent space (`D_C` dims); `q_sign` is
     /// the packed sign of `Q · Zᵀ`. In WARM mode the binary term is dropped.
     ///
-    /// Dispatches to an AVX2 path at runtime when available, else the portable
-    /// scalar path. Both yield the same result up to float reassociation.
+    /// Dispatches to an AVX-512/AVX2 (x86-64) or NEON (aarch64) path at
+    /// runtime when available, else the portable scalar path. All paths yield
+    /// the same result up to float reassociation.
     #[inline]
     pub fn compute_score(&self, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
-        // The SIMD paths decode uniform INT4 only; NF4, mixed-precision and
-        // TQ3 tiles use the scalar path (SIMD decode is a follow-up).
+        // The SIMD paths decode the uniform-INT4 nibble layout and the TQ3
+        // (3-bit code + 1-bit correction) layout; NF4 and mixed-precision
+        // tiles use the scalar path (SIMD decode of those is a follow-up).
         #[cfg(target_arch = "x86_64")]
         {
-            if !self.is_nf4() && !self.is_mixed() && !self.is_tq3() {
-                if std::is_x86_feature_detected!("avx512f") {
-                    // SAFETY: guarded by runtime feature detection.
-                    return unsafe { self.compute_score_avx512(q_coarse, q_sign) };
-                }
-                if std::is_x86_feature_detected!("avx2") {
-                    // SAFETY: guarded by runtime feature detection.
-                    return unsafe { self.compute_score_avx2(q_coarse, q_sign) };
+            if !self.is_nf4() && !self.is_mixed() {
+                if self.is_tq3() {
+                    if std::is_x86_feature_detected!("avx512f") {
+                        // SAFETY: guarded by runtime feature detection.
+                        return unsafe { self.compute_score_avx512_tq3(q_coarse, q_sign) };
+                    }
+                    if std::is_x86_feature_detected!("avx2") {
+                        // SAFETY: guarded by runtime feature detection.
+                        return unsafe { self.compute_score_avx2_tq3(q_coarse, q_sign) };
+                    }
+                } else {
+                    if std::is_x86_feature_detected!("avx512f") {
+                        // SAFETY: guarded by runtime feature detection.
+                        return unsafe { self.compute_score_avx512(q_coarse, q_sign) };
+                    }
+                    if std::is_x86_feature_detected!("avx2") {
+                        // SAFETY: guarded by runtime feature detection.
+                        return unsafe { self.compute_score_avx2(q_coarse, q_sign) };
+                    }
                 }
             }
         }
         #[cfg(target_arch = "aarch64")]
         {
             // NEON is baseline on aarch64 — no runtime detection needed.
-            if !self.is_nf4() && !self.is_mixed() && !self.is_tq3() {
+            if !self.is_nf4() && !self.is_mixed() {
+                if self.is_tq3() {
+                    // SAFETY: NEON is always available on this target.
+                    return unsafe { self.compute_score_neon_tq3(q_coarse, q_sign) };
+                }
                 // SAFETY: NEON is always available on this target.
                 return unsafe { self.compute_score_neon(q_coarse, q_sign) };
             }
@@ -431,6 +448,89 @@ impl SciRustSlhaTile {
         coarse + self.residual_term(q_sign)
     }
 
+    /// AVX2 TQ3 path: vectorised 3-bit + correction-bit dequant + dot for the
+    /// coarse term of a [`FLAG_TQ3`] tile (honours [`FLAG_TQ3_NOCORR`]).
+    ///
+    /// Decode strategy: 8 dims per step. Dim `8b+l` occupies bits
+    /// `[3l, 3l+3)` of the 4-byte little-endian window at byte `3b`, so a
+    /// broadcast of the window plus per-lane shifts `3l` (`vpsrlvd`) and a
+    /// `& 7` mask denibbles the whole block; the matching correction bits are
+    /// exactly byte `TQ3_CODE_BYTES + b`, extracted the same way with shifts
+    /// `l` and `& 1`.
+    ///
+    /// # Safety
+    /// The `avx2` target feature must be available. The public
+    /// [`Self::compute_score`] dispatcher guarantees this via runtime detection;
+    /// `pub` so benchmarks can target this path explicitly.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn compute_score_avx2_tq3(
+        &self,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> f32 {
+        use std::arch::x86_64::*;
+
+        let global = self.scale;
+        let inv255 = 1.0f32 / 255.0;
+        let code_shifts = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
+        let corr_shifts = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        let seven = _mm256_set1_epi32(7);
+        let one = _mm256_set1_epi32(1);
+        let nocorr = self.is_tq3_nocorr();
+        // Fold the correction into the grid offset: level = code − 3.5 ±
+        // 0.25 = code − 3.75 + corr·0.5 (all quarter-step values are exact
+        // in f32, so this matches the scalar decode exactly per dim).
+        let bias = _mm256_set1_ps(if nocorr {
+            TQ3_HALF_RANGE
+        } else {
+            TQ3_HALF_RANGE + TQ3_CORRECTION
+        });
+        let corr_step = _mm256_set1_ps(2.0 * TQ3_CORRECTION);
+        let mut acc = _mm256_setzero_ps();
+        let lk = &self.latent_kv;
+        let q = q_coarse.as_ptr();
+
+        // 16 blocks × 8 dims (3 code bytes + 1 correction byte each) = 128
+        // dims; one scale per 16-dim group = two consecutive blocks.
+        for b in 0..D_C / 8 {
+            let gs_v = _mm256_set1_ps(global * (self.group_scales[b / 2] as f32 * inv255));
+            // 4-byte little-endian window holding all 8 code fields of this
+            // block. The last block (b = 15) reads bytes 45..=48; byte 48 is
+            // the first correction byte — in-bounds of `latent_kv`, and its
+            // bits sit at window positions >= 24 > 3l + 2 for every lane
+            // l <= 7, so the `& 7` mask after the per-lane shift keeps them
+            // out of every decoded code.
+            let window =
+                u32::from_le_bytes([lk[3 * b], lk[3 * b + 1], lk[3 * b + 2], lk[3 * b + 3]]);
+            let codes = _mm256_and_si256(
+                _mm256_srlv_epi32(_mm256_set1_epi32(window as i32), code_shifts),
+                seven,
+            );
+            let mut level = _mm256_sub_ps(_mm256_cvtepi32_ps(codes), bias);
+            if !nocorr {
+                let cbyte = i32::from(lk[TQ3_CODE_BYTES + b]);
+                let corr = _mm256_and_si256(
+                    _mm256_srlv_epi32(_mm256_set1_epi32(cbyte), corr_shifts),
+                    one,
+                );
+                level = _mm256_add_ps(level, _mm256_mul_ps(_mm256_cvtepi32_ps(corr), corr_step));
+            }
+            let v = _mm256_mul_ps(level, gs_v);
+            let qv = _mm256_loadu_ps(q.add(8 * b));
+            acc = _mm256_add_ps(acc, _mm256_mul_ps(v, qv));
+        }
+
+        let mut tmp = [0.0f32; 8];
+        _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
+        let coarse: f32 = tmp.iter().sum();
+
+        if self.is_warm() {
+            return coarse;
+        }
+        coarse + self.residual_term(q_sign)
+    }
+
     /// AVX-512 path: one 16-wide FMA per group (16 latent dims).
     ///
     /// # Safety
@@ -464,6 +564,93 @@ impl SciRustSlhaTile {
             let d16 = _mm_unpacklo_epi8(lo, hi); // 16 bytes = dims base..base+15
             let n = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(d16));
             let v = _mm512_mul_ps(gs, _mm512_sub_ps(n, eight));
+            let qv = _mm512_loadu_ps(q.add(base));
+            acc = _mm512_fmadd_ps(v, qv, acc);
+        }
+        let coarse = _mm512_reduce_add_ps(acc);
+
+        if self.is_warm() {
+            return coarse;
+        }
+        coarse + self.residual_term(q_sign)
+    }
+
+    /// AVX-512 TQ3 path: one 16-wide FMA per group for a [`FLAG_TQ3`] tile
+    /// (honours [`FLAG_TQ3_NOCORR`]).
+    ///
+    /// Same decode strategy as [`Self::compute_score_avx2_tq3`], two 8-dim
+    /// blocks per iteration: lanes 0..8 shift the 4-byte window at byte `6g`,
+    /// lanes 8..16 the window at byte `6g + 3`, each by `3·(l mod 8)`; the
+    /// group's 16 correction bits are the `u16` at `TQ3_CODE_BYTES + 2g`,
+    /// shifted per lane by `l`.
+    ///
+    /// # Safety
+    /// The `avx512f` target feature must be available. The public
+    /// [`Self::compute_score`] dispatcher guarantees this via runtime detection;
+    /// `pub` so benchmarks can target this path explicitly.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn compute_score_avx512_tq3(
+        &self,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> f32 {
+        use std::arch::x86_64::*;
+
+        let global = self.scale;
+        let inv255 = 1.0f32 / 255.0;
+        #[rustfmt::skip]
+        let code_shifts = _mm512_setr_epi32(
+            0, 3, 6, 9, 12, 15, 18, 21,
+            0, 3, 6, 9, 12, 15, 18, 21,
+        );
+        #[rustfmt::skip]
+        let corr_shifts = _mm512_setr_epi32(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        );
+        let seven = _mm512_set1_epi32(7);
+        let one = _mm512_set1_epi32(1);
+        let nocorr = self.is_tq3_nocorr();
+        // level = code − 3.5 ± 0.25 = code − 3.75 + corr·0.5 (exact in f32).
+        let bias = _mm512_set1_ps(if nocorr {
+            TQ3_HALF_RANGE
+        } else {
+            TQ3_HALF_RANGE + TQ3_CORRECTION
+        });
+        let corr_step = _mm512_set1_ps(2.0 * TQ3_CORRECTION);
+        let mut acc = _mm512_setzero_ps();
+        let lk = &self.latent_kv;
+        let q = q_coarse.as_ptr();
+
+        // One group (16 dims = 6 code bytes + 2 correction bytes) per
+        // 16-wide fused multiply-add.
+        for g in 0..N_GROUPS {
+            let base = g * GROUP_DIM;
+            let gs = _mm512_set1_ps(global * (self.group_scales[g] as f32 * inv255));
+            // Two 4-byte little-endian windows: dims base..base+8 live at
+            // bits [3l, 3l+3) of w0 (byte 6g), dims base+8..base+16 at the
+            // same offsets of w1 (byte 6g+3). For g = 7, w1 reads bytes
+            // 45..=48; byte 48 is the first correction byte — in-bounds of
+            // `latent_kv`, and its bits sit at window positions >= 24, which
+            // the shift-then-`& 7` can never bring into a decoded code.
+            let w0 = u32::from_le_bytes([lk[6 * g], lk[6 * g + 1], lk[6 * g + 2], lk[6 * g + 3]]);
+            let w1 =
+                u32::from_le_bytes([lk[6 * g + 3], lk[6 * g + 4], lk[6 * g + 5], lk[6 * g + 6]]);
+            let windows = _mm512_inserti64x4(
+                _mm512_castsi256_si512(_mm256_set1_epi32(w0 as i32)),
+                _mm256_set1_epi32(w1 as i32),
+                1,
+            );
+            let codes = _mm512_and_epi32(_mm512_srlv_epi32(windows, code_shifts), seven);
+            let mut level = _mm512_sub_ps(_mm512_cvtepi32_ps(codes), bias);
+            if !nocorr {
+                let c16 = i32::from(lk[TQ3_CODE_BYTES + 2 * g])
+                    | (i32::from(lk[TQ3_CODE_BYTES + 2 * g + 1]) << 8);
+                let corr =
+                    _mm512_and_epi32(_mm512_srlv_epi32(_mm512_set1_epi32(c16), corr_shifts), one);
+                level = _mm512_fmadd_ps(_mm512_cvtepi32_ps(corr), corr_step, level);
+            }
+            let v = _mm512_mul_ps(level, gs);
             let qv = _mm512_loadu_ps(q.add(base));
             acc = _mm512_fmadd_ps(v, qv, acc);
         }
@@ -526,6 +713,94 @@ impl SciRustSlhaTile {
             let w_hi = vmovl_u8(d_hi);
             quad!(vcvtq_f32_u32(vmovl_u16(vget_low_u16(w_hi))), base + 8, gs);
             quad!(vcvtq_f32_u32(vmovl_u16(vget_high_u16(w_hi))), base + 12, gs);
+        }
+
+        let coarse = vaddvq_f32(acc);
+        if self.is_warm() {
+            return coarse;
+        }
+        coarse + self.residual_term(q_sign)
+    }
+
+    /// NEON TQ3 path (aarch64): vectorised 3-bit + correction-bit dequant +
+    /// dot for the coarse term of a [`FLAG_TQ3`] tile (honours
+    /// [`FLAG_TQ3_NOCORR`]). The dispatcher calls this unconditionally on
+    /// aarch64, like [`Self::compute_score_neon`].
+    ///
+    /// Same decode strategy as [`Self::compute_score_avx2_tq3`], split into
+    /// two 4-lane quads per 8-dim block: `vshlq_u32` with negative per-lane
+    /// counts is the NEON variable right-shift.
+    ///
+    /// Note: compile-checked via cross-compilation to `aarch64-unknown-linux-gnu`;
+    /// runtime equivalence is asserted by `neon_tq3_path_matches_scalar` on ARM.
+    ///
+    /// # Safety
+    /// Uses `std::arch::aarch64` NEON intrinsics; sound on any aarch64 CPU.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    pub unsafe fn compute_score_neon_tq3(
+        &self,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> f32 {
+        use std::arch::aarch64::*;
+
+        // Negative counts = right shifts: code fields at bits 3l, correction
+        // bits at bit l, for lanes l of the low/high quad of an 8-dim block.
+        const CODE_SH_LO: [i32; 4] = [0, -3, -6, -9];
+        const CODE_SH_HI: [i32; 4] = [-12, -15, -18, -21];
+        const CORR_SH_LO: [i32; 4] = [0, -1, -2, -3];
+        const CORR_SH_HI: [i32; 4] = [-4, -5, -6, -7];
+
+        let global = self.scale;
+        let inv255 = 1.0f32 / 255.0;
+        let code_sh_lo = vld1q_s32(CODE_SH_LO.as_ptr());
+        let code_sh_hi = vld1q_s32(CODE_SH_HI.as_ptr());
+        let corr_sh_lo = vld1q_s32(CORR_SH_LO.as_ptr());
+        let corr_sh_hi = vld1q_s32(CORR_SH_HI.as_ptr());
+        let seven = vdupq_n_u32(7);
+        let one = vdupq_n_u32(1);
+        let nocorr = self.is_tq3_nocorr();
+        // level = code − 3.5 ± 0.25 = code − 3.75 + corr·0.5 (exact in f32).
+        let bias = vdupq_n_f32(if nocorr {
+            TQ3_HALF_RANGE
+        } else {
+            TQ3_HALF_RANGE + TQ3_CORRECTION
+        });
+        let corr_step = vdupq_n_f32(2.0 * TQ3_CORRECTION);
+        let mut acc = vdupq_n_f32(0.0);
+        let lk = &self.latent_kv;
+        let q = q_coarse.as_ptr();
+
+        // Decode 4 dims from the block's window/correction byte, FMA with q.
+        macro_rules! quad {
+            ($window:expr, $cbyte:expr, $code_sh:expr, $corr_sh:expr, $off:expr, $gs:expr) => {{
+                let codes = vandq_u32(vshlq_u32(vdupq_n_u32($window), $code_sh), seven);
+                let mut level = vsubq_f32(vcvtq_f32_u32(codes), bias);
+                if !nocorr {
+                    let corr = vandq_u32(vshlq_u32(vdupq_n_u32($cbyte), $corr_sh), one);
+                    level = vfmaq_f32(level, vcvtq_f32_u32(corr), corr_step);
+                }
+                let v = vmulq_f32(level, $gs);
+                acc = vfmaq_f32(acc, v, vld1q_f32(q.add($off)));
+            }};
+        }
+
+        // 16 blocks × 8 dims (3 code bytes + 1 correction byte each) = 128
+        // dims; one scale per 16-dim group = two consecutive blocks.
+        for b in 0..D_C / 8 {
+            let gs = vdupq_n_f32(global * (self.group_scales[b / 2] as f32 * inv255));
+            // 4-byte little-endian window holding all 8 code fields of this
+            // block. The last block (b = 15) reads bytes 45..=48; byte 48 is
+            // the first correction byte — in-bounds of `latent_kv`, and its
+            // bits sit at window positions >= 24 > 3l + 2 for every lane
+            // l <= 7, so the `& 7` mask after the per-lane shift keeps them
+            // out of every decoded code.
+            let window =
+                u32::from_le_bytes([lk[3 * b], lk[3 * b + 1], lk[3 * b + 2], lk[3 * b + 3]]);
+            let cbyte = u32::from(lk[TQ3_CODE_BYTES + b]);
+            quad!(window, cbyte, code_sh_lo, corr_sh_lo, 8 * b, gs);
+            quad!(window, cbyte, code_sh_hi, corr_sh_hi, 8 * b + 4, gs);
         }
 
         let coarse = vaddvq_f32(acc);
@@ -1150,42 +1425,127 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tq3_tiles_route_to_the_scalar_path() {
-        // Like NF4/mixed: the SIMD kernels decode the uniform nibble layout
-        // only, so the dispatcher must return exactly the scalar result for
-        // TQ3 tiles (HOT and WARM).
-        let v = steep_latent(23);
-        let (packed, global, gs) = quantize_latent_tq3(&v);
-        let mut rng = crate::rng::Rng::new(35);
-        let mut q = [0.0f32; D_C];
-        rng.fill_gaussian(&mut q);
-        let q_sign = [
-            rng.next_u64(),
-            rng.next_u64(),
-            rng.next_u64(),
-            rng.next_u64(),
-        ];
-        for warm in [false, true] {
+    /// TQ3 equivalence fixture: a query, its sign bits, and TQ3 tiles built
+    /// via `quantize_latent_tq3` from both data shapes (Gaussian scenario
+    /// tokens and the steep GPT-2-like spectrum), sweeping all four
+    /// HOT/WARM × corr/nocorr flag combinations. Shared by the dispatch and
+    /// per-ISA score-equivalence tests.
+    fn tq3_equivalence_fixture() -> ([f32; D_C], [u64; RESIDUAL_WORDS], Vec<SciRustSlhaTile>) {
+        use crate::scenario::{generate, Projection};
+        let proj = Projection::new(9);
+        let (q, toks) = generate(123, 32, 0.4);
+        let q_sign = proj.sign_bits(&q);
+        let mut tiles = Vec::new();
+        let mut push = |v: &[f32; D_C], bitmap: [u64; RESIDUAL_WORDS], i: usize| {
+            let (packed, global, gs) = quantize_latent_tq3(v);
             let mut tile = tile_from(packed, global, gs);
+            tile.residual_bitmap = bitmap;
             tile.dynamic_lambda = 0.37;
-            tile.residual_bitmap = [!0, 0, !0, 0];
-            tile.flags |= FLAG_TQ3 | if warm { FLAG_WARM } else { 0 };
-            let via_dispatch = tile.compute_score(&q, &q_sign);
-            let via_scalar = tile.compute_score_scalar(&q, &q_sign);
-            assert_eq!(
-                via_dispatch.to_bits(),
-                via_scalar.to_bits(),
-                "dispatcher did not use the scalar path for a TQ3 tile (warm={warm})"
+            tile.position = i as u32;
+            tile.flags = FLAG_TQ3
+                | if i.is_multiple_of(2) { FLAG_WARM } else { 0 }
+                | if (i / 2).is_multiple_of(2) {
+                    FLAG_TQ3_NOCORR
+                } else {
+                    0
+                };
+            tiles.push(tile);
+        };
+        for (i, t) in toks.iter().enumerate() {
+            push(&t.k_coarse, proj.sign_bits(&t.e), i);
+        }
+        for seed in 0..8u64 {
+            push(&steep_latent(300 + seed), [!0, 0, !0, 0], seed as usize);
+        }
+        (q, q_sign, tiles)
+    }
+
+    #[test]
+    fn tq3_score_paths_agree() {
+        // Replaces `tq3_tiles_route_to_the_scalar_path`: TQ3 tiles now take a
+        // SIMD path where the CPU offers one (AVX-512/AVX2 on x86-64, NEON on
+        // aarch64) and fall back to scalar elsewhere, so whatever path the
+        // dispatcher selects is checked for *equivalence* with the scalar
+        // reference (up to float reassociation), not bit-exactness — HOT and
+        // WARM, with and without the correction plane.
+        let (q, q_sign, tiles) = tq3_equivalence_fixture();
+        for (i, tile) in tiles.iter().enumerate() {
+            let s = tile.compute_score_scalar(&q, &q_sign);
+            let a = tile.compute_score(&q, &q_sign);
+            assert!(
+                (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                "tile {i} (flags {:#07b}): scalar {s} vs dispatch {a}",
+                tile.flags
+            );
+        }
+    }
+
+    #[test]
+    fn avx2_tq3_path_matches_scalar() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("avx2") {
+                eprintln!("avx2 unavailable — skipping equivalence check");
+                return;
+            }
+            let (q, q_sign, tiles) = tq3_equivalence_fixture();
+            for (i, tile) in tiles.iter().enumerate() {
+                let s = tile.compute_score_scalar(&q, &q_sign);
+                // SAFETY: avx2 checked just above.
+                let a = unsafe { tile.compute_score_avx2_tq3(&q, &q_sign) };
+                assert!(
+                    (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                    "tile {i} (flags {:#07b}): scalar {s} vs avx2 {a}",
+                    tile.flags
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn avx512_tq3_path_matches_scalar() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("avx512f") {
+                eprintln!("avx512f unavailable — skipping equivalence check");
+                return;
+            }
+            let (q, q_sign, tiles) = tq3_equivalence_fixture();
+            for (i, tile) in tiles.iter().enumerate() {
+                let s = tile.compute_score_scalar(&q, &q_sign);
+                // SAFETY: avx512f checked just above.
+                let a = unsafe { tile.compute_score_avx512_tq3(&q, &q_sign) };
+                assert!(
+                    (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                    "tile {i} (flags {:#07b}): scalar {s} vs avx512 {a}",
+                    tile.flags
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_tq3_path_matches_scalar() {
+        let (q, q_sign, tiles) = tq3_equivalence_fixture();
+        for (i, tile) in tiles.iter().enumerate() {
+            let s = tile.compute_score_scalar(&q, &q_sign);
+            // SAFETY: NEON is always available on aarch64.
+            let a = unsafe { tile.compute_score_neon_tq3(&q, &q_sign) };
+            assert!(
+                (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                "tile {i} (flags {:#07b}): scalar {s} vs neon {a}",
+                tile.flags
             );
         }
     }
 
     #[test]
     fn mixed_tiles_route_to_the_scalar_path() {
-        // The SIMD kernels decode the uniform nibble layout only: a mixed tile
-        // fed to them would dequantise garbage. The dispatcher must therefore
-        // return exactly the scalar result for mixed tiles (HOT and WARM).
+        // The SIMD kernels decode the uniform nibble and TQ3 layouts only: a
+        // mixed tile fed to them would dequantise garbage. The dispatcher must
+        // therefore return exactly the scalar result for mixed tiles (HOT and
+        // WARM).
         let v = steep_latent(21);
         let (packed, global, gs) = quantize_latent_mixed(&v);
         let mut rng = crate::rng::Rng::new(33);
