@@ -7,14 +7,24 @@
 //! - **COLD** — evicted from the active set; its slot is recycled on the next
 //!   `insert` (no I/O here; a real CCOS would snapshot it to the EventLog).
 //!
+//! **TQ3 tiles get one extra, finer rung** (orthogonal to the state): their
+//! 16-byte correction plane can be paged out first ([`FLAG_TQ3_NOCORR`],
+//! sticky), degrading the latent from quarter-step to half-step error while
+//! keeping the residual. Ladder: HOT 128 → HOT¬corr 112 → WARM 96 →
+//! WARM¬corr 80 → COLD 0. No nibble codec can offer this rung.
+//!
 //! `enforce_budget()` keeps the **logical** footprint under a byte budget by
-//! paging HOT→WARM (per [`PageOutPolicy`]) and, if needed, evicting →COLD.
+//! dropping TQ3 correction planes, then paging HOT→WARM (per
+//! [`PageOutPolicy`]) and, if needed, evicting →COLD.
 //!
 //! Note: tiles physically remain 128 B in the arena `Vec`; `live_bytes()` is the
-//! *elastic* accounting (HOT 128 / WARM 96 / COLD 0) — i.e. what a packed WARM
-//! store would occupy. Masking is O(1) (zero 32 B + flip a flag), no allocation.
+//! *elastic* accounting (HOT 128 / WARM 96 / COLD 0, minus 16 for a paged-out
+//! TQ3 correction plane) — i.e. what a packed store would occupy. Masking is
+//! O(1) (zero a few bytes + flip a flag), no allocation.
 
-use crate::attention::slha_v2::{SciRustSlhaTile, D_C, FLAG_WARM, RESIDUAL_WORDS};
+use crate::attention::slha_v2::{
+    SciRustSlhaTile, D_C, FLAG_TQ3_NOCORR, FLAG_WARM, LATENT_BYTES, RESIDUAL_WORDS, TQ3_CORR_BYTES,
+};
 
 /// Logical footprint of a full (HOT) tile.
 pub const HOT_BYTES: usize = 128;
@@ -226,6 +236,12 @@ impl ElasticKvCache {
         self.state[slot]
     }
 
+    /// Read-only view of a slot's tile (whatever its state — a COLD slot
+    /// keeps its last contents until the slot is recycled by `insert`).
+    pub fn tile(&self, slot: usize) -> &SciRustSlhaTile {
+        &self.tiles[slot]
+    }
+
     /// HOT → WARM: mask/free the 32-byte residual bitmap (zero it, drop λ, set
     /// the flag). No I/O, no allocation.
     pub fn page_out(&mut self, slot: usize) {
@@ -237,6 +253,20 @@ impl ElasticKvCache {
         }
     }
 
+    /// TQ3-only finer rung: mask/free the 16-byte correction plane (zero it,
+    /// set [`FLAG_TQ3_NOCORR`]) — the decoder falls back to the bare 3-bit
+    /// grid. Sticky (the ladder only degrades), orthogonal to HOT/WARM, no-op
+    /// on non-TQ3 or COLD slots. Returns `true` if bytes were reclaimed.
+    pub fn drop_correction(&mut self, slot: usize) -> bool {
+        let t = &mut self.tiles[slot];
+        if self.state[slot] == TileState::Cold || !t.is_tq3() || t.is_tq3_nocorr() {
+            return false;
+        }
+        t.latent_kv[LATENT_BYTES - TQ3_CORR_BYTES..].fill(0);
+        t.flags |= FLAG_TQ3_NOCORR;
+        true
+    }
+
     /// Evict a slot (→ COLD) and recycle it for a future `insert`.
     pub fn evict(&mut self, slot: usize) {
         if self.state[slot] != TileState::Cold {
@@ -245,16 +275,30 @@ impl ElasticKvCache {
         }
     }
 
-    /// Elastic logical footprint: Σ over live slots (HOT 128, WARM 96, COLD 0).
+    /// Elastic logical footprint: Σ over live slots (HOT 128, WARM 96, COLD 0;
+    /// minus [`TQ3_CORR_BYTES`] where the TQ3 correction plane is paged out).
     pub fn live_bytes(&self) -> usize {
         self.state
             .iter()
-            .map(|s| match s {
-                TileState::Hot => HOT_BYTES,
-                TileState::Warm => WARM_BYTES,
-                TileState::Cold => 0,
+            .zip(&self.tiles)
+            .map(|(s, t)| {
+                let base = match s {
+                    TileState::Hot => HOT_BYTES,
+                    TileState::Warm => WARM_BYTES,
+                    TileState::Cold => return 0,
+                };
+                base - if t.is_tq3_nocorr() { TQ3_CORR_BYTES } else { 0 }
             })
             .sum()
+    }
+
+    /// Number of live slots whose TQ3 correction plane is paged out.
+    pub fn nocorr_count(&self) -> usize {
+        self.state
+            .iter()
+            .zip(&self.tiles)
+            .filter(|(s, t)| **s != TileState::Cold && t.is_tq3_nocorr())
+            .count()
     }
 
     /// `(hot, warm, cold)` slot counts.
@@ -270,11 +314,35 @@ impl ElasticKvCache {
         c
     }
 
-    /// Bring the logical footprint under `budget_bytes` in two phases:
+    /// Slots in `state`, ordered by the paging policy (lowest `σ_E` first for
+    /// the hybrid default, else oldest first).
+    fn slots_in_paging_order(&self, state: TileState) -> Vec<usize> {
+        let mut slots: Vec<usize> = (0..self.tiles.len())
+            .filter(|&s| self.state[s] == state)
+            .collect();
+        match self.policy {
+            PageOutPolicy::LowestImpactFirst => slots.sort_by(|&a, &b| {
+                self.tiles[a]
+                    .residual_sigma
+                    .partial_cmp(&self.tiles[b].residual_sigma)
+                    .unwrap_or(core::cmp::Ordering::Equal)
+            }),
+            PageOutPolicy::OldestFirst => slots.sort_by_key(|&s| self.seq[s]),
+        }
+        slots
+    }
+
+    /// Bring the logical footprint under `budget_bytes` in strictly
+    /// increasing harshness:
     ///
-    /// 1. **Page** HOT→WARM in [`PageOutPolicy`] order (default hybrid: lowest
+    /// 1. **Drop HOT TQ3 correction planes** (the finest, cheapest rung:
+    ///    −16 B per tile, latent error 0.25 → 0.5 step, residual kept) in
+    ///    [`PageOutPolicy`] order. No-op on non-TQ3 tiles.
+    /// 2. **Page** HOT→WARM in [`PageOutPolicy`] order (default hybrid: lowest
     ///    `σ_E` first — free the residual where it hurts least).
-    /// 2. If still over budget, **evict** live tiles →COLD per
+    /// 3. **Drop the remaining WARM TQ3 correction planes** (last soft rung:
+    ///    those tiles keep only the bare 3-bit latent).
+    /// 4. If still over budget, **evict** live tiles →COLD per
     ///    [`EvictionPolicy`]: default `Causal` (oldest first), or `Importance`
     ///    (plan axis A5: lowest cumulative attention first, attention sinks
     ///    pinned) — dropping a token is the harder loss.
@@ -283,23 +351,29 @@ impl ElasticKvCache {
             return;
         }
 
-        let mut hot: Vec<usize> = (0..self.tiles.len())
-            .filter(|&s| self.state[s] == TileState::Hot)
-            .collect();
-        match self.policy {
-            PageOutPolicy::LowestImpactFirst => hot.sort_by(|&a, &b| {
-                self.tiles[a]
-                    .residual_sigma
-                    .partial_cmp(&self.tiles[b].residual_sigma)
-                    .unwrap_or(core::cmp::Ordering::Equal)
-            }),
-            PageOutPolicy::OldestFirst => hot.sort_by_key(|&s| self.seq[s]),
+        // Phase 1 — HOT TQ3 correction planes.
+        for s in self.slots_in_paging_order(TileState::Hot) {
+            if self.live_bytes() <= self.budget_bytes {
+                return;
+            }
+            self.drop_correction(s);
         }
-        for s in hot {
+
+        // Phase 2 — HOT→WARM.
+        for s in self.slots_in_paging_order(TileState::Hot) {
             if self.live_bytes() <= self.budget_bytes {
                 return;
             }
             self.page_out(s);
+        }
+
+        // Phase 3 — WARM TQ3 correction planes (tiles paged in phase 2 have
+        // already lost theirs in phase 1; this catches inserted-WARM tiles).
+        for s in self.slots_in_paging_order(TileState::Warm) {
+            if self.live_bytes() <= self.budget_bytes {
+                return;
+            }
+            self.drop_correction(s);
         }
 
         // Still over budget: evict live tiles per the eviction policy.

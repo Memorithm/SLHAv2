@@ -15,7 +15,7 @@ et [`../FINDINGS.md`](../FINDINGS.md).
 
 | Module | Rôle |
 |---|---|
-| `attention::slha_v2` | Tuile + kernel de score fusionné (eq. 2.3), quantizers INT4/NF4 |
+| `attention::slha_v2` | Tuile + kernel de score fusionné (eq. 2.3), quantizers INT4/NF4/mixte/TQ3 |
 | `ccos` | `ElasticKvCache` (Soft-Paging HOT/WARM/COLD, §4), `PageOutPolicy`, `TileState` |
 | `metrics` | `dot`, `cosine`, `rel_l2`, `pearson`, `spearman`, `topk_overlap`, `rms`, `softmax_into` |
 | `rng` | PRNG déterministe `Rng` (SplitMix64) + gaussien |
@@ -38,6 +38,18 @@ pub const GROUP_DIM: usize = 16;       // D_C / N_GROUPS
 pub const FLAG_HOT: u16 = 0;           // tuile complète (latent + résidu)
 pub const FLAG_WARM: u16 = 1 << 0;     // résidu paginé : score = latent seul
 pub const FLAG_NF4: u16 = 1 << 1;      // latent codé en NF4 (sinon INT4 uniforme)
+pub const FLAG_MIXED: u16 = 1 << 2;    // latent mixte : 8 dims @8-bit + 112 @4-bit
+pub const FLAG_TQ3: u16 = 1 << 3;      // latent TQ3 (TurboQuant) : 3 bits + correction 1 bit
+
+pub const MIXED_HI_DIMS: usize = 8;    // dims stockées à 8 bits (codec mixte)
+pub const MIXED_LO_DIMS: usize = 112;  // dims à 4 bits ; la queue (8 dims) est lâchée
+pub const MIXED_DIMS: usize = 120;     // dims conservées par le codec mixte
+pub const MIXED_LO_GROUPS: usize = 7;  // groupes 4 bits (gs[0] = échelle du bloc 8 bits)
+
+pub const TQ3_CODE_BYTES: usize = 48;  // 128 dims × 3 bits (codes, flux little-endian)
+pub const TQ3_CORR_BYTES: usize = 16;  // 128 dims × 1 bit (signes de correction)
+pub const TQ3_HALF_RANGE: f32 = 3.5;   // grille 8 niveaux : code − 3,5 (pas de niveau zéro)
+pub const TQ3_CORRECTION: f32 = 0.25;  // amplitude de la correction 1 bit, en pas de grille
 
 pub const NF4_CODEBOOK: [f32; 16];     // 16 quantiles N(0,1) normalisés à [-1, 1]
 ```
@@ -50,7 +62,7 @@ pub const NF4_CODEBOOK: [f32; 16];     // 16 quantiles N(0,1) normalisés à [-1
 #[cfg_attr(cache_line_128, repr(C, align(128)))]
 #[cfg_attr(not(cache_line_128), repr(C, align(64)))]
 pub struct SciRustSlhaTile {
-    pub latent_kv: [u8; 64],          // 64  base h_KV : 128 dims en INT4/NF4 (2/octet)
+    pub latent_kv: [u8; 64],          // 64  base h_KV : INT4/NF4 (2/octet), mixte 8/4, ou TQ3 (3+1 bits)
     pub residual_bitmap: [u64; 4],    // 32  résidu sign-LSH (256 bits)
     pub scale: f32,                   //  4  échelle globale de déquantification
     pub dynamic_lambda: f32,          //  4  poids de correction binaire λ (eq. 3.2)
@@ -58,7 +70,7 @@ pub struct SciRustSlhaTile {
     pub token_id: u32,                //  4
     pub position: u32,                //  4
     pub head_id: u16,                 //  2
-    pub flags: u16,                   //  2  HOT / WARM / NF4
+    pub flags: u16,                   //  2  HOT / WARM / NF4 / MIXED / TQ3
     pub group_scales: [u8; 8],        //  8  micro-échelles MX : eff(g) = scale·gs[g]/255
 }
 ```
@@ -73,15 +85,17 @@ l'absence de padding.
 impl SciRustSlhaTile {
     pub fn is_warm(&self) -> bool;     // résidu paginé ?
     pub fn is_nf4(&self) -> bool;      // latent en NF4 ?
+    pub fn is_mixed(&self) -> bool;    // latent mixte 8/4-bit ?
+    pub fn is_tq3(&self) -> bool;      // latent TQ3 (3 bits + correction 1 bit) ?
     pub fn group_scale(&self, d: usize) -> f32;   // scale·gs[d/16]/255
-    pub fn dequant_at(&self, d: usize) -> f32;     // (nibble−8)·eff (INT4) ou NF4[nibble]·eff
+    pub fn dequant_at(&self, d: usize) -> f32;     // décode INT4 / NF4 / mixte / TQ3 selon les flags
     pub fn dequant_latent(&self) -> [f32; 128];
 
     /// Score fusionné (eq. 2.3) :
     ///   <q_coarse, dequant(latent)> + λ·(d_s − 2·popcount(q_sign ⊕ B))
     /// Dispatch runtime : AVX-512 > AVX2 > scalaire (x86_64), NEON (aarch64).
-    /// Les tuiles NF4 passent par le chemin scalaire. En WARM, le terme binaire
-    /// est supprimé.
+    /// Les tuiles NF4, mixtes et TQ3 passent par le chemin scalaire. En WARM,
+    /// le terme binaire est supprimé.
     pub fn compute_score(&self, q_coarse: &[f32; 128], q_sign: &[u64; 4]) -> f32;
 
     pub fn compute_score_scalar(&self, q_coarse: &[f32; 128], q_sign: &[u64; 4]) -> f32;
@@ -112,10 +126,19 @@ pub fn quantize_latent_grouped(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
 
 // NF4 (codebook normal) par groupe — même tuile, flag FLAG_NF4 requis au scoring.
 pub fn quantize_latent_nf4(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
+
+// Mixte 8/4 bits : 8 dims @8-bit (échelle gs[0]) + 112 dims @4-bit, queue lâchée —
+// même 64 o, flag FLAG_MIXED requis. Suppose un latent ordonné par variance (PCA).
+pub fn quantize_latent_mixed(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
+
+// TQ3 (port TurboQuant) : 48 o de codes 3 bits (grille symétrique 8 niveaux,
+// sans niveau zéro) + 16 o de signes de correction 1 bit (±0,25 pas) — même 64 o,
+// flag FLAG_TQ3 requis. Voir docs/TURBOQUANT.md (mesures et trade-offs).
+pub fn quantize_latent_tq3(v: &[f32; 128]) -> ([u8; 64], f32, [u8; 8]);
 ```
 
-`LatentCodec { Int4Single, Int4Grouped, Nf4 }` sélectionne le codec via
-`LearnedModel::encode_with(key, pos, warm, codec)`.
+`LatentCodec { Int4Single, Int4Grouped, Nf4, Mixed, Tq3 }` sélectionne le codec
+via `LearnedModel::encode_with(key, pos, warm, codec)`.
 
 ## `safety` — Filtre de sécurité géométrique latent
 
