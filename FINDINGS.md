@@ -165,6 +165,19 @@ mixte reste le codec des spectres réels, TQ3 garde son intérêt propre (plans
 séparables, pagination) sur distributions plates. Tableau complet (9 configs) :
 `docs/TURBOQUANT.md` §3bis.
 
+**Post-scriptum (2026-07-02) — la frontière est la projection, pas le codec.**
+Le goulot réel une fois le codec réglé (mixte/MIX3 : cos 0,984, KL 0,055) étant
+la **projection** de rang 128, le levier « raffiner la PCA jointe par SGD
+score-aware » a été testé sur le dump held-out. Résultat **négatif** : le pas
+synthétique (2e-3) diverge en NaN sur les magnitudes réelles ; à lr 1e-6 le SGD
+converge mais **sur-apprend** l'erreur de score du *train* et dégrade la sortie
+held-out (cos 0,985 → 0,921, KL 0,055 → 0,291). À rang 128 la PCA jointe reste
+le plafond ; le seuil KL ≤ 0,03 n'est pas atteignable en raffinant la projection
+*linéaire* de rang 128 (il faudrait un rang plus élevé — casse la tuile 128 o —
+ou une projection non-linéaire). Détail et tableau : `docs/TURBOQUANT.md`
+§3quater. Le cosinus (0,984) étant déjà excellent, l'enjeu du KL de 0,055 se
+tranche en Phase 2 (llama.cpp), pas par plus de réglage linéaire.
+
 ## 6. Prochaines étapes (hors périmètre sandbox)
 
 1. **Entraîner conjointement** `W_down`/`W_up` avec un vrai modèle (le §7.7 en

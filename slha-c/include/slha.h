@@ -83,6 +83,49 @@ char* slha_audit();
  */
 void slha_free_string(char* s);
 
+/* ------------------------------------------------------------------------- *
+ * Codec path — load a learned projection, encode a d-dim key into a tile,
+ * decode a tile's latent back to d-dim space. See docs/INTEGRATION.md.
+ * ------------------------------------------------------------------------- */
+
+/** Opaque handle to a loaded SLHA projection model (.slhw). */
+typedef struct SlhaModel SlhaModel;
+
+/**
+ * Load a projection model from a .slhw file. Returns NULL on error.
+ * Release with slha_weights_free.
+ */
+SlhaModel* slha_weights_load(const char* path);
+
+/** The projection input dimension d (key/query length). 0 if model is NULL. */
+size_t slha_model_dim(const SlhaModel* model);
+
+/**
+ * Encode a d-dim key into a 128-byte tile.
+ * codec: 0=int4-single 1=int4-grouped 2=nf4 3=mixed 4=tq3 5=mix3.
+ * Returns 0 on success; -1 null arg, -2 panic, -3 dim mismatch, -4 bad codec.
+ */
+int32_t slha_encode_key(
+    const SlhaModel* model,
+    const float* key,
+    size_t d,
+    uint32_t pos,
+    int32_t codec,
+    SciRustSlhaTile* out_tile);
+
+/**
+ * Decode a tile's latent back to the original d-dim space (reconstruct).
+ * out receives d floats. Returns 0 on success; -1 null, -2 panic, -3 dim.
+ */
+int32_t slha_decode_latent(
+    const SlhaModel* model,
+    const SciRustSlhaTile* tile,
+    float* out,
+    size_t d);
+
+/** Release a model from slha_weights_load. NULL is a no-op. */
+void slha_weights_free(SlhaModel* model);
+
 #ifdef __cplusplus
 }
 #endif
