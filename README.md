@@ -22,6 +22,18 @@ processeur (caches L1/L2/L3) plutôt que de dépendre d'un GPU.
 
 ---
 
+## Relation avec le contrat mémoire CCOS d'OpenClaw
+
+SLHA v2 est un **noyau de compression de KV-cache** ; son
+`scirust/src/ccos.rs` (`ElasticKvCache`, arena KV Soft-Paging) est un artefact
+**différent** du serveur mémoire CCOS — il ne partage que le nom « CCOS ». Le
+serveur `slha-mcp` expose des outils `slha.*`
+(audit / explain / compress / score / benchmark), **pas**
+`ccos.recall` / `get` / `sync`. OpenClaw atteint le vrai serveur mémoire CCOS
+via `mcporter` (serverName `ccos`) sur
+[Memorithm/CCOS](https://github.com/Memorithm/CCOS). Ne pas renommer
+`serverInfo.name` en `ccos` (cela casserait le routage mcporter).
+
 ## Comment ça marche (en 30 secondes)
 
 Quand une IA génère du texte, elle doit se souvenir de tout ce qui a été dit
