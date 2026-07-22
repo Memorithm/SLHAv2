@@ -19,67 +19,388 @@ use scirust::attention::slha_v2::{
 use scirust::json::{obj, Json};
 use scirust::metrics::dot;
 use scirust::scenario::{build_tile, generate, ContextToken, Projection};
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Write};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// Latest stable MCP revision supported by this server.
+const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Revisions whose stdio/tool subset is supported by this implementation.
+///
+/// When the requested version appears here, it is echoed during negotiation.
+/// Otherwise the server proposes [`PROTOCOL_VERSION`], allowing the client to
+/// disconnect if it cannot support that revision.
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
+    ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
 const SERVER_NAME: &str = "slha-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DIMS: usize = 128; // D_C
 
+/// Maximum JSON-RPC frame size, excluding the newline delimiter.
+///
+/// SLHA tools need only a few kilobytes for two 128-dimensional vectors, so
+/// 256 KiB leaves substantial headroom without permitting unbounded allocation.
+const MAX_FRAME_BYTES: usize = 256 * 1024;
+
+/// Largest numeric request identifier that is exactly representable by f64.
+const MAX_SAFE_JSON_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Lifecycle {
+    /// No successful `initialize` request has been processed.
+    #[default]
+    Uninitialized,
+
+    /// The initialize response was sent; the server is waiting for
+    /// `notifications/initialized`.
+    AwaitingInitialized,
+
+    /// Normal MCP operations are permitted.
+    Ready,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameRead {
+    Eof,
+    Ready,
+    TooLarge,
+}
+
+/// Read one newline-delimited stdio frame without allowing unbounded growth.
+///
+/// Oversized frames are completely discarded through their newline delimiter,
+/// so the next call starts at the next JSON-RPC message.
+fn read_frame<R: BufRead>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    max_bytes: usize,
+) -> io::Result<FrameRead> {
+    buffer.clear();
+
+    let mut saw_input = false;
+    let mut too_large = false;
+
+    loop {
+        let available = reader.fill_buf()?;
+
+        if available.is_empty() {
+            if !saw_input {
+                return Ok(FrameRead::Eof);
+            }
+
+            break;
+        }
+
+        saw_input = true;
+
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let payload_len = newline.unwrap_or(available.len());
+        let consumed = payload_len + usize::from(newline.is_some());
+
+        if !too_large {
+            if payload_len > max_bytes.saturating_sub(buffer.len()) {
+                too_large = true;
+                buffer.clear();
+            } else {
+                buffer.extend_from_slice(&available[..payload_len]);
+            }
+        }
+
+        reader.consume(consumed);
+
+        if newline.is_some() {
+            break;
+        }
+    }
+
+    if too_large {
+        Ok(FrameRead::TooLarge)
+    } else {
+        Ok(FrameRead::Ready)
+    }
+}
+
+fn write_response<W: Write>(out: &mut W, response: &Json) -> io::Result<()> {
+    writeln!(out, "{}", response.to_compact())?;
+    out.flush()
+}
+
 fn main() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
+
+    let mut input = stdin.lock();
     let mut out = stdout.lock();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let response = match Json::parse(trimmed) {
-            Ok(req) => handle(&req),
-            Err(e) => Some(err_response(
+    let mut frame = Vec::with_capacity(4096);
+    let mut lifecycle = Lifecycle::Uninitialized;
+
+    loop {
+        let response = match read_frame(&mut input, &mut frame, MAX_FRAME_BYTES) {
+            Ok(FrameRead::Eof) => break,
+            Ok(FrameRead::TooLarge) => Some(err_response(
                 Json::Null,
                 -32700,
-                &format!("parse error: {e}"),
+                &format!("parse error: JSON-RPC frame exceeds {MAX_FRAME_BYTES} bytes"),
             )),
+            Ok(FrameRead::Ready) => {
+                let text = match std::str::from_utf8(&frame) {
+                    Ok(text) => text.trim(),
+                    Err(error) => {
+                        let response = err_response(
+                            Json::Null,
+                            -32700,
+                            &format!("parse error: invalid UTF-8: {error}"),
+                        );
+
+                        if write_response(&mut out, &response).is_err() {
+                            break;
+                        }
+
+                        continue;
+                    }
+                };
+
+                if text.is_empty() {
+                    continue;
+                }
+
+                match Json::parse_with_limit(text, MAX_FRAME_BYTES) {
+                    Ok(request) => handle(&request, &mut lifecycle),
+                    Err(error) => Some(err_response(
+                        Json::Null,
+                        -32700,
+                        &format!("parse error: {error}"),
+                    )),
+                }
+            }
+            Err(error) => {
+                eprintln!("slha-mcp: stdin read error: {error}");
+                break;
+            }
         };
-        if let Some(resp) = response {
-            let _ = writeln!(out, "{}", resp.to_compact());
-            let _ = out.flush();
+
+        if let Some(response) = response {
+            if write_response(&mut out, &response).is_err() {
+                break;
+            }
         }
     }
 }
 
-/// Handle one JSON-RPC message. Returns `None` for notifications (no reply).
-fn handle(req: &Json) -> Option<Json> {
+fn valid_request_id(id: &Json) -> bool {
+    match id {
+        Json::Str(_) => true,
+        Json::Num(number) => {
+            number.is_finite() && number.fract() == 0.0 && number.abs() <= MAX_SAFE_JSON_INTEGER
+        }
+        _ => false,
+    }
+}
+
+fn negotiate_protocol_version(requested: &str) -> &'static str {
+    SUPPORTED_PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|supported| *supported == requested)
+        .unwrap_or(PROTOCOL_VERSION)
+}
+
+fn handle_initialize(id: Json, params: Option<&Json>, lifecycle: &mut Lifecycle) -> Json {
+    if *lifecycle != Lifecycle::Uninitialized {
+        return err_response(id, -32600, "server is already initialized");
+    }
+
+    let params = match params {
+        Some(Json::Obj(_)) => params.expect("matched Some"),
+        _ => {
+            return err_response(id, -32602, "initialize params must be an object");
+        }
+    };
+
+    let requested = match params.get("protocolVersion").and_then(Json::as_str) {
+        Some(version) if !version.is_empty() => version,
+        _ => {
+            return err_response(
+                id,
+                -32602,
+                "initialize requires a non-empty protocolVersion",
+            );
+        }
+    };
+
+    if !matches!(params.get("capabilities"), Some(Json::Obj(_))) {
+        return err_response(id, -32602, "initialize requires a capabilities object");
+    }
+
+    let client_info = match params.get("clientInfo") {
+        Some(Json::Obj(_)) => params.get("clientInfo").expect("matched Some"),
+        _ => {
+            return err_response(id, -32602, "initialize requires a clientInfo object");
+        }
+    };
+
+    if client_info
+        .get("name")
+        .and_then(Json::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return err_response(id, -32602, "clientInfo.name must be a non-empty string");
+    }
+
+    if client_info
+        .get("version")
+        .and_then(Json::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return err_response(id, -32602, "clientInfo.version must be a non-empty string");
+    }
+
+    let negotiated = negotiate_protocol_version(requested);
+    *lifecycle = Lifecycle::AwaitingInitialized;
+
+    ok_response(
+        id,
+        obj(vec![
+            ("protocolVersion", Json::str(negotiated)),
+            (
+                "capabilities",
+                obj(vec![(
+                    "tools",
+                    obj(vec![("listChanged", Json::Bool(false))]),
+                )]),
+            ),
+            (
+                "serverInfo",
+                obj(vec![
+                    ("name", Json::str(SERVER_NAME)),
+                    ("title", Json::str("SLHA v2 MCP Server")),
+                    ("version", Json::str(SERVER_VERSION)),
+                    (
+                        "description",
+                        Json::str("Deterministic SLHA v2 compression, scoring and audit tools"),
+                    ),
+                ]),
+            ),
+            (
+                "instructions",
+                Json::str(
+                    "Use slha.audit for invariants, slha.compress for latent \
+                     codecs, slha.score for score comparison and slha.benchmark \
+                     for local throughput.",
+                ),
+            ),
+        ]),
+    )
+}
+
+/// Handle one JSON-RPC message.
+///
+/// Valid notifications return `None`. Malformed objects are not treated as
+/// notifications merely because they lack an `id`.
+fn handle(req: &Json, lifecycle: &mut Lifecycle) -> Option<Json> {
+    if !matches!(req, Json::Obj(_)) {
+        return Some(err_response(
+            Json::Null,
+            -32600,
+            "invalid request: top-level value must be an object",
+        ));
+    }
+
+    if req.get("jsonrpc").and_then(Json::as_str) != Some("2.0") {
+        return Some(err_response(
+            Json::Null,
+            -32600,
+            "invalid request: jsonrpc must equal \"2.0\"",
+        ));
+    }
+
+    let method = match req.get("method").and_then(Json::as_str) {
+        Some(method) if !method.is_empty() => method,
+        _ => {
+            return Some(err_response(
+                Json::Null,
+                -32600,
+                "invalid request: method must be a non-empty string",
+            ));
+        }
+    };
+
     let id_opt = req.get("id").cloned();
+
+    if let Some(id) = id_opt.as_ref() {
+        if !valid_request_id(id) {
+            return Some(err_response(
+                Json::Null,
+                -32600,
+                "invalid request: id must be a string or safe integer",
+            ));
+        }
+    }
+
     let is_notification = id_opt.is_none();
     let id = id_opt.unwrap_or(Json::Null);
-    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+    if let Some(params) = req.get("params") {
+        if !matches!(params, Json::Obj(_)) {
+            if is_notification {
+                return None;
+            }
+
+            return Some(err_response(id, -32602, "params must be an object"));
+        }
+    }
 
     match method {
-        "initialize" => Some(ok_response(
-            id,
-            obj(vec![
-                ("protocolVersion", Json::str(PROTOCOL_VERSION)),
-                ("capabilities", obj(vec![("tools", obj(vec![]))])),
-                (
-                    "serverInfo",
-                    obj(vec![
-                        ("name", Json::str(SERVER_NAME)),
-                        ("version", Json::str(SERVER_VERSION)),
-                    ]),
-                ),
-            ]),
-        )),
-        // Lifecycle notifications: acknowledge by staying silent.
-        "notifications/initialized" | "initialized" => None,
-        "ping" => Some(ok_response(id, obj(vec![]))),
-        "tools/list" => Some(ok_response(id, obj(vec![("tools", tool_definitions())]))),
+        "initialize" => {
+            if is_notification {
+                // MCP requires initialize to be a request, but JSON-RPC
+                // notifications must never receive a response.
+                None
+            } else {
+                Some(handle_initialize(id, req.get("params"), lifecycle))
+            }
+        }
+
+        "notifications/initialized" => {
+            if !is_notification {
+                return Some(err_response(
+                    id,
+                    -32600,
+                    "notifications/initialized must not contain an id",
+                ));
+            }
+
+            if *lifecycle == Lifecycle::AwaitingInitialized {
+                *lifecycle = Lifecycle::Ready;
+            }
+
+            None
+        }
+
+        "ping" => {
+            if is_notification {
+                None
+            } else {
+                Some(ok_response(id, obj(vec![])))
+            }
+        }
+
+        _ if *lifecycle != Lifecycle::Ready => {
+            if is_notification {
+                None
+            } else {
+                Some(err_response(id, -32002, "server is not initialized"))
+            }
+        }
+
+        "tools/list" => {
+            if is_notification {
+                None
+            } else {
+                Some(ok_response(id, obj(vec![("tools", tool_definitions())])))
+            }
+        }
+
         "tools/call" => {
             if is_notification {
                 None
@@ -87,7 +408,9 @@ fn handle(req: &Json) -> Option<Json> {
                 Some(handle_tool_call(id, req.get("params")))
             }
         }
+
         _ if is_notification => None,
+
         other => Some(err_response(
             id,
             -32601,
@@ -449,31 +772,239 @@ fn dispatched_path() -> &'static str {
 mod tests {
     use super::*;
 
-    fn call(method: &str, params: Json, id: i64) -> Json {
-        let req = obj(vec![
+    fn request_with_id(method: &str, params: Json, id: Json) -> Json {
+        obj(vec![
             ("jsonrpc", Json::str("2.0")),
-            ("id", Json::Num(id as f64)),
+            ("id", id),
             ("method", Json::str(method)),
             ("params", params),
-        ]);
-        handle(&req).expect("expected a response")
+        ])
+    }
+
+    fn request(method: &str, params: Json, id: i64) -> Json {
+        request_with_id(method, params, Json::Num(id as f64))
+    }
+
+    fn initialize_params(protocol_version: &str) -> Json {
+        obj(vec![
+            ("protocolVersion", Json::str(protocol_version)),
+            ("capabilities", Json::Obj(vec![])),
+            (
+                "clientInfo",
+                obj(vec![
+                    ("name", Json::str("slha-mcp-tests")),
+                    ("version", Json::str("1.0.0")),
+                ]),
+            ),
+        ])
+    }
+
+    fn call(method: &str, params: Json, id: i64) -> Json {
+        let request = request(method, params, id);
+        let mut lifecycle = Lifecycle::Ready;
+
+        handle(&request, &mut lifecycle).expect("expected a response")
+    }
+
+    fn error_code(response: &Json) -> Option<f64> {
+        response
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Json::as_f64)
     }
 
     #[test]
     fn initialize_advertises_server() {
-        let r = call("initialize", Json::Obj(vec![]), 1);
-        let info = r.get("result").unwrap().get("serverInfo").unwrap();
+        let request = request("initialize", initialize_params(PROTOCOL_VERSION), 1);
+        let mut lifecycle = Lifecycle::Uninitialized;
+
+        let response = handle(&request, &mut lifecycle).expect("initialize must return a response");
+
+        assert_eq!(lifecycle, Lifecycle::AwaitingInitialized);
+
+        let result = response.get("result").unwrap();
+        let info = result.get("serverInfo").unwrap();
+
         assert_eq!(info.get("name").unwrap().as_str(), Some("slha-mcp"));
-        assert!(r.get("result").unwrap().get("protocolVersion").is_some());
+        assert_eq!(
+            result.get("protocolVersion").unwrap().as_str(),
+            Some(PROTOCOL_VERSION)
+        );
+        assert!(result.get("capabilities").is_some());
+    }
+
+    #[test]
+    fn supported_legacy_protocol_version_is_echoed() {
+        let request = request("initialize", initialize_params("2024-11-05"), 1);
+        let mut lifecycle = Lifecycle::Uninitialized;
+
+        let response = handle(&request, &mut lifecycle).unwrap();
+
+        assert_eq!(
+            response
+                .get("result")
+                .unwrap()
+                .get("protocolVersion")
+                .unwrap()
+                .as_str(),
+            Some("2024-11-05")
+        );
+    }
+
+    #[test]
+    fn unsupported_protocol_version_falls_back_to_current() {
+        let request = request("initialize", initialize_params("1900-01-01"), 1);
+        let mut lifecycle = Lifecycle::Uninitialized;
+
+        let response = handle(&request, &mut lifecycle).unwrap();
+
+        assert_eq!(
+            response
+                .get("result")
+                .unwrap()
+                .get("protocolVersion")
+                .unwrap()
+                .as_str(),
+            Some(PROTOCOL_VERSION)
+        );
+    }
+
+    #[test]
+    fn initialize_notification_gets_no_reply_and_preserves_lifecycle() {
+        let notification = obj(vec![
+            ("jsonrpc", Json::str("2.0")),
+            ("method", Json::str("initialize")),
+            ("params", initialize_params(PROTOCOL_VERSION)),
+        ]);
+        let mut lifecycle = Lifecycle::Uninitialized;
+
+        assert!(handle(&notification, &mut lifecycle).is_none());
+        assert_eq!(lifecycle, Lifecycle::Uninitialized);
     }
 
     #[test]
     fn notifications_get_no_reply() {
-        let note = obj(vec![
+        let notification = obj(vec![
             ("jsonrpc", Json::str("2.0")),
             ("method", Json::str("notifications/initialized")),
         ]);
-        assert!(handle(&note).is_none());
+        let mut lifecycle = Lifecycle::AwaitingInitialized;
+
+        assert!(handle(&notification, &mut lifecycle).is_none());
+        assert_eq!(lifecycle, Lifecycle::Ready);
+    }
+
+    #[test]
+    fn tools_require_completed_initialization() {
+        let list_request = request("tools/list", Json::Obj(vec![]), 2);
+        let mut lifecycle = Lifecycle::Uninitialized;
+
+        let before_initialize = handle(&list_request, &mut lifecycle).unwrap();
+        assert_eq!(error_code(&before_initialize), Some(-32002.0));
+
+        let initialize = request("initialize", initialize_params(PROTOCOL_VERSION), 1);
+        assert!(handle(&initialize, &mut lifecycle).is_some());
+        assert_eq!(lifecycle, Lifecycle::AwaitingInitialized);
+
+        let before_notification = handle(&list_request, &mut lifecycle).unwrap();
+        assert_eq!(error_code(&before_notification), Some(-32002.0));
+
+        let notification = obj(vec![
+            ("jsonrpc", Json::str("2.0")),
+            ("method", Json::str("notifications/initialized")),
+        ]);
+        assert!(handle(&notification, &mut lifecycle).is_none());
+        assert_eq!(lifecycle, Lifecycle::Ready);
+
+        let ready = handle(&list_request, &mut lifecycle).unwrap();
+        assert!(ready.get("result").is_some());
+    }
+
+    #[test]
+    fn invalid_json_rpc_envelopes_are_rejected() {
+        let mut lifecycle = Lifecycle::Ready;
+
+        let array = Json::Arr(vec![]);
+        assert_eq!(
+            error_code(&handle(&array, &mut lifecycle).unwrap()),
+            Some(-32600.0)
+        );
+
+        let missing_version = obj(vec![("id", Json::Num(1.0)), ("method", Json::str("ping"))]);
+        assert_eq!(
+            error_code(&handle(&missing_version, &mut lifecycle).unwrap()),
+            Some(-32600.0)
+        );
+
+        let fractional_id = obj(vec![
+            ("jsonrpc", Json::str("2.0")),
+            ("id", Json::Num(1.5)),
+            ("method", Json::str("ping")),
+        ]);
+        assert_eq!(
+            error_code(&handle(&fractional_id, &mut lifecycle).unwrap()),
+            Some(-32600.0)
+        );
+
+        let null_id = obj(vec![
+            ("jsonrpc", Json::str("2.0")),
+            ("id", Json::Null),
+            ("method", Json::str("ping")),
+        ]);
+        assert_eq!(
+            error_code(&handle(&null_id, &mut lifecycle).unwrap()),
+            Some(-32600.0)
+        );
+
+        let array_params = obj(vec![
+            ("jsonrpc", Json::str("2.0")),
+            ("id", Json::Num(1.0)),
+            ("method", Json::str("ping")),
+            ("params", Json::Arr(vec![])),
+        ]);
+        assert_eq!(
+            error_code(&handle(&array_params, &mut lifecycle).unwrap()),
+            Some(-32602.0)
+        );
+    }
+
+    #[test]
+    fn string_request_id_round_trips() {
+        let request = request_with_id("ping", Json::Obj(vec![]), Json::str("request-42"));
+        let mut lifecycle = Lifecycle::Ready;
+
+        let response = handle(&request, &mut lifecycle).unwrap();
+
+        assert_eq!(
+            response.get("id").and_then(Json::as_str),
+            Some("request-42")
+        );
+    }
+
+    #[test]
+    fn bounded_frame_reader_discards_oversized_frame_and_recovers() {
+        let valid = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let input = format!("{}\n{valid}\n", "x".repeat(MAX_FRAME_BYTES + 1));
+
+        let mut reader = std::io::Cursor::new(input.into_bytes());
+        let mut buffer = Vec::new();
+
+        assert_eq!(
+            read_frame(&mut reader, &mut buffer, MAX_FRAME_BYTES).unwrap(),
+            FrameRead::TooLarge
+        );
+
+        assert_eq!(
+            read_frame(&mut reader, &mut buffer, MAX_FRAME_BYTES).unwrap(),
+            FrameRead::Ready
+        );
+
+        assert_eq!(std::str::from_utf8(&buffer).unwrap(), valid);
+
+        assert_eq!(
+            read_frame(&mut reader, &mut buffer, MAX_FRAME_BYTES).unwrap(),
+            FrameRead::Eof
+        );
     }
 
     #[test]
