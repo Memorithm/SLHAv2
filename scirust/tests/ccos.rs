@@ -2,7 +2,8 @@
 
 use scirust::attention::slha_v2::{LatentCodec, MIX3_CORR_BYTES, TQ3_CORR_BYTES};
 use scirust::ccos::{
-    ElasticKvCache, EvictionPolicy, PageOutPolicy, TileState, HOT_BYTES, WARM_BYTES,
+    ElasticKvCache, EvictionDurability, EvictionPolicy, PageOutPolicy, TileState, HOT_BYTES,
+    WARM_BYTES,
 };
 use scirust::learned::{gen_keys, LearnedModel};
 use scirust::rng::Rng;
@@ -603,6 +604,85 @@ fn el_tmp(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!("scirust_ccos_el_{}_{name}", std::process::id()));
     p
+}
+
+#[test]
+fn durable_eviction_persists_before_recycling() {
+    let proj = Projection::new(0xD001);
+    let path = el_tmp("durable_success");
+    let _ = std::fs::remove_file(&path);
+
+    let log = EventLog::create(&path).unwrap();
+    let mut cache = ElasticKvCache::with_budget(usize::MAX);
+    cache.attach_durable_event_log(log);
+
+    assert_eq!(
+        cache.eviction_durability(),
+        EvictionDurability::RequireDurable
+    );
+
+    let (_q, toks) = generate(0xD001, 1, 0.3);
+    let slot = cache.insert(build_tile(&proj, &toks[0], 0, false));
+
+    assert!(cache.evict(slot));
+    assert_eq!(cache.state(slot), TileState::Cold);
+    assert_eq!(cache.log_errors(), 0);
+    assert_eq!(cache.blocked_evictions(), 0);
+
+    drop(cache);
+
+    let mut reopened = EventLog::open(&path).unwrap();
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened.read_all().unwrap().len(), 1);
+
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn durable_eviction_failure_keeps_tile_live() {
+    let proj = Projection::new(0xD002);
+    let path = el_tmp("durable_failure");
+    let _ = std::fs::remove_file(&path);
+
+    {
+        let log = EventLog::create(&path).unwrap();
+        drop(log);
+    }
+
+    let read_only = EventLog::open_read_only(&path).unwrap();
+
+    let mut cache = ElasticKvCache::with_budget(0);
+    cache.attach_durable_event_log(read_only);
+
+    let (_q, toks) = generate(0xD002, 1, 0.3);
+    let slot = cache.insert(build_tile(&proj, &toks[0], 0, false));
+
+    assert!(
+        !cache.enforce_budget(),
+        "budget zero must remain unmet when durable persistence fails"
+    );
+
+    assert_ne!(
+        cache.state(slot),
+        TileState::Cold,
+        "failed durable persistence must keep the tile live"
+    );
+    assert!(cache.live_bytes() > 0);
+    assert_eq!(cache.log_errors(), 1);
+    assert_eq!(cache.blocked_evictions(), 1);
+
+    let next_slot = cache.insert(build_tile(&proj, &toks[0], 1, false));
+    assert_ne!(
+        next_slot, slot,
+        "a blocked eviction must not recycle the original slot"
+    );
+
+    drop(cache);
+
+    let reopened = EventLog::open(&path).unwrap();
+    assert_eq!(reopened.len(), 0);
+
+    std::fs::remove_file(&path).unwrap();
 }
 
 #[test]

@@ -176,6 +176,7 @@ pub struct EventLog {
     file: File,
     records: u64,
     version: u32,
+    writable: bool,
 }
 
 impl EventLog {
@@ -223,6 +224,7 @@ impl EventLog {
             file,
             records: 0,
             version: VERSION,
+            writable: true,
         })
     }
 
@@ -233,7 +235,7 @@ impl EventLog {
     /// Returns [`io::ErrorKind::InvalidData`] if the file is truncated,
     /// corrupted or uses an unsupported format.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        Self::open_impl(path, false)
+        Self::open_impl(path, false, true)
     }
 
     /// Open an existing log and recover from one partial record at the tail.
@@ -241,11 +243,22 @@ impl EventLog {
     /// Only bytes after the final complete record are removed. Header errors,
     /// checksum failures and corruption of complete records remain fatal.
     pub fn open_recover<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        Self::open_impl(path, true)
+        Self::open_impl(path, true, true)
     }
 
-    fn open_impl<P: AsRef<Path>>(path: P, recover_tail: bool) -> io::Result<Self> {
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    /// Open and validate an existing log in read-only mode.
+    ///
+    /// Reading and lookup remain available, but [`Self::append`] and
+    /// [`Self::append_durable`] return [`io::ErrorKind::PermissionDenied`].
+    pub fn open_read_only<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::open_impl(path, false, false)
+    }
+
+    fn open_impl<P: AsRef<Path>>(path: P, recover_tail: bool, writable: bool) -> io::Result<Self> {
+        let mut options = OpenOptions::new();
+        options.read(true).write(writable);
+
+        let mut file = options.open(path)?;
         let mut len = file.seek(SeekFrom::End(0))?;
 
         if len < HEADER_BYTES as u64 {
@@ -292,6 +305,7 @@ impl EventLog {
             file,
             records,
             version,
+            writable,
         };
 
         log.validate_records()?;
@@ -309,6 +323,13 @@ impl EventLog {
     /// On a normal write failure, the implementation attempts to restore the
     /// previous file length before returning the I/O error.
     pub fn append(&mut self, seq: u64, slot: u32, tile: &SciRustSlhaTile) -> io::Result<()> {
+        if !self.writable {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "EventLog: log opened read-only",
+            ));
+        }
+
         let start = self.file.seek(SeekFrom::End(0))?;
         let tile_bytes = tile_to_bytes(tile);
 
@@ -330,6 +351,34 @@ impl EventLog {
         }
 
         self.records += 1;
+        Ok(())
+    }
+
+    /// Append a record and synchronize it to durable storage before returning.
+    ///
+    /// If synchronization fails, the implementation attempts to remove the
+    /// newly appended record and restore the previous record count.
+    pub fn append_durable(
+        &mut self,
+        seq: u64,
+        slot: u32,
+        tile: &SciRustSlhaTile,
+    ) -> io::Result<()> {
+        let start = self.file.seek(SeekFrom::End(0))?;
+        let previous_records = self.records;
+
+        self.append(seq, slot, tile)?;
+
+        if let Err(sync_error) = self.sync() {
+            if self.file.set_len(start).is_ok() {
+                self.records = previous_records;
+                let _ = self.file.seek(SeekFrom::End(0));
+                let _ = self.file.sync_all();
+            }
+
+            return Err(sync_error);
+        }
+
         Ok(())
     }
 
@@ -548,6 +597,54 @@ mod tests {
         let by_slot = log.fetch_last_for_slot(0).unwrap().unwrap();
         assert!(tiles_eq(&by_slot.tile, &sample_tile(2)));
         assert!(log.fetch_by_seq(999).unwrap().is_none());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn append_durable_round_trips_after_reopen() {
+        let path = tmp_path("durable");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut log = EventLog::create(&path).unwrap();
+
+            log.append_durable(77, 4, &sample_tile(7)).unwrap();
+
+            assert_eq!(log.len(), 1);
+        }
+
+        let mut reopened = EventLog::open(&path).unwrap();
+        let records = reopened.read_all().unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 77);
+        assert_eq!(records[0].slot, 4);
+        assert!(tiles_eq(&records[0].tile, &sample_tile(7)));
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn read_only_log_allows_reads_but_rejects_appends() {
+        let path = tmp_path("readonly");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut log = EventLog::create(&path).unwrap();
+            log.append_durable(1, 2, &sample_tile(3)).unwrap();
+        }
+
+        let mut read_only = EventLog::open_read_only(&path).unwrap();
+
+        assert_eq!(read_only.read_all().unwrap().len(), 1);
+
+        let error = read_only
+            .append(2, 3, &sample_tile(4))
+            .expect_err("read-only EventLog must reject append");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(read_only.len(), 1);
+
         std::fs::remove_file(&path).unwrap();
     }
 

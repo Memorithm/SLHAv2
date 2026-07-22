@@ -88,6 +88,19 @@ pub enum EvictionPolicy {
     Importance { sink_window: usize },
 }
 
+/// Persistence guarantee required before a live tile may become COLD.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EvictionDurability {
+    /// Preserve the historical behaviour: count EventLog errors but continue
+    /// the in-memory eviction.
+    #[default]
+    BestEffort,
+
+    /// The tile becomes COLD only after its EventLog record has been appended
+    /// and synchronized successfully.
+    RequireDurable,
+}
+
 /// Elastic KV-cache over a contiguous arena of [`SciRustSlhaTile`].
 pub struct ElasticKvCache {
     tiles: Vec<SciRustSlhaTile>,
@@ -101,12 +114,14 @@ pub struct ElasticKvCache {
     policy: PageOutPolicy,
     eviction: EvictionPolicy,
     next_seq: u64,
-    /// Optional persistence sink (plan: COLD → EventLog). `None` ⇒ the cache
-    /// behaves exactly as before this field existed — eviction is in-memory
-    /// recycling only. Attach one with [`Self::attach_event_log`].
+    /// Optional persistence sink for COLD evictions.
     event_log: Option<crate::eventlog::EventLog>,
-    /// Count of failed EventLog appends (see [`Self::evict`] error policy).
+    /// Persistence guarantee applied to EventLog-backed evictions.
+    eviction_durability: EvictionDurability,
+    /// Number of EventLog append or synchronization failures.
     log_errors: u64,
+    /// Number of evictions blocked by [`EvictionDurability::RequireDurable`].
+    blocked_evictions: u64,
 }
 
 impl ElasticKvCache {
@@ -122,17 +137,28 @@ impl ElasticKvCache {
             eviction: EvictionPolicy::default(),
             next_seq: 0,
             event_log: None,
+            eviction_durability: EvictionDurability::BestEffort,
             log_errors: 0,
+            blocked_evictions: 0,
         }
     }
 
-    /// Attach an [`EventLog`](crate::eventlog::EventLog) so that evicted
-    /// (COLD) tiles are snapshotted to durable storage before their slot is
-    /// recycled, enabling later [`Self::rehydrate`]. Without one, eviction is
-    /// in-memory only (the historical behaviour). Attaching does not touch
-    /// already-live tiles.
+    /// Attach an EventLog using best-effort persistence.
+    ///
+    /// Append failures are counted, but the tile is still evicted. This
+    /// preserves the historical behaviour.
     pub fn attach_event_log(&mut self, log: crate::eventlog::EventLog) {
         self.event_log = Some(log);
+        self.eviction_durability = EvictionDurability::BestEffort;
+    }
+
+    /// Attach an EventLog requiring durable persistence before COLD eviction.
+    ///
+    /// A failed append or synchronization keeps the tile live and prevents its
+    /// slot from being recycled.
+    pub fn attach_durable_event_log(&mut self, log: crate::eventlog::EventLog) {
+        self.event_log = Some(log);
+        self.eviction_durability = EvictionDurability::RequireDurable;
     }
 
     /// Number of EventLog appends that failed during eviction. Eviction never
@@ -141,6 +167,18 @@ impl ElasticKvCache {
     #[must_use]
     pub fn log_errors(&self) -> u64 {
         self.log_errors
+    }
+
+    /// Number of COLD transitions refused because durable persistence failed.
+    #[must_use]
+    pub fn blocked_evictions(&self) -> u64 {
+        self.blocked_evictions
+    }
+
+    /// Persistence policy currently attached to the cache.
+    #[must_use]
+    pub fn eviction_durability(&self) -> EvictionDurability {
+        self.eviction_durability
     }
 
     /// Convenience constructor with the recommended default policy (the hybrid
@@ -350,23 +388,43 @@ impl ElasticKvCache {
     }
 
     /// Evict a slot (→ COLD) and recycle it for a future `insert`.
-    pub fn evict(&mut self, slot: usize) {
-        if self.state[slot] != TileState::Cold {
-            // Snapshot to the EventLog (if attached) BEFORE the slot is marked
-            // COLD and made recyclable. Error policy: a failed append must NOT
-            // corrupt the in-memory cache — the tile is still evicted (memory
-            // semantics preserved) and the failure is counted in `log_errors`.
-            if let Some(log) = self.event_log.as_mut() {
-                if log
-                    .append(self.seq[slot], slot as u32, &self.tiles[slot])
-                    .is_err()
-                {
-                    self.log_errors += 1;
+    ///
+    /// Returns `true` when the slot transitioned to COLD. Under
+    /// [`EvictionDurability::RequireDurable`], persistence failure returns
+    /// `false` and leaves the slot live.
+    pub fn evict(&mut self, slot: usize) -> bool {
+        if self.state.get(slot) != Some(&TileState::Hot)
+            && self.state.get(slot) != Some(&TileState::Warm)
+        {
+            return false;
+        }
+
+        if let Some(log) = self.event_log.as_mut() {
+            let persisted = match self.eviction_durability {
+                EvictionDurability::BestEffort => {
+                    log.append(self.seq[slot], slot as u32, &self.tiles[slot])
+                }
+                EvictionDurability::RequireDurable => {
+                    log.append_durable(self.seq[slot], slot as u32, &self.tiles[slot])
+                }
+            };
+
+            if persisted.is_err() {
+                self.log_errors += 1;
+
+                if self.eviction_durability == EvictionDurability::RequireDurable {
+                    self.blocked_evictions += 1;
+                    return false;
                 }
             }
-            self.state[slot] = TileState::Cold;
-            self.free.push(slot);
+        } else if self.eviction_durability == EvictionDurability::RequireDurable {
+            self.blocked_evictions += 1;
+            return false;
         }
+
+        self.state[slot] = TileState::Cold;
+        self.free.push(slot);
+        true
     }
 
     /// Restore a previously-evicted tile from the attached
@@ -481,15 +539,15 @@ impl ElasticKvCache {
     ///    [`EvictionPolicy`]: default `Causal` (oldest first), or `Importance`
     ///    (plan axis A5: lowest cumulative attention first, attention sinks
     ///    pinned) — dropping a token is the harder loss.
-    pub fn enforce_budget(&mut self) {
+    pub fn enforce_budget(&mut self) -> bool {
         if self.live_bytes() <= self.budget_bytes {
-            return;
+            return true;
         }
 
         // Phase 1 — HOT TQ3 correction planes.
         for s in self.slots_in_paging_order(TileState::Hot) {
             if self.live_bytes() <= self.budget_bytes {
-                return;
+                return true;
             }
             self.drop_correction(s);
         }
@@ -497,7 +555,7 @@ impl ElasticKvCache {
         // Phase 2 — HOT→WARM.
         for s in self.slots_in_paging_order(TileState::Hot) {
             if self.live_bytes() <= self.budget_bytes {
-                return;
+                return true;
             }
             self.page_out(s);
         }
@@ -506,7 +564,7 @@ impl ElasticKvCache {
         // already lost theirs in phase 1; this catches inserted-WARM tiles).
         for s in self.slots_in_paging_order(TileState::Warm) {
             if self.live_bytes() <= self.budget_bytes {
-                return;
+                return true;
             }
             self.drop_correction(s);
         }
@@ -533,9 +591,12 @@ impl ElasticKvCache {
         }
         for s in live {
             if self.live_bytes() <= self.budget_bytes {
-                return;
+                return true;
             }
+
             self.evict(s);
         }
+
+        self.live_bytes() <= self.budget_bytes
     }
 }
