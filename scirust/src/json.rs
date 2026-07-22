@@ -138,20 +138,41 @@ impl Json {
 
     // ---- parse ----
 
-    /// Parse a JSON document, or return an error message on malformed input.
+    /// Parse a JSON document with the default input-size limit.
+    ///
+    /// Duplicate object keys, non-standard numbers and unescaped control
+    /// characters are rejected.
     pub fn parse(input: &str) -> Result<Json, String> {
+        Self::parse_with_limit(input, MAX_INPUT_BYTES)
+    }
+
+    /// Parse a JSON document with an explicit maximum input size.
+    ///
+    /// This is useful for protocol boundaries where the caller wants a limit
+    /// lower than [`MAX_INPUT_BYTES`].
+    pub fn parse_with_limit(input: &str, max_bytes: usize) -> Result<Json, String> {
+        if input.len() > max_bytes {
+            return Err(format!(
+                "JSON input too large: {} bytes exceeds limit {max_bytes}",
+                input.len()
+            ));
+        }
+
         let mut p = Parser {
             b: input.as_bytes(),
             i: 0,
             depth: 0,
         };
+
         p.ws();
-        let v = p.value()?;
+        let value = p.value()?;
         p.ws();
+
         if p.i != p.b.len() {
             return Err(format!("trailing data at byte {}", p.i));
         }
-        Ok(v)
+
+        Ok(value)
     }
 }
 
@@ -188,6 +209,10 @@ struct Parser<'a> {
     depth: usize,
 }
 
+/// Default maximum JSON document size accepted by [`Json::parse`].
+pub const MAX_INPUT_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of nested arrays and objects.
 const MAX_DEPTH: usize = 64;
 
 impl<'a> Parser<'a> {
@@ -201,10 +226,14 @@ impl<'a> Parser<'a> {
     }
     fn value(&mut self) -> Result<Json, String> {
         self.ws();
-        if self.depth > MAX_DEPTH {
+
+        let next = self.peek();
+
+        if matches!(next, Some(b'{') | Some(b'[')) && self.depth >= MAX_DEPTH {
             return Err("JSON nesting too deep".into());
         }
-        match self.peek() {
+
+        match next {
             Some(b'{') => {
                 self.depth += 1;
                 let r = self.object();
@@ -236,20 +265,79 @@ impl<'a> Parser<'a> {
     }
     fn number(&mut self) -> Result<Json, String> {
         let start = self.i;
+
         if self.peek() == Some(b'-') {
             self.i += 1;
         }
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-') {
+
+        // Integer part: either exactly zero, or a non-zero digit followed by
+        // digits. JSON forbids leading zeroes such as 01 and -01.
+        match self.peek() {
+            Some(b'0') => {
                 self.i += 1;
-            } else {
-                break;
+
+                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    return Err(format!("leading zero in number at byte {start}"));
+                }
+            }
+            Some(b'1'..=b'9') => {
+                self.i += 1;
+
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    self.i += 1;
+                }
+            }
+            _ => return Err(format!("invalid number at byte {start}")),
+        }
+
+        // Fractional part requires at least one digit after the decimal point.
+        if self.peek() == Some(b'.') {
+            self.i += 1;
+
+            if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                return Err(format!(
+                    "missing fractional digit in number at byte {}",
+                    self.i
+                ));
+            }
+
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.i += 1;
             }
         }
-        let s = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "bad utf8 in number")?;
-        s.parse::<f64>()
-            .map(Json::Num)
-            .map_err(|_| format!("bad number '{s}'"))
+
+        // Exponent requires at least one digit after the optional sign.
+        if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+            self.i += 1;
+
+            if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+                self.i += 1;
+            }
+
+            if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                return Err(format!(
+                    "missing exponent digit in number at byte {}",
+                    self.i
+                ));
+            }
+
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.i += 1;
+            }
+        }
+
+        let source =
+            std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "bad utf8 in number")?;
+
+        let number = source
+            .parse::<f64>()
+            .map_err(|_| format!("bad number '{source}'"))?;
+
+        if !number.is_finite() {
+            return Err(format!("number out of finite range '{source}'"));
+        }
+
+        Ok(Json::Num(number))
     }
     fn string(&mut self) -> Result<String, String> {
         self.i += 1; // opening quote
@@ -277,6 +365,9 @@ impl<'a> Parser<'a> {
                         b'u' => s.push(self.unicode_escape()?),
                         _ => return Err(format!("bad escape '\\{}' at {}", e as char, self.i)),
                     }
+                }
+                Some(control) if control < 0x20 => {
+                    return Err(format!("unescaped control character at byte {}", self.i));
                 }
                 Some(_) => {
                     let len = utf8_len(self.b[self.i]);
@@ -357,7 +448,13 @@ impl<'a> Parser<'a> {
             if self.peek() != Some(b'"') {
                 return Err(format!("expected key string at {}", self.i));
             }
+            let key_offset = self.i;
             let k = self.string()?;
+
+            if m.iter().any(|(existing, _)| existing == &k) {
+                return Err(format!("duplicate object key '{}' at byte {key_offset}", k));
+            }
+
             self.ws();
             if self.peek() != Some(b':') {
                 return Err(format!("expected ':' at {}", self.i));
@@ -436,6 +533,92 @@ mod tests {
     fn non_finite_becomes_null() {
         assert_eq!(Json::Num(f64::NAN).to_compact(), "null");
         assert_eq!(Json::Num(f64::INFINITY).to_compact(), "null");
+    }
+
+    #[test]
+    fn rejects_duplicate_object_keys() {
+        let error = Json::parse(r#"{"method":"first","method":"second"}"#)
+            .expect_err("duplicate object keys must be rejected");
+
+        assert!(
+            error.contains("duplicate object key"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_unescaped_control_characters() {
+        for input in [
+            "{\"value\":\"line\nbreak\"}",
+            "{\"value\":\"tab\tcharacter\"}",
+            "{\"value\":\"carriage\rreturn\"}",
+            "{\"value\":\"\u{0001}\"}",
+        ] {
+            let error = Json::parse(input).expect_err("raw control characters must be rejected");
+
+            assert!(
+                error.contains("unescaped control character"),
+                "unexpected error for {input:?}: {error}"
+            );
+        }
+
+        let escaped = Json::parse(r#"{"value":"line\nbreak\tand\u0001"}"#)
+            .expect("escaped control characters are valid JSON");
+
+        assert_eq!(
+            escaped.get("value").and_then(Json::as_str),
+            Some("line\nbreak\tand\u{0001}")
+        );
+    }
+
+    #[test]
+    fn enforces_strict_json_number_grammar() {
+        for valid in [
+            "0", "-0", "1", "-1", "0.5", "-12.75", "1e3", "1E+3", "-2.5e-2",
+        ] {
+            assert!(
+                Json::parse(valid).is_ok(),
+                "valid JSON number rejected: {valid}"
+            );
+        }
+
+        for invalid in ["01", "-01", "1.", ".1", "+1", "1e", "1e+", "--1", "1e9999"] {
+            assert!(
+                Json::parse(invalid).is_err(),
+                "invalid JSON number accepted: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn enforces_input_size_limit() {
+        let oversized = " ".repeat(MAX_INPUT_BYTES + 1);
+
+        let error = Json::parse(&oversized).expect_err("oversized JSON input must be rejected");
+
+        assert!(
+            error.contains("JSON input too large"),
+            "unexpected error: {error}"
+        );
+
+        assert!(
+            Json::parse_with_limit("{}", 2).is_ok(),
+            "explicit limit should accept a document at the limit"
+        );
+        assert!(
+            Json::parse_with_limit("{}", 1).is_err(),
+            "explicit limit should reject an oversized document"
+        );
+    }
+
+    #[test]
+    fn nesting_boundary_is_exact() {
+        let accepted = "[".repeat(MAX_DEPTH) + "0" + &"]".repeat(MAX_DEPTH);
+        Json::parse(&accepted).expect("MAX_DEPTH nesting should be accepted");
+
+        let rejected = "[".repeat(MAX_DEPTH + 1) + "0" + &"]".repeat(MAX_DEPTH + 1);
+
+        assert_eq!(Json::parse(&rejected).unwrap_err(), "JSON nesting too deep");
     }
 
     #[test]
