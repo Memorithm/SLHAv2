@@ -13,8 +13,9 @@
 //! binary `target/release/slha-mcp`.
 
 use scirust::attention::slha_v2::{
-    quantize_latent, quantize_latent_grouped, quantize_latent_mixed, quantize_latent_nf4,
-    quantize_latent_tq3, FLAG_HOT, FLAG_MIXED, FLAG_NF4, FLAG_TQ3, N_GROUPS,
+    quantize_latent, quantize_latent_grouped, quantize_latent_mix3, quantize_latent_mixed,
+    quantize_latent_nf4, quantize_latent_tq3, FLAG_HOT, FLAG_MIX3, FLAG_MIXED, FLAG_NF4, FLAG_TQ3,
+    N_GROUPS,
 };
 use scirust::json::{obj, Json};
 use scirust::metrics::dot;
@@ -35,6 +36,10 @@ const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
 const SERVER_NAME: &str = "slha-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DIMS: usize = 128; // D_C
+
+const BENCHMARK_DEFAULT_ITERATIONS: usize = 200_000;
+const BENCHMARK_MIN_ITERATIONS: usize = 1_000;
+const BENCHMARK_MAX_ITERATIONS: usize = 5_000_000;
 
 /// Maximum JSON-RPC frame size, excluding the newline delimiter.
 ///
@@ -461,49 +466,70 @@ fn tool_result(text: String, is_error: bool) -> Json {
 // ── tool registry ────────────────────────────────────────────────────────────
 
 fn tool_definitions() -> Json {
-    let vec_schema = |desc: &str| {
+    let vector_schema = |description: &str| {
         obj(vec![
             ("type", Json::str("array")),
-            ("items", obj(vec![("type", Json::str("number"))])),
-            ("description", Json::str(desc)),
-        ])
-    };
-    let tool = |name: &str, desc: &str, props: Vec<(&str, Json)>, required: Vec<&str>| {
-        obj(vec![
-            ("name", Json::str(name)),
-            ("description", Json::str(desc)),
             (
-                "inputSchema",
+                "items",
                 obj(vec![
-                    ("type", Json::str("object")),
-                    ("properties", obj(props)),
-                    (
-                        "required",
-                        Json::Arr(required.into_iter().map(Json::str).collect()),
-                    ),
+                    ("type", Json::str("number")),
+                    ("minimum", Json::Num(-(f32::MAX as f64))),
+                    ("maximum", Json::Num(f32::MAX as f64)),
                 ]),
             ),
+            ("minItems", Json::Num(DIMS as f64)),
+            ("maxItems", Json::Num(DIMS as f64)),
+            ("description", Json::str(description)),
         ])
     };
+
+    let tool =
+        |name: &str, description: &str, properties: Vec<(&str, Json)>, required: Vec<&str>| {
+            obj(vec![
+                ("name", Json::str(name)),
+                ("description", Json::str(description)),
+                (
+                    "inputSchema",
+                    obj(vec![
+                        (
+                            "$schema",
+                            Json::str("https://json-schema.org/draft/2020-12/schema"),
+                        ),
+                        ("type", Json::str("object")),
+                        ("properties", obj(properties)),
+                        (
+                            "required",
+                            Json::Arr(required.into_iter().map(Json::str).collect()),
+                        ),
+                        ("additionalProperties", Json::Bool(false)),
+                    ]),
+                ),
+            ])
+        };
 
     Json::Arr(vec![
         tool(
             "slha.audit",
-            "Run the SLHA v2 self-audit (tile layout, live SIMD-vs-scalar equivalence, CPU features/caches, output fidelity vs full attention, CCOS budget invariant, determinism). Returns the full JSON report.",
+            "Run the SLHA v2 self-audit and return the complete JSON report.",
             vec![],
             vec![],
         ),
         tool(
             "slha.explain",
-            "Explain what SLHA v2 is, the 128-byte tile, and how the hybrid attention score works. Returns prose for the agent to read or relay.",
+            "Explain the SLHA v2 tile, codecs, hybrid attention score and elastic paging.",
             vec![],
             vec![],
         ),
         tool(
             "slha.compress",
-            "Quantize a 128-dim key vector into the 64-byte latent of a 128-byte tile and report the compression vs FP32. Optional `codec` selects the latent quantizer (default int4 = single-scale INT4).",
+            "Quantize one 128-dimensional key into the 64-byte latent of an SLHA v2 tile.",
             vec![
-                ("key", vec_schema("128 numbers (the key vector)")),
+                (
+                    "key",
+                    vector_schema(
+                        "Exactly 128 finite numbers representable as IEEE-754 f32.",
+                    ),
+                ),
                 (
                     "codec",
                     obj(vec![
@@ -511,15 +537,29 @@ fn tool_definitions() -> Json {
                         (
                             "enum",
                             Json::Arr(
-                                ["int4", "grouped", "nf4", "mixed", "tq3"]
-                                    .into_iter()
-                                    .map(Json::str)
-                                    .collect(),
+                                [
+                                    "int4",
+                                    "grouped",
+                                    "nf4",
+                                    "mixed",
+                                    "tq3",
+                                    "mix3",
+                                ]
+                                .into_iter()
+                                .map(Json::str)
+                                .collect(),
                             ),
                         ),
+                        ("default", Json::str("int4")),
                         (
                             "description",
-                            Json::str("latent codec (default int4: uniform INT4, single scale). grouped = per-group MX scales; nf4 = normal-float codebook; mixed = 8 dims @8-bit + 112 @4-bit; tq3 = TurboQuant port, 3-bit grid + 1-bit sign-correction plane."),
+                            Json::str(
+                                "int4: single-scale uniform INT4; grouped: \
+                                 per-group INT4; nf4: NormalFloat-4; mixed: \
+                                 8-bit head plus 4-bit body; tq3: 3-bit grid \
+                                 plus correction plane; mix3: 8-bit head plus \
+                                 TQ3 body and separable correction plane.",
+                            ),
                         ),
                     ]),
                 ),
@@ -528,76 +568,138 @@ fn tool_definitions() -> Json {
         ),
         tool(
             "slha.score",
-            "Build a tile from `key` and compute the SLHA coarse score for `query`, vs the exact dot product — shows the INT4 reconstruction error.",
+            "Compare the SLHA coarse score with the exact dot product for two 128-dimensional vectors.",
             vec![
-                ("key", vec_schema("128 numbers (the context key)")),
-                ("query", vec_schema("128 numbers (the query)")),
+                (
+                    "key",
+                    vector_schema(
+                        "Exactly 128 finite context-key values representable as f32.",
+                    ),
+                ),
+                (
+                    "query",
+                    vector_schema(
+                        "Exactly 128 finite query values representable as f32.",
+                    ),
+                ),
             ],
             vec!["key", "query"],
         ),
         tool(
             "slha.benchmark",
-            "Measure SLHA score throughput on this host (scores/sec, ns/score, dispatched SIMD path). Optional `n` = iteration count.",
-            vec![("n", obj(vec![("type", Json::str("number")), ("description", Json::str("iterations (default 200000)"))]))],
+            "Measure local SLHA score throughput with a bounded iteration count.",
+            vec![(
+                "n",
+                obj(vec![
+                    ("type", Json::str("integer")),
+                    (
+                        "minimum",
+                        Json::Num(BENCHMARK_MIN_ITERATIONS as f64),
+                    ),
+                    (
+                        "maximum",
+                        Json::Num(BENCHMARK_MAX_ITERATIONS as f64),
+                    ),
+                    (
+                        "default",
+                        Json::Num(BENCHMARK_DEFAULT_ITERATIONS as f64),
+                    ),
+                    (
+                        "description",
+                        Json::str("Number of score iterations."),
+                    ),
+                ]),
+            )],
             vec![],
         ),
     ])
 }
 
+fn validate_object_fields(value: &Json, allowed: &[&str], context: &str) -> Result<(), String> {
+    let fields = match value {
+        Json::Obj(fields) => fields,
+        _ => return Err(format!("{context} must be an object")),
+    };
+
+    for (key, _) in fields {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("{context} contains unknown property '{key}'"));
+        }
+    }
+
+    Ok(())
+}
+
 fn handle_tool_call(id: Json, params: Option<&Json>) -> Json {
     let params = match params {
-        Some(p) => p,
+        Some(Json::Obj(_)) => params.expect("matched Some"),
+        Some(_) => {
+            return err_response(id, -32602, "tools/call params must be an object");
+        }
         None => return err_response(id, -32602, "missing params"),
     };
-    let name = match params.get("name").and_then(|n| n.as_str()) {
-        Some(n) => n,
-        None => return err_response(id, -32602, "missing tool name"),
+
+    if let Err(error) = validate_object_fields(params, &["name", "arguments"], "tools/call params")
+    {
+        return err_response(id, -32602, &error);
+    }
+
+    let name = match params.get("name").and_then(Json::as_str) {
+        Some(name) if !name.is_empty() => name,
+        _ => return err_response(id, -32602, "missing tool name"),
     };
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or(Json::Obj(vec![]));
+
+    let arguments = match params.get("arguments") {
+        None => Json::Obj(vec![]),
+        Some(Json::Obj(_)) => params.get("arguments").expect("matched Some").clone(),
+        Some(_) => {
+            return err_response(id, -32602, "tool arguments must be an object");
+        }
+    };
 
     let result = match name {
-        "slha.audit" => Ok(scirust::audit::run().to_pretty()),
-        "slha.explain" => Ok(explain_text()),
-        "slha.compress" => tool_compress(&args),
-        "slha.score" => tool_score(&args),
-        "slha.benchmark" => tool_benchmark(&args),
+        "slha.audit" => validate_object_fields(&arguments, &[], "slha.audit arguments")
+            .map(|()| scirust::audit::run().to_pretty()),
+
+        "slha.explain" => validate_object_fields(&arguments, &[], "slha.explain arguments")
+            .map(|()| explain_text()),
+
+        "slha.compress" => tool_compress(&arguments),
+        "slha.score" => tool_score(&arguments),
+        "slha.benchmark" => tool_benchmark(&arguments),
+
         other => Err(format!("unknown tool: {other}")),
     };
+
     match result {
-        Ok(text) => ok_response(id, tool_result(text, false)),
-        Err(e) => ok_response(id, tool_result(e, true)),
+        Ok(output) => ok_response(id, tool_result(output, false)),
+        Err(error) => ok_response(id, tool_result(error, true)),
     }
 }
 
 // ── tools ────────────────────────────────────────────────────────────────────
 
 fn explain_text() -> String {
-    "SLHA v2 (Sub-Low-rank Hybrid Attention) compresses each transformer KV entry \
-into a 128-byte, cache-line-aware tile so long-context inference fits in CPU cache \
-instead of GPU VRAM.\n\n\
-Each tile (exactly 128 bytes, zero padding) stores: a 64-byte low-rank latent \
-(128 dims), a 32-byte 1-bit sign-LSH residual (256 bits) that corrects what the \
-low-rank base misses, plus metadata (scale, lambda, sigma_E, ids, flags, MX group \
-scales). The latent codec is selectable via flags, same 64-byte budget: uniform INT4 \
-(single or per-group scales), an NF4 codebook, a mixed 8/4-bit layout, or TQ3 — a \
-port of the TurboQuant KV codec storing all 128 dims as 3-bit codes (48 bytes) plus \
-a separable per-dim 1-bit sign-correction plane (16 bytes). The attention score \
-fuses a continuous dot product over the dequantized latent with a branchless \
-popcount term over the residual: score = <q, dequant(latent)> \
-+ lambda * (d_s - 2 * popcount(q_sign XOR B)). SIMD paths (AVX2/AVX-512/NEON) are \
-runtime-dispatched and proven bit-equivalent to a scalar reference; NF4/mixed/TQ3 \
-tiles decode on the scalar path.\n\n\
-An elastic KV cache (CCOS Soft-Paging) bounds memory by paging HOT->WARM (drop the \
-32-byte residual) and evicting ->COLD by age. Use `slha.audit` for live invariants, \
-`slha.compress`/`slha.score` to exercise the kernel, and `slha.benchmark` for host \
+    "SLHA v2 (Sub-Low-rank Hybrid Attention) compresses each transformer KV \
+entry into a deterministic 128-byte, cache-line-aware tile.\n\n\
+Each tile stores a 64-byte low-rank latent, a 32-byte one-bit sign-LSH \
+residual and compact metadata. The latent codec can be uniform INT4, grouped \
+INT4, NF4, mixed 8/4-bit, TQ3, or MIX3. TQ3 and MIX3 keep a separable \
+correction plane that CCOS can page out independently.\n\n\
+The attention score combines the dequantized continuous term with a \
+branchless residual-popcount correction. Scalar, AVX2, AVX-512 and NEON \
+implementations are selected at runtime where supported and are regression \
+tested against the scalar reference.\n\n\
+CCOS Soft-Paging moves tiles through HOT, WARM and COLD states while enforcing \
+a memory budget. Use `slha.audit` for invariants, `slha.compress` for codec \
+inspection, `slha.score` for score comparison and `slha.benchmark` for local \
 throughput."
         .to_string()
 }
 
 fn tool_compress(args: &Json) -> Result<String, String> {
+    validate_object_fields(args, &["key", "codec"], "slha.compress arguments")?;
+
     let key = f32_dims(args, "key")?;
     let codec = match args.get("codec") {
         None => "int4",
@@ -628,9 +730,13 @@ fn tool_compress(args: &Json) -> Result<String, String> {
             let (l, s, gs) = quantize_latent_tq3(&key);
             (l, s, gs, FLAG_TQ3)
         }
+        "mix3" => {
+            let (l, s, gs) = quantize_latent_mix3(&key);
+            (l, s, gs, FLAG_MIX3)
+        }
         other => {
             return Err(format!(
-                "unknown codec '{other}': expected int4 | grouped | nf4 | mixed | tq3"
+                "unknown codec '{other}': expected int4 | grouped | nf4 | mixed | tq3 | mix3"
             ))
         }
     };
@@ -661,6 +767,8 @@ fn tool_compress(args: &Json) -> Result<String, String> {
 }
 
 fn tool_score(args: &Json) -> Result<String, String> {
+    validate_object_fields(args, &["key", "query"], "slha.score arguments")?;
+
     let key = f32_dims(args, "key")?;
     let query = f32_dims(args, "query")?;
     let proj = Projection::new(0x5C04E);
@@ -674,14 +782,21 @@ fn tool_score(args: &Json) -> Result<String, String> {
     let qs = proj.sign_bits(&query);
     let slha = tile.compute_score(&query, &qs);
     let truth = dot(&query, &key);
+    let abs_err = (slha - truth).abs();
+    let rel_err = abs_err / (1.0 + truth.abs());
+
+    if !slha.is_finite() || !truth.is_finite() || !abs_err.is_finite() || !rel_err.is_finite() {
+        return Err(
+            "score calculation produced a non-finite value; normalize the input vectors"
+                .to_string(),
+        );
+    }
+
     Ok(obj(vec![
         ("slha_score", Json::Num(slha as f64)),
         ("true_dot", Json::Num(truth as f64)),
-        ("abs_err", Json::Num((slha - truth).abs() as f64)),
-        (
-            "rel_err",
-            Json::Num(((slha - truth).abs() / (1.0 + truth.abs())) as f64),
-        ),
+        ("abs_err", Json::Num(abs_err as f64)),
+        ("rel_err", Json::Num(rel_err as f64)),
         (
             "note",
             Json::str("residual e=0 here, so this isolates the INT4 latent reconstruction error"),
@@ -690,35 +805,68 @@ fn tool_score(args: &Json) -> Result<String, String> {
     .to_pretty())
 }
 
+fn bounded_integer_argument(
+    args: &Json,
+    key: &str,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, String> {
+    let Some(value) = args.get(key) else {
+        return Ok(default);
+    };
+
+    let number = value
+        .as_f64()
+        .ok_or_else(|| format!("'{key}' must be an integer"))?;
+
+    if !number.is_finite() || number.fract() != 0.0 {
+        return Err(format!("'{key}' must be a finite integer"));
+    }
+
+    if number < minimum as f64 || number > maximum as f64 {
+        return Err(format!("'{key}' must be between {minimum} and {maximum}"));
+    }
+
+    Ok(number as usize)
+}
+
 fn tool_benchmark(args: &Json) -> Result<String, String> {
-    let n = args
-        .get("n")
-        .and_then(|v| v.as_f64())
-        .map(|x| x as usize)
-        .unwrap_or(200_000)
-        .clamp(1_000, 5_000_000);
-    let proj = Projection::new(0xB0001);
-    let (q, toks) = generate(0xB0001, 64, 0.3);
-    let qs = proj.sign_bits(&q);
-    let tiles: Vec<_> = toks
+    validate_object_fields(args, &["n"], "slha.benchmark arguments")?;
+
+    let n = bounded_integer_argument(
+        args,
+        "n",
+        BENCHMARK_DEFAULT_ITERATIONS,
+        BENCHMARK_MIN_ITERATIONS,
+        BENCHMARK_MAX_ITERATIONS,
+    )?;
+
+    let projection = Projection::new(0xB0001);
+    let (query, tokens) = generate(0xB0001, 64, 0.3);
+    let query_signs = projection.sign_bits(&query);
+
+    let tiles: Vec<_> = tokens
         .iter()
         .enumerate()
-        .map(|(i, t)| build_tile(&proj, t, i as u32, false))
+        .map(|(index, token)| build_tile(&projection, token, index as u32, false))
         .collect();
 
-    let mut acc = 0.0f32;
-    let t0 = std::time::Instant::now();
-    for i in 0..n {
-        acc += tiles[i % tiles.len()].compute_score(&q, &qs);
+    let mut accumulator = 0.0f32;
+    let started = std::time::Instant::now();
+
+    for index in 0..n {
+        accumulator += tiles[index % tiles.len()].compute_score(&query, &query_signs);
     }
-    let secs = t0.elapsed().as_secs_f64();
-    std::hint::black_box(acc);
+
+    let seconds = started.elapsed().as_secs_f64();
+    std::hint::black_box(accumulator);
 
     Ok(obj(vec![
         ("scores", Json::Num(n as f64)),
-        ("seconds", Json::Num(secs)),
-        ("scores_per_sec", Json::Num(n as f64 / secs.max(1e-12))),
-        ("ns_per_score", Json::Num(secs * 1e9 / n as f64)),
+        ("seconds", Json::Num(seconds)),
+        ("scores_per_sec", Json::Num(n as f64 / seconds.max(1e-12))),
+        ("ns_per_score", Json::Num(seconds * 1e9 / n as f64)),
         ("dispatched_path", Json::str(dispatched_path())),
         ("arch", Json::str(std::env::consts::ARCH)),
     ])
@@ -728,23 +876,39 @@ fn tool_benchmark(args: &Json) -> Result<String, String> {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn f32_dims(args: &Json, key: &str) -> Result<[f32; DIMS], String> {
-    let arr = args
+    let array = args
         .get(key)
-        .and_then(|v| v.as_array())
+        .and_then(Json::as_array)
         .ok_or_else(|| format!("missing number array '{key}' (expected {DIMS} values)"))?;
-    if arr.len() != DIMS {
+
+    if array.len() != DIMS {
         return Err(format!(
             "'{key}' must have {DIMS} numbers, got {}",
-            arr.len()
+            array.len()
         ));
     }
-    let mut out = [0.0f32; DIMS];
-    for (i, v) in arr.iter().enumerate() {
-        out[i] = v
+
+    let mut output = [0.0f32; DIMS];
+
+    for (index, value) in array.iter().enumerate() {
+        let number = value
             .as_f64()
-            .ok_or_else(|| format!("'{key}[{i}]' is not a number"))? as f32;
+            .ok_or_else(|| format!("'{key}[{index}]' is not a number"))?;
+
+        if !number.is_finite() {
+            return Err(format!("'{key}[{index}]' must be finite"));
+        }
+
+        let converted = number as f32;
+
+        if !converted.is_finite() {
+            return Err(format!("'{key}[{index}]' is outside the finite f32 range"));
+        }
+
+        output[index] = converted;
     }
-    Ok(out)
+
+    Ok(output)
 }
 
 fn dispatched_path() -> &'static str {
@@ -1130,6 +1294,7 @@ mod tests {
             ("nf4", FLAG_NF4),
             ("mixed", FLAG_MIXED),
             ("tq3", FLAG_TQ3),
+            ("mix3", FLAG_MIX3),
         ] {
             let j = compress_json(&compress_with(Some(codec)));
             assert_eq!(j.get("codec").unwrap().as_str(), Some(codec));
@@ -1144,6 +1309,200 @@ mod tests {
             assert_eq!(
                 j.get("compression_ratio_vs_fp32_key").unwrap().as_f64(),
                 Some(4.0)
+            );
+        }
+    }
+
+    #[test]
+    fn tool_schemas_are_strict_and_bounded() {
+        let tools = tool_definitions();
+        let tools = tools.as_array().unwrap();
+
+        for tool in tools {
+            let schema = tool.get("inputSchema").unwrap();
+
+            assert_eq!(
+                schema.get("additionalProperties").and_then(Json::as_bool),
+                Some(false),
+                "tool {} does not forbid additional properties",
+                tool.get("name").and_then(Json::as_str).unwrap()
+            );
+        }
+
+        let compress = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Json::as_str) == Some("slha.compress"))
+            .unwrap();
+
+        let properties = compress
+            .get("inputSchema")
+            .unwrap()
+            .get("properties")
+            .unwrap();
+
+        let key = properties.get("key").unwrap();
+
+        assert_eq!(
+            key.get("minItems").and_then(Json::as_f64),
+            Some(DIMS as f64)
+        );
+        assert_eq!(
+            key.get("maxItems").and_then(Json::as_f64),
+            Some(DIMS as f64)
+        );
+
+        let item = key.get("items").unwrap();
+
+        assert_eq!(
+            item.get("minimum").and_then(Json::as_f64),
+            Some(-(f32::MAX as f64))
+        );
+        assert_eq!(
+            item.get("maximum").and_then(Json::as_f64),
+            Some(f32::MAX as f64)
+        );
+
+        let codec_values: Vec<&str> = properties
+            .get("codec")
+            .unwrap()
+            .get("enum")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Json::as_str)
+            .collect();
+
+        assert!(codec_values.contains(&"mix3"));
+
+        let benchmark = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Json::as_str) == Some("slha.benchmark"))
+            .unwrap();
+
+        let n = benchmark
+            .get("inputSchema")
+            .unwrap()
+            .get("properties")
+            .unwrap()
+            .get("n")
+            .unwrap();
+
+        assert_eq!(n.get("type").and_then(Json::as_str), Some("integer"));
+        assert_eq!(
+            n.get("minimum").and_then(Json::as_f64),
+            Some(BENCHMARK_MIN_ITERATIONS as f64)
+        );
+        assert_eq!(
+            n.get("maximum").and_then(Json::as_f64),
+            Some(BENCHMARK_MAX_ITERATIONS as f64)
+        );
+    }
+
+    #[test]
+    fn tool_call_rejects_non_object_arguments() {
+        let params = obj(vec![
+            ("name", Json::str("slha.audit")),
+            ("arguments", Json::Arr(vec![])),
+        ]);
+
+        let response = call("tools/call", params, 20);
+
+        assert_eq!(error_code(&response), Some(-32602.0));
+    }
+
+    #[test]
+    fn tools_reject_unknown_argument_properties() {
+        let key = Json::Arr((0..DIMS).map(|_| Json::Num(0.0)).collect());
+
+        let params = obj(vec![
+            ("name", Json::str("slha.compress")),
+            (
+                "arguments",
+                obj(vec![("key", key), ("unexpected", Json::Bool(true))]),
+            ),
+        ]);
+
+        let response = call("tools/call", params, 21);
+
+        assert_eq!(
+            response
+                .get("result")
+                .unwrap()
+                .get("isError")
+                .and_then(Json::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn vectors_reject_values_outside_f32_range() {
+        let mut values = vec![Json::Num(0.0); DIMS];
+        values[17] = Json::Num(f64::MAX);
+
+        let params = obj(vec![
+            ("name", Json::str("slha.compress")),
+            ("arguments", obj(vec![("key", Json::Arr(values))])),
+        ]);
+
+        let response = call("tools/call", params, 22);
+
+        assert_eq!(
+            response
+                .get("result")
+                .unwrap()
+                .get("isError")
+                .and_then(Json::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn score_rejects_non_finite_results() {
+        let values = Json::Arr((0..DIMS).map(|_| Json::Num(f32::MAX as f64)).collect());
+
+        let params = obj(vec![
+            ("name", Json::str("slha.score")),
+            (
+                "arguments",
+                obj(vec![("key", values.clone()), ("query", values)]),
+            ),
+        ]);
+
+        let response = call("tools/call", params, 23);
+
+        assert_eq!(
+            response
+                .get("result")
+                .unwrap()
+                .get("isError")
+                .and_then(Json::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn benchmark_requires_a_bounded_integer() {
+        for invalid in [
+            Json::Num(1_000.5),
+            Json::Num((BENCHMARK_MIN_ITERATIONS - 1) as f64),
+            Json::Num((BENCHMARK_MAX_ITERATIONS + 1) as f64),
+            Json::str("200000"),
+        ] {
+            let params = obj(vec![
+                ("name", Json::str("slha.benchmark")),
+                ("arguments", obj(vec![("n", invalid)])),
+            ]);
+
+            let response = call("tools/call", params, 24);
+
+            assert_eq!(
+                response
+                    .get("result")
+                    .unwrap()
+                    .get("isError")
+                    .and_then(Json::as_bool),
+                Some(true)
             );
         }
     }
