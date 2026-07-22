@@ -791,7 +791,7 @@ impl SciRustSlhaTile {
     /// [`FLAG_MIX3`] tile (honours [`FLAG_TQ3_NOCORR`]).
     ///
     /// Decode strategy: the 8-bit head is the mixed kernel's 8-lane block;
-    /// the TQ3 body reuses [`Self::compute_score_avx2_tq3`]'s
+    /// the TQ3 body reuses `Self::compute_score_avx2_tq3`'s
     /// 8-dims-per-3-bytes window trick with every byte offset shifted to
     /// the MIX3 planes ([`MIX3_CODES_OFF`] / [`MIX3_CORR_OFF`]).
     ///
@@ -923,7 +923,7 @@ impl SciRustSlhaTile {
     /// AVX-512 TQ3 path: one 16-wide FMA per group for a [`FLAG_TQ3`] tile
     /// (honours [`FLAG_TQ3_NOCORR`]).
     ///
-    /// Same decode strategy as [`Self::compute_score_avx2_tq3`], two 8-dim
+    /// Same decode strategy as `Self::compute_score_avx2_tq3`, two 8-dim
     /// blocks per iteration: lanes 0..8 shift the 4-byte window at byte `6g`,
     /// lanes 8..16 the window at byte `6g + 3`, each by `3·(l mod 8)`; the
     /// group's 16 correction bits are the `u16` at `TQ3_CODE_BYTES + 2g`,
@@ -1058,7 +1058,7 @@ impl SciRustSlhaTile {
     /// AVX-512 mixed-precision path: one 16-wide FMA per body group for a
     /// [`FLAG_MIXED`] tile.
     ///
-    /// Same decode strategy as [`Self::compute_score_avx2_mixed`]: the
+    /// Same decode strategy as `Self::compute_score_avx2_mixed`: the
     /// 8-bit head is one 8-lane block (zero-extended into the 16-wide
     /// accumulator), the 4-bit body is [`Self::compute_score_avx512`]'s
     /// denibbling shifted 8 bytes/8 dims with group scales `gs[1..]`, and
@@ -1277,7 +1277,7 @@ impl SciRustSlhaTile {
     /// [`FLAG_TQ3_NOCORR`]). The dispatcher calls this unconditionally on
     /// aarch64, like [`Self::compute_score_neon`].
     ///
-    /// Same decode strategy as [`Self::compute_score_avx2_tq3`], split into
+    /// Same decode strategy as `Self::compute_score_avx2_tq3`, split into
     /// two 4-lane quads per 8-dim block: `vshlq_u32` with negative per-lane
     /// counts is the NEON variable right-shift.
     ///
@@ -1437,7 +1437,7 @@ impl SciRustSlhaTile {
     /// coarse term of a [`FLAG_MIXED`] tile. The dispatcher calls this
     /// unconditionally on aarch64, like [`Self::compute_score_neon`].
     ///
-    /// Same decode strategy as [`Self::compute_score_avx2_mixed`], in
+    /// Same decode strategy as `Self::compute_score_avx2_mixed`, in
     /// 4-lane quads: the 8-bit head (zero-point 128, scale `gs[0]`) as two
     /// quads, then [`Self::compute_score_neon`]'s denibbling shifted
     /// 8 bytes/8 dims with group scales `gs[1..]`; the dropped tail decodes
