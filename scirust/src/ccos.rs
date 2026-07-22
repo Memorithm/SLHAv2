@@ -178,22 +178,38 @@ impl ElasticKvCache {
         crate::numa::pin_current_thread_local().ok()
     }
 
-    /// Insert a HOT tile, reusing a recycled (COLD) slot when available. Returns
-    /// the slot id. The slot's H2O importance is (re)set to 0.
+    /// Insert a tile, reusing a recycled (COLD) slot when available.
+    ///
+    /// The logical state is derived from the tile's encoded [`FLAG_WARM`]:
+    /// an already-degraded WARM tile must not be advertised as HOT.
+    /// The slot's H2O importance is (re)set to 0.
     pub fn insert(&mut self, tile: SciRustSlhaTile) -> usize {
+        let state = if tile.is_warm() {
+            TileState::Warm
+        } else {
+            TileState::Hot
+        };
+
+        self.insert_with_state(tile, state)
+    }
+
+    fn insert_with_state(&mut self, tile: SciRustSlhaTile, state: TileState) -> usize {
+        debug_assert_ne!(state, TileState::Cold);
+
         let slot = if let Some(s) = self.free.pop() {
             self.tiles[s] = tile;
-            self.state[s] = TileState::Hot;
+            self.state[s] = state;
             self.seq[s] = self.next_seq;
             self.importance[s] = 0.0;
             s
         } else {
             self.tiles.push(tile);
-            self.state.push(TileState::Hot);
+            self.state.push(state);
             self.seq.push(self.next_seq);
             self.importance.push(0.0);
             self.tiles.len() - 1
         };
+
         self.next_seq += 1;
         slot
     }
@@ -213,38 +229,73 @@ impl ElasticKvCache {
     /// `scores` is typically the output of [`Self::score_all`]; cold slots it
     /// references are skipped (they carry no attention once evicted).
     pub fn observe_scores(&mut self, scores: &[(usize, f32)], temperature: f32) {
-        if scores.is_empty() {
+        if scores.is_empty() || !temperature.is_finite() || temperature <= 0.0 {
             return;
         }
-        let m = scores
+
+        // Les slots absents ou COLD ne doivent pas absorber une partie de la
+        // masse softmax destinée aux éléments réellement actifs.
+        let live: Vec<(usize, f32)> = scores
             .iter()
-            .map(|&(_, s)| s)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        let mut w = vec![0.0f32; scores.len()];
-        for (i, &(_, s)) in scores.iter().enumerate() {
-            w[i] = ((s - m) / temperature).exp();
-            sum += w[i];
+            .copied()
+            .filter(|&(slot, _)| slot < self.state.len() && self.state[slot] != TileState::Cold)
+            .collect();
+
+        if live.is_empty() || live.iter().any(|&(_, score)| !score.is_finite()) {
+            return;
         }
-        // Guard against degenerate inputs that would otherwise write NaN into
-        // the importance vector: all-(-inf) scores give `m = -inf` ⇒ `s - m` =
-        // NaN; a zero temperature divides by 0 ⇒ inf/NaN. Treat both (and the
-        // empty-mass case) as a safe no-op rather than corrupting `importance`.
+
+        let m = live
+            .iter()
+            .map(|&(_, score)| score)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        let mut sum = 0.0f32;
+        let mut weights = vec![0.0f32; live.len()];
+
+        for (i, &(_, score)) in live.iter().enumerate() {
+            weights[i] = ((score - m) / temperature).exp();
+            sum += weights[i];
+        }
+
         if !sum.is_finite() || sum <= 0.0 {
             return;
         }
+
         let inv = 1.0 / sum;
-        for (i, &(slot, _)) in scores.iter().enumerate() {
-            if slot < self.importance.len() && self.state[slot] != TileState::Cold {
-                self.importance[slot] += w[i] * inv;
-            }
+
+        for (i, &(slot, _)) in live.iter().enumerate() {
+            self.importance[slot] += weights[i] * inv;
         }
     }
 
-    /// Fused attention score for a (non-COLD) slot. WARM slots return the coarse
-    /// term only (the kernel honours `FLAG_WARM`).
+    /// Fused attention score for an existing live slot.
+    ///
+    /// Returns `None` for an absent or COLD slot. WARM slots return the coarse
+    /// term only because the kernel honours [`FLAG_WARM`].
+    pub fn try_score(
+        &self,
+        slot: usize,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> Option<f32> {
+        let tile = self.tiles.get(slot)?;
+
+        match self.state.get(slot)? {
+            TileState::Cold => None,
+            TileState::Hot | TileState::Warm => Some(tile.compute_score(q_coarse, q_sign)),
+        }
+    }
+
+    /// Fused attention score for a live slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics with an explicit diagnostic for an absent or COLD slot. New code
+    /// handling untrusted slot identifiers should prefer [`Self::try_score`].
     pub fn score(&self, slot: usize, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
-        self.tiles[slot].compute_score(q_coarse, q_sign)
+        self.try_score(slot, q_coarse, q_sign)
+            .expect("cannot score an absent or COLD CCOS slot")
     }
 
     /// Score the query against every live (non-COLD) tile: `(slot, score)`.
@@ -319,14 +370,13 @@ impl ElasticKvCache {
     }
 
     /// Restore a previously-evicted tile from the attached
-    /// [`EventLog`](crate::eventlog::EventLog) by its eviction `seq`, inserting
-    /// it back into the cache as a fresh HOT tile. Returns the new slot, or
-    /// `None` if no log is attached or no record matches `seq`.
+    /// [`EventLog`](crate::eventlog::EventLog) by its eviction `seq`.
     ///
-    /// By design the restored tile re-enters as HOT with importance reset (a
-    /// fresh [`Self::insert`]); its stored `flags`/scales/latent are exactly
-    /// those at eviction time. The rehydrated tile gets a **new** insertion
-    /// `seq` — it is treated as a fresh admission, not a rewind of history.
+    /// The restored logical state matches the encoded tile: a record carrying
+    /// [`FLAG_WARM`] is restored as WARM, otherwise as HOT. Importance is reset
+    /// and the rehydrated tile gets a **new** insertion `seq`; this is a fresh
+    /// admission, not a rewind of history. Returns `None` if no log is attached
+    /// or no record matches `seq`.
     ///
     /// # Errors
     /// Propagates I/O errors from reading the log.
@@ -337,7 +387,14 @@ impl ElasticKvCache {
         let Some(rec) = log.fetch_by_seq(seq)? else {
             return Ok(None);
         };
-        Ok(Some(self.insert(rec.tile)))
+
+        let state = if rec.tile.is_warm() {
+            TileState::Warm
+        } else {
+            TileState::Hot
+        };
+
+        Ok(Some(self.insert_with_state(rec.tile, state)))
     }
 
     /// Elastic logical footprint: Σ over live slots (HOT 128, WARM 96, COLD 0;
@@ -403,8 +460,7 @@ impl ElasticKvCache {
             PageOutPolicy::LowestImpactFirst => slots.sort_by(|&a, &b| {
                 self.tiles[a]
                     .residual_sigma
-                    .partial_cmp(&self.tiles[b].residual_sigma)
-                    .unwrap_or(core::cmp::Ordering::Equal)
+                    .total_cmp(&self.tiles[b].residual_sigma)
             }),
             PageOutPolicy::OldestFirst => slots.sort_by_key(|&s| self.seq[s]),
         }
@@ -470,11 +526,7 @@ impl ElasticKvCache {
                     let sa = self.tiles[a].position < sw;
                     let sb = self.tiles[b].position < sw;
                     sa.cmp(&sb)
-                        .then_with(|| {
-                            self.importance[a]
-                                .partial_cmp(&self.importance[b])
-                                .unwrap_or(core::cmp::Ordering::Equal)
-                        })
+                        .then_with(|| self.importance[a].total_cmp(&self.importance[b]))
                         .then_with(|| self.seq[a].cmp(&self.seq[b]))
                 });
             }

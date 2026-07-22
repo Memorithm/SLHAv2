@@ -68,9 +68,8 @@ pub enum SafetyResult {
     },
 }
 
-// `f32` n'implémente pas `Eq` à cause de NaN, donc on implémente `PartialEq`
-// manuellement avec une tolérance pour les comparaisons de `deviation`.
-impl Eq for SafetyResult {}
+// La comparaison de `deviation` utilise une tolérance et n'est donc pas
+// transitive. `SafetyResult` ne doit volontairement pas implémenter `Eq`.
 impl PartialEq for SafetyResult {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -282,6 +281,17 @@ impl LatentSafetyGuard {
 
         // Signal 1 : cosinus vs référence (référence unitaire → dot / norm_v).
         let cosine = Self::dot_product(&self.reference, v) / norm_v;
+
+        // Une référence mal configurée (NaN/Inf) ne doit jamais permettre un
+        // contournement du filtre. Toute valeur non finie est rejetée fail-safe.
+        if !cosine.is_finite() {
+            self.last_cosine = 0.0;
+            return SafetyResult::Anomalous {
+                deviation: self.dot_threshold.abs().max(f32::EPSILON),
+                reason: SafetyReason::DotProductDeviation,
+            };
+        }
+
         self.last_cosine = cosine;
         if cosine < self.dot_threshold {
             return SafetyResult::Anomalous {
@@ -293,9 +303,18 @@ impl LatentSafetyGuard {
         // Signal 2 : classifieur linéaire (poids unitaires → magnitude invariant).
         if let Some(ref weights) = self.weights {
             let linear_score = Self::dot_product(weights, v) / norm_v + self.linear_bias;
-            if linear_score < self.orthogonal_threshold {
+
+            // Des poids ou un biais non finis représentent une configuration
+            // invalide : le filtre doit échouer fermé, jamais retourner Safe.
+            if !linear_score.is_finite() || linear_score < self.orthogonal_threshold {
+                let deviation = if linear_score.is_finite() {
+                    self.orthogonal_threshold - linear_score
+                } else {
+                    self.orthogonal_threshold.abs().max(f32::EPSILON)
+                };
+
                 return SafetyResult::Anomalous {
-                    deviation: self.orthogonal_threshold - linear_score,
+                    deviation,
                     reason: SafetyReason::OrthogonalIsolation,
                 };
             }
@@ -309,9 +328,16 @@ impl LatentSafetyGuard {
         }
         if self.drift_count >= DRIFT_WINDOW {
             let mean = Self::window_mean(&self.drift_window);
-            if mean < self.drift_threshold {
+
+            if !mean.is_finite() || mean < self.drift_threshold {
+                let deviation = if mean.is_finite() {
+                    self.drift_threshold - mean
+                } else {
+                    self.drift_threshold.abs().max(f32::EPSILON)
+                };
+
                 return SafetyResult::Anomalous {
-                    deviation: self.drift_threshold - mean,
+                    deviation,
                     reason: SafetyReason::ActivationDrift,
                 };
             }
@@ -481,6 +507,60 @@ mod tests {
                 ..
             } => {}
             other => panic!("attendu DotProductDeviation, obtenu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_non_finite_reference_fails_closed() {
+        let mut reference = ones_unit();
+        reference[0] = f32::NAN;
+
+        let mut guard = LatentSafetyGuard::new(reference, 0.5);
+
+        match guard.analyze_dequantized(&ones_unit()) {
+            SafetyResult::Anomalous {
+                reason: SafetyReason::DotProductDeviation,
+                deviation,
+            } => assert!(deviation.is_finite() && deviation > 0.0),
+            other => panic!("une référence NaN doit échouer fermée, obtenu {other:?}"),
+        }
+
+        assert_eq!(guard.last_cosine(), 0.0);
+    }
+
+    #[test]
+    fn test_non_finite_linear_classifier_fails_closed() {
+        let mut weights = ones_unit();
+        weights[0] = f32::NAN;
+
+        let mut bad_weights = LatentSafetyGuard::with_linear_classifier(
+            ones_unit(),
+            weights,
+            0.0,
+            DEFAULT_ORTHOGONAL_THRESHOLD,
+        );
+
+        match bad_weights.analyze_dequantized(&ones_unit()) {
+            SafetyResult::Anomalous {
+                reason: SafetyReason::OrthogonalIsolation,
+                deviation,
+            } => assert!(deviation.is_finite() && deviation > 0.0),
+            other => panic!("des poids NaN doivent échouer fermés, obtenu {other:?}"),
+        }
+
+        let mut bad_bias = LatentSafetyGuard::with_linear_classifier(
+            ones_unit(),
+            ones_unit(),
+            f32::INFINITY,
+            DEFAULT_ORTHOGONAL_THRESHOLD,
+        );
+
+        match bad_bias.analyze_dequantized(&ones_unit()) {
+            SafetyResult::Anomalous {
+                reason: SafetyReason::OrthogonalIsolation,
+                deviation,
+            } => assert!(deviation.is_finite() && deviation > 0.0),
+            other => panic!("un biais infini doit échouer fermé, obtenu {other:?}"),
         }
     }
 

@@ -205,6 +205,58 @@ fn score_all_skips_cold() {
     assert!(scored.iter().all(|&(s, _)| s != 2));
 }
 
+#[test]
+fn insert_preserves_encoded_warm_state() {
+    let proj = Projection::new(0xC01D);
+    let (_q, toks) = generate(0xC01D, 1, 0.3);
+
+    let mut cache = ElasticKvCache::with_budget(usize::MAX);
+    let slot = cache.insert(build_tile(&proj, &toks[0], 0, true));
+
+    assert_eq!(cache.state(slot), TileState::Warm);
+    assert!(cache.tile(slot).is_warm());
+    assert_eq!(cache.live_bytes(), WARM_BYTES);
+}
+
+#[test]
+fn try_score_rejects_cold_and_absent_slots() {
+    let proj = Projection::new(0xC01E);
+    let (q, toks) = generate(0xC01E, 1, 0.3);
+    let q_sign = proj.sign_bits(&q);
+
+    let mut cache = ElasticKvCache::with_budget(usize::MAX);
+    let slot = cache.insert(build_tile(&proj, &toks[0], 0, false));
+
+    assert!(cache.try_score(slot, &q, &q_sign).is_some());
+
+    cache.evict(slot);
+
+    assert!(
+        cache.try_score(slot, &q, &q_sign).is_none(),
+        "un slot COLD ne doit jamais exposer son ancien score"
+    );
+    assert!(cache.try_score(usize::MAX, &q, &q_sign).is_none());
+}
+
+#[test]
+fn observe_scores_rejects_invalid_numeric_inputs() {
+    let proj = Projection::new(0xC01F);
+    let (_q, toks) = generate(0xC01F, 1, 0.3);
+
+    let mut cache = ElasticKvCache::with_budget(usize::MAX);
+    let slot = cache.insert(build_tile(&proj, &toks[0], 0, false));
+
+    for temperature in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        cache.observe_scores(&[(slot, 1.0)], temperature);
+        assert_eq!(cache.importance(slot), 0.0);
+    }
+
+    for score in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        cache.observe_scores(&[(slot, score)], 1.0);
+        assert_eq!(cache.importance(slot), 0.0);
+    }
+}
+
 // --- Plan axis A5 — informed eviction --------------------------------------
 
 #[test]
@@ -598,13 +650,13 @@ fn evict_snapshots_to_event_log_then_rehydrates_identically() {
     }
 
     // Round-trip losslessness: rehydrating a seq returns a tile byte-identical
-    // to its log record, re-admitted as a fresh HOT slot.
+    // to its log record, with the same encoded/logical WARM state.
     let logged0 = tile_to_bytes(&recs.iter().find(|r| r.seq == 0).unwrap().tile);
     let slot = cache.rehydrate(0).unwrap().expect("seq 0 is in the log");
     assert_eq!(
         cache.state(slot),
-        TileState::Hot,
-        "rehydrated as a fresh slot"
+        TileState::Warm,
+        "a logged WARM tile must rehydrate as WARM"
     );
     assert_eq!(
         tile_to_bytes(cache.tile(slot)),
