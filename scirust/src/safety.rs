@@ -1,9 +1,9 @@
 //! Filtre de sécurité géométrique dans l'espace latent (representation engineering).
 //!
-//! Ce module implémente un classifieur ultra-léger qui opère **directement sur les
-//! vecteurs latents compressés** (`[u8; 64]`, soit 128 dims INT4) sans déquantisation,
-//! détectant les anomalies géométriques typiques des attaques par injection de prompts,
-//! jailbreaks ou dérives sémantiques **avant la phase de décompression**.
+//! Ce module implémente un classifieur ultra-léger qui analyse la représentation
+//! géométrique des latents SLHA v2. L'API principale accepte une [`SciRustSlhaTile`]
+//! complète et réutilise son décodeur canonique afin de respecter le codec, les échelles
+//! par groupe et l'état éventuel du plan de correction.
 //!
 //! ## Principe
 //!
@@ -21,36 +21,37 @@
 //!
 //! ## Performance
 //!
-//! - Zéro allocation dans la boucle chaude (analyse d'une tuile : ~200 cycles).
-//! - Opère sur les nibbles INT4 sans déquantification complète (point zéro signé à 8).
+//! - Zéro allocation sur le tas dans la boucle chaude.
+//! - Déquantification canonique dans un tableau fixe de 128 `f32` placé sur la pile.
+//! - Prend en charge INT4 simple/groupé, NF4, Mixed, TQ3 et MIX3.
 //! - Fonctionne sur toutes architectures (x86_64, aarch64, RISC-V…).
 //!
 //! ## Intégration
 //!
 //! Ce module est **additif** — il n'altère ni la tuile de 128 octets, ni les kernels
-//! SIMD de base. Il s'insère dans le pipeline d'inférence juste après la projection
-//! latente et avant la décompression :
+//! SIMD de base. Il s'insère dans le pipeline d'inférence après la construction de la
+//! tuile et avant son utilisation pour générer le score d'attention :
 //!
 //! ```rust,no_run
+//! use scirust::attention::slha_v2::SciRustSlhaTile;
 //! use scirust::safety::{LatentSafetyGuard, SafetyResult};
 //!
-//! # fn main() {
-//! // `reference` serait calibrée sur un corpus de prompts normaux, puis normalisée.
-//! let reference = [1.0f32; 128];
-//! let mut guard = LatentSafetyGuard::new(reference, 0.5);
-//!
-//! let latent_kv: [u8; 64] = [0; 64]; // tuile compressée
-//! match guard.analyze(&latent_kv) {
-//!     SafetyResult::Safe => { /* décompresser et générer le token */ }
-//!     SafetyResult::Anomalous { deviation, reason } => {
-//!         eprintln!("anomalie détectée: écart={deviation:.2}, raison={reason}");
-//!         // bloquer l'inférence avant décompression
+//! fn inspect_tile(
+//!     guard: &mut LatentSafetyGuard,
+//!     tile: &SciRustSlhaTile,
+//! ) {
+//!     match guard.analyze_tile(tile) {
+//!         SafetyResult::Safe => {}
+//!         SafetyResult::Anomalous { deviation, reason } => {
+//!             eprintln!(
+//!                 "anomalie détectée: écart={deviation:.2}, raison={reason}"
+//!             );
+//!         }
 //!     }
 //! }
-//! # }
 //! ```
 
-use crate::attention::slha_v2::{D_C, LATENT_BYTES};
+use crate::attention::slha_v2::{SciRustSlhaTile, D_C, LATENT_BYTES};
 
 // ── Types publics ────────────────────────────────────────────────────────
 
@@ -136,9 +137,9 @@ const DRIFT_WINDOW: usize = 4;
 
 /// Filtre de sécurité géométrique dans l'espace latent.
 ///
-/// Analyse les vecteurs latents compressés directement (sans déquantisation) pour
-/// détecter des anomalies typiques des attaques par injection de prompts ou des
-/// dérives sémantiques, **avant la phase de décompression et de génération du token**.
+/// Analyse la géométrie des vecteurs latents SLHA v2 pour détecter des anomalies
+/// typiques des attaques par injection de prompts ou des dérives sémantiques. Pour une
+/// tuile réelle, [`Self::analyze_tile`] doit être utilisée afin de respecter son codec.
 ///
 /// ## Conception
 ///
@@ -245,18 +246,39 @@ impl LatentSafetyGuard {
         guard
     }
 
-    /// Analyse un vecteur latent compressé et retourne `Safe` ou `Anomalous`.
+    /// Analyse un latent brut au format **INT4 simple, échelle uniforme**.
     ///
-    /// Zéro allocation. Opère directement sur les nibbles INT4 sans déquantification
-    /// complète : chaque byte contient deux valeurs INT4 (nibble haut + nibble bas),
-    /// décodées avec un point zéro signé à 8 (le neutre du quantizer SLHAv2).
+    /// Cette API historique ne reçoit ni `scale`, ni `group_scales`, ni les drapeaux
+    /// de codec. Elle ne doit donc pas être utilisée avec une vraie
+    /// [`SciRustSlhaTile`] groupée, NF4, Mixed, TQ3 ou MIX3.
     ///
-    /// ## Complexité
-    /// - Temps : O(D_C) = O(128) opérations flottantes
-    /// - Mémoire : O(1) — aucune allocation
-    /// - Cycles estimés : ~200 sur ARM NEON, ~150 sur x86 AVX2
+    /// Pour toute tuile SLHA v2 complète, utiliser [`Self::analyze_tile`].
+    ///
+    /// L'échelle globale uniforme peut être ignorée ici parce que le cosinus et le
+    /// classifieur normalisé sont invariants à une multiplication positive commune.
+    ///
+    /// Zéro allocation sur le tas ; le vecteur temporaire reste sur la pile.
     pub fn analyze(&mut self, latent_kv: &[u8; LATENT_BYTES]) -> SafetyResult {
         let decoded = Self::decode_nibbles(latent_kv);
+        self.analyze_dequantized(&decoded)
+    }
+
+    /// Analyse une tuile SLHA v2 complète avec son codec réel.
+    ///
+    /// Le décodage est délégué à [`SciRustSlhaTile::dequant_latent`], source
+    /// canonique commune aux kernels de score. Cette méthode respecte donc :
+    ///
+    /// - l'échelle globale et les micro-échelles par groupe ;
+    /// - INT4 simple et groupé ;
+    /// - NF4 ;
+    /// - Mixed ;
+    /// - TQ3 et son éventuel état sans correction ;
+    /// - MIX3 et son éventuel état sans correction.
+    ///
+    /// Le tableau déquantifié est placé sur la pile : aucune allocation sur le tas.
+    #[inline]
+    pub fn analyze_tile(&mut self, tile: &SciRustSlhaTile) -> SafetyResult {
+        let decoded = tile.dequant_latent();
         self.analyze_dequantized(&decoded)
     }
 

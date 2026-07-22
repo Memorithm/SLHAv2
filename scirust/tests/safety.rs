@@ -171,3 +171,142 @@ fn test_analyze_uses_canonical_nibble_order() {
         other => panic!("le guard devrait reconnaître le latent canonique : {other:?}"),
     }
 }
+
+#[test]
+fn test_analyze_tile_uses_canonical_decoder_for_every_codec() {
+    use scirust::attention::slha_v2::{
+        quantize_latent, quantize_latent_grouped, quantize_latent_mix3, quantize_latent_mixed,
+        quantize_latent_nf4, quantize_latent_tq3, SciRustSlhaTile, FLAG_HOT, FLAG_MIX3, FLAG_MIXED,
+        FLAG_NF4, FLAG_TQ3, FLAG_TQ3_NOCORR, N_GROUPS, RESIDUAL_WORDS,
+    };
+
+    fn make_tile(
+        latent_kv: [u8; 64],
+        scale: f32,
+        group_scales: [u8; N_GROUPS],
+        flags: u16,
+    ) -> SciRustSlhaTile {
+        SciRustSlhaTile {
+            latent_kv,
+            residual_bitmap: [0; RESIDUAL_WORDS],
+            scale,
+            dynamic_lambda: 0.0,
+            residual_sigma: 0.0,
+            token_id: 0,
+            position: 0,
+            head_id: 0,
+            flags,
+            group_scales,
+        }
+    }
+
+    let raw: [f32; D] = core::array::from_fn(|index| {
+        let base = ((index * 17 + 5) % 37) as f32 - 18.0;
+        base / (3.0 + (index % 5) as f32)
+    });
+
+    let mut cases: Vec<(&str, SciRustSlhaTile)> = Vec::new();
+
+    let (latent, scale) = quantize_latent(&raw);
+    cases.push((
+        "int4-single",
+        make_tile(latent, scale, [255; N_GROUPS], FLAG_HOT),
+    ));
+
+    let (latent, scale, group_scales) = quantize_latent_grouped(&raw);
+    cases.push((
+        "int4-grouped",
+        make_tile(latent, scale, group_scales, FLAG_HOT),
+    ));
+
+    let (latent, scale, group_scales) = quantize_latent_nf4(&raw);
+    cases.push(("nf4", make_tile(latent, scale, group_scales, FLAG_NF4)));
+
+    let (latent, scale, group_scales) = quantize_latent_mixed(&raw);
+    cases.push(("mixed", make_tile(latent, scale, group_scales, FLAG_MIXED)));
+
+    let (latent, scale, group_scales) = quantize_latent_tq3(&raw);
+    let tq3 = make_tile(latent, scale, group_scales, FLAG_TQ3);
+    cases.push(("tq3", tq3));
+
+    let mut tq3_without_correction = tq3;
+    tq3_without_correction.flags |= FLAG_TQ3_NOCORR;
+    cases.push(("tq3-no-correction", tq3_without_correction));
+
+    let (latent, scale, group_scales) = quantize_latent_mix3(&raw);
+    let mix3 = make_tile(latent, scale, group_scales, FLAG_MIX3);
+    cases.push(("mix3", mix3));
+
+    let mut mix3_without_correction = mix3;
+    mix3_without_correction.flags |= FLAG_TQ3_NOCORR;
+    cases.push(("mix3-no-correction", mix3_without_correction));
+
+    for (codec, tile) in cases {
+        let canonical = tile.dequant_latent();
+
+        let mut tile_guard = LatentSafetyGuard::new(canonical, 0.999);
+        let tile_result = tile_guard.analyze_tile(&tile);
+
+        let mut vector_guard = LatentSafetyGuard::new(canonical, 0.999);
+        let vector_result = vector_guard.analyze_dequantized(&canonical);
+
+        assert_eq!(
+            tile_result, vector_result,
+            "résultat différent du décodeur canonique pour {codec}"
+        );
+
+        assert_eq!(
+            tile_result,
+            SafetyResult::Safe,
+            "la tuile alignée devrait être acceptée pour {codec}"
+        );
+
+        assert!(
+            (tile_guard.last_cosine() - vector_guard.last_cosine()).abs() < 1e-6,
+            "cosinus différent du décodeur canonique pour {codec}"
+        );
+
+        assert!(
+            (tile_guard.last_cosine() - 1.0).abs() < 1e-5,
+            "cosinus non unitaire pour {codec}: {}",
+            tile_guard.last_cosine()
+        );
+    }
+}
+
+#[test]
+fn test_analyze_tile_fails_closed_on_non_finite_scale() {
+    use scirust::attention::slha_v2::{
+        quantize_latent_grouped, SciRustSlhaTile, FLAG_HOT, RESIDUAL_WORDS,
+    };
+
+    let raw: [f32; D] = core::array::from_fn(|index| index as f32 / D as f32 - 0.5);
+
+    let (latent_kv, _scale, group_scales) = quantize_latent_grouped(&raw);
+
+    let tile = SciRustSlhaTile {
+        latent_kv,
+        residual_bitmap: [0; RESIDUAL_WORDS],
+        scale: f32::NAN,
+        dynamic_lambda: 0.0,
+        residual_sigma: 0.0,
+        token_id: 0,
+        position: 0,
+        head_id: 0,
+        flags: FLAG_HOT,
+        group_scales,
+    };
+
+    let mut guard = LatentSafetyGuard::new([1.0; D], 0.5);
+
+    match guard.analyze_tile(&tile) {
+        SafetyResult::Anomalous {
+            reason: SafetyReason::DotProductDeviation,
+            deviation,
+        } => {
+            assert!(deviation.is_finite());
+            assert!(deviation > 0.0);
+        }
+        other => panic!("une échelle non finie doit échouer fermée, obtenu {other:?}"),
+    }
+}
