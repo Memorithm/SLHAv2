@@ -1,6 +1,6 @@
 # SLHA v2 — Faites tourner une IA locale sans carte graphique
 
-[![CI](https://github.com/CHECKUPAUTO/SLHAv2/actions/workflows/ci.yml/badge.svg)](https://github.com/CHECKUPAUTO/SLHAv2/actions)
+[![CI](https://github.com/Memorithm/SLHAv2/actions/workflows/ci.yml/badge.svg)](https://github.com/Memorithm/SLHAv2/actions)
 [![Rust](https://img.shields.io/badge/rust-2021+-blue.svg)](https://rust-lang.org)
 
 ---
@@ -79,12 +79,16 @@ Le noyau **`scirust`** est à **zéro dépendance externe par défaut** (build o
 
 ```bash
 # Option 1 : One-click installer
-curl -sSL https://raw.githubusercontent.com/CHECKUPAUTO/SLHAv2/master/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Memorithm/SLHAv2/master/install.sh | bash
 
 # Option 2 : Manuel
-git clone https://github.com/CHECKUPAUTO/SLHAv2.git
+git clone https://github.com/Memorithm/SLHAv2.git
 cd SLHAv2
-cargo build --release
+cargo build --release \
+    -p scirust \
+    -p slha-mcp \
+    -p slha-c
+cargo test -p scirust -p slha-mcp -p slha-c
 ```
 
 **Prérequis :** [Rust](https://rustup.rs) (si pas installé, le script le fait pour vous).
@@ -160,7 +164,7 @@ Ajoutez à votre `Cargo.toml` :
 
 ```toml
 [dependencies]
-scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2" }
+scirust = { git = "https://github.com/Memorithm/SLHAv2" }
 ```
 
 Puis dans votre code :
@@ -231,14 +235,14 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 ## Contribuer
 
 Les contributions sont les bienvenues — voir [`CONTRIBUTING.md`](CONTRIBUTING.md)
-et les [issues](https://github.com/CHECKUPAUTO/SLHAv2/issues).
+et les [issues](https://github.com/Memorithm/SLHAv2/issues).
 
 ```bash
-git clone https://github.com/CHECKUPAUTO/SLHAv2.git
+git clone https://github.com/Memorithm/SLHAv2.git
 cd SLHAv2
-cargo test                              # 85 tests (workspace), doivent passer
+cargo test --workspace --all-features   # suite complète, tous les membres
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 ---

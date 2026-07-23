@@ -10,6 +10,12 @@ requires-python = ">=3.8"
 dependencies = []
 license = {text = "PolyForm-Noncommercial-1.0.0"}
 
+[project.urls]
+Homepage = "https://github.com/Memorithm/SLHAv2"
+Repository = "https://github.com/Memorithm/SLHAv2"
+Documentation = "https://github.com/Memorithm/SLHAv2/tree/master/slha-python"
+Issues = "https://github.com/Memorithm/SLHAv2/issues"
+
 [tool.maturin]
 bindings = "pyo3"
 module-name = "slha_core"

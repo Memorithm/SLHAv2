@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SLHA v2 — One-click installer
-# Usage: curl -sSL https://raw.githubusercontent.com/CHECKUPAUTO/SLHAv2/master/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/Memorithm/SLHAv2/master/install.sh | bash
 
 set -euo pipefail
 
@@ -51,7 +51,7 @@ else
 fi
 
 # ── 2. Cloner le dépôt ─────────────────────────────────────────────
-REPO="https://github.com/CHECKUPAUTO/SLHAv2.git"
+REPO="https://github.com/Memorithm/SLHAv2.git"
 DIR="SLHAv2"
 
 if [ -d "$DIR" ]; then

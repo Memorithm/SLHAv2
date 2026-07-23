@@ -33,7 +33,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ### Option A : Installeur automatique (recommandé)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/CHECKUPAUTO/SLHAv2/master/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Memorithm/SLHAv2/master/install.sh | bash
 ```
 
 Ce script installe Rust (si besoin), clone le projet, le compile et lance les
@@ -42,10 +42,13 @@ tests. En 2 minutes c'est prêt.
 ### Option B : Installation manuelle
 
 ```bash
-git clone https://github.com/CHECKUPAUTO/SLHAv2.git
+git clone https://github.com/Memorithm/SLHAv2.git
 cd SLHAv2
-cargo build --release
-cargo test
+cargo build --release \
+    -p scirust \
+    -p slha-mcp \
+    -p slha-c
+cargo test -p scirust -p slha-mcp -p slha-c
 ```
 
 ---
@@ -156,7 +159,7 @@ débit **scalaire / AVX2 / AVX-512**. Extrait représentatif (chiffres réels) :
 ```rust
 // 1. Ajouter la dépendance
 // [dependencies]
-// scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2" }
+// scirust = { git = "https://github.com/Memorithm/SLHAv2" }
 
 use scirust::attention::slha_v2;
 
