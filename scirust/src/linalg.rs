@@ -41,7 +41,11 @@ pub fn jacobi_eigh(a_in: &[f32], n: usize) -> (Vec<f64>, Vec<f64>) {
                 let app = a[p * n + p];
                 let aqq = a[q * n + q];
                 let theta = (aqq - app) / (2.0 * apq);
-                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let t = if theta == 0.0 {
+                    1.0
+                } else {
+                    theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt())
+                };
                 let c = 1.0 / (t * t + 1.0).sqrt();
                 let s = t * c;
 
@@ -78,6 +82,47 @@ pub fn jacobi_eigh(a_in: &[f32], n: usize) -> (Vec<f64>, Vec<f64>) {
 mod tests {
     use super::*;
     use crate::rng::Rng;
+
+    #[test]
+    fn jacobi_handles_equal_diagonal_with_nonzero_off_diagonal() {
+        // Cette matrice a des diagonales égales et un terme hors diagonale
+        // non nul. Ses valeurs propres exactes sont 0 et 2.
+        let a = [1.0f32, 1.0, 1.0, 1.0];
+
+        let (vals, vecs) = jacobi_eigh(&a, 2);
+
+        let mut sorted = vals.clone();
+        sorted.sort_by(f64::total_cmp);
+
+        assert!(
+            sorted[0].abs() < 1e-12,
+            "première valeur propre inattendue : {}",
+            sorted[0]
+        );
+        assert!(
+            (sorted[1] - 2.0).abs() < 1e-12,
+            "seconde valeur propre inattendue : {}",
+            sorted[1]
+        );
+
+        // Vérification indépendante par reconstruction A = V Λ Vᵀ.
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut reconstructed = 0.0f64;
+
+                for k in 0..2 {
+                    reconstructed += vecs[i * 2 + k] * vals[k] * vecs[j * 2 + k];
+                }
+
+                let expected = a[i * 2 + j] as f64;
+
+                assert!(
+                    (reconstructed - expected).abs() < 1e-12,
+                    "reconstruction[{i},{j}] = {reconstructed}, attendu {expected}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn jacobi_reconstructs_and_is_orthonormal() {

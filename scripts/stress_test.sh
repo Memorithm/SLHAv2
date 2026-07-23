@@ -101,26 +101,24 @@ if ! have cargo; then echo "${R}cargo not found — install Rust: https://rustup
 # ── 1. static quality gate ──────────────────────────────────────────────────
 banner "1. Static quality gate"
 step "fmt --check"                    120 -- cargo fmt --all --check
-step "clippy -D warnings (all-targets)" 600 -- cargo clippy --workspace --all-targets -- -D warnings
+step "clippy -D warnings (all-targets)" 600 -- cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # ── 2. build ────────────────────────────────────────────────────────────────
 banner "2. Build"
-step "build debug (all targets)"      600 -- cargo build --workspace --all-targets
+step "build debug (all targets)"      600 -- cargo build --workspace --all-targets --all-features
 if [ $QUICK -eq 0 ]; then
-  step "build release"                600 -- cargo build --workspace --release
+  step "build release"                600 -- cargo build --workspace --release --all-features
 fi
 
 # ── 3. tests / docs / benches ───────────────────────────────────────────────
 banner "3. Tests, docs, benches"
-step "test debug (workspace)"         600 -- cargo test --workspace
+step "test debug (workspace)"         600 -- cargo test --workspace --all-features
 if [ $QUICK -eq 0 ]; then
-  # slha-python (PyO3 extension-module) ne linke pas libpython en profil
-  # release/LTO (symboles Py_* non résolus) ⇒ exclu des tests release.
-  step "test release (excl. slha-python)" 600 -- cargo test --workspace --release --exclude slha-python
+  step "test release (workspace)" 600 -- cargo test --workspace --release --all-features
 fi
-step "doc build (--no-deps)"          300 -- cargo doc --no-deps --workspace
-# Seul scirust a des benches ; `cargo bench --workspace` casserait au link de slha-python.
-step "benches compile (scirust)"      600 -- cargo bench -p scirust --no-run
+step "doc build (--no-deps)"          300 -- env RUSTDOCFLAGS=-D warnings cargo doc --no-deps --workspace --all-features
+# `pyo3/extension-module` est réservé à Maturin ; Cargo peut valider tout le workspace.
+step "benches compile (workspace)"    600 -- cargo bench --workspace --all-features --no-run
 
 # ── 4. cross-compile (aarch64 NEON path) ────────────────────────────────────
 banner "4. Cross-compile (aarch64 / NEON path)"

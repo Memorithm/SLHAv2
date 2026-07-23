@@ -322,7 +322,7 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 
 ### Changed / Corrected
 - **Robustesse & finitude (nits)** :
-  - `install.sh` fonctionne désormais sous `curl | bash` — les prompts lisent
+  - `install.sh` s’exécute désormais localement après inspection — les prompts lisent
     `/dev/tty` (ou prennent le défaut affiché en non-interactif au lieu
     d'avorter sur EOF) ; au passage, le chemin « garder le dossier existant » ne
     re-clone plus en double (bug `cd` imbriqué corrigé).

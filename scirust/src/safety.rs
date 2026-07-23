@@ -1,9 +1,9 @@
 //! Filtre de sécurité géométrique dans l'espace latent (representation engineering).
 //!
-//! Ce module implémente un classifieur ultra-léger qui opère **directement sur les
-//! vecteurs latents compressés** (`[u8; 64]`, soit 128 dims INT4) sans déquantisation,
-//! détectant les anomalies géométriques typiques des attaques par injection de prompts,
-//! jailbreaks ou dérives sémantiques **avant la phase de décompression**.
+//! Ce module implémente un classifieur ultra-léger qui analyse la représentation
+//! géométrique des latents SLHA v2. L'API principale accepte une [`SciRustSlhaTile`]
+//! complète et réutilise son décodeur canonique afin de respecter le codec, les échelles
+//! par groupe et l'état éventuel du plan de correction.
 //!
 //! ## Principe
 //!
@@ -21,36 +21,37 @@
 //!
 //! ## Performance
 //!
-//! - Zéro allocation dans la boucle chaude (analyse d'une tuile : ~200 cycles).
-//! - Opère sur les nibbles INT4 sans déquantification complète (point zéro signé à 8).
+//! - Zéro allocation sur le tas dans la boucle chaude.
+//! - Déquantification canonique dans un tableau fixe de 128 `f32` placé sur la pile.
+//! - Prend en charge INT4 simple/groupé, NF4, Mixed, TQ3 et MIX3.
 //! - Fonctionne sur toutes architectures (x86_64, aarch64, RISC-V…).
 //!
 //! ## Intégration
 //!
 //! Ce module est **additif** — il n'altère ni la tuile de 128 octets, ni les kernels
-//! SIMD de base. Il s'insère dans le pipeline d'inférence juste après la projection
-//! latente et avant la décompression :
+//! SIMD de base. Il s'insère dans le pipeline d'inférence après la construction de la
+//! tuile et avant son utilisation pour générer le score d'attention :
 //!
 //! ```rust,no_run
+//! use scirust::attention::slha_v2::SciRustSlhaTile;
 //! use scirust::safety::{LatentSafetyGuard, SafetyResult};
 //!
-//! # fn main() {
-//! // `reference` serait calibrée sur un corpus de prompts normaux, puis normalisée.
-//! let reference = [1.0f32; 128];
-//! let mut guard = LatentSafetyGuard::new(reference, 0.5);
-//!
-//! let latent_kv: [u8; 64] = [0; 64]; // tuile compressée
-//! match guard.analyze(&latent_kv) {
-//!     SafetyResult::Safe => { /* décompresser et générer le token */ }
-//!     SafetyResult::Anomalous { deviation, reason } => {
-//!         eprintln!("anomalie détectée: écart={deviation:.2}, raison={reason}");
-//!         // bloquer l'inférence avant décompression
+//! fn inspect_tile(
+//!     guard: &mut LatentSafetyGuard,
+//!     tile: &SciRustSlhaTile,
+//! ) {
+//!     match guard.analyze_tile(tile) {
+//!         SafetyResult::Safe => {}
+//!         SafetyResult::Anomalous { deviation, reason } => {
+//!             eprintln!(
+//!                 "anomalie détectée: écart={deviation:.2}, raison={reason}"
+//!             );
+//!         }
 //!     }
 //! }
-//! # }
 //! ```
 
-use crate::attention::slha_v2::{D_C, LATENT_BYTES};
+use crate::attention::slha_v2::{SciRustSlhaTile, D_C, LATENT_BYTES};
 
 // ── Types publics ────────────────────────────────────────────────────────
 
@@ -68,9 +69,8 @@ pub enum SafetyResult {
     },
 }
 
-// `f32` n'implémente pas `Eq` à cause de NaN, donc on implémente `PartialEq`
-// manuellement avec une tolérance pour les comparaisons de `deviation`.
-impl Eq for SafetyResult {}
+// La comparaison de `deviation` utilise une tolérance et n'est donc pas
+// transitive. `SafetyResult` ne doit volontairement pas implémenter `Eq`.
 impl PartialEq for SafetyResult {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -137,9 +137,9 @@ const DRIFT_WINDOW: usize = 4;
 
 /// Filtre de sécurité géométrique dans l'espace latent.
 ///
-/// Analyse les vecteurs latents compressés directement (sans déquantisation) pour
-/// détecter des anomalies typiques des attaques par injection de prompts ou des
-/// dérives sémantiques, **avant la phase de décompression et de génération du token**.
+/// Analyse la géométrie des vecteurs latents SLHA v2 pour détecter des anomalies
+/// typiques des attaques par injection de prompts ou des dérives sémantiques. Pour une
+/// tuile réelle, [`Self::analyze_tile`] doit être utilisée afin de respecter son codec.
 ///
 /// ## Conception
 ///
@@ -246,18 +246,39 @@ impl LatentSafetyGuard {
         guard
     }
 
-    /// Analyse un vecteur latent compressé et retourne `Safe` ou `Anomalous`.
+    /// Analyse un latent brut au format **INT4 simple, échelle uniforme**.
     ///
-    /// Zéro allocation. Opère directement sur les nibbles INT4 sans déquantification
-    /// complète : chaque byte contient deux valeurs INT4 (nibble haut + nibble bas),
-    /// décodées avec un point zéro signé à 8 (le neutre du quantizer SLHAv2).
+    /// Cette API historique ne reçoit ni `scale`, ni `group_scales`, ni les drapeaux
+    /// de codec. Elle ne doit donc pas être utilisée avec une vraie
+    /// [`SciRustSlhaTile`] groupée, NF4, Mixed, TQ3 ou MIX3.
     ///
-    /// ## Complexité
-    /// - Temps : O(D_C) = O(128) opérations flottantes
-    /// - Mémoire : O(1) — aucune allocation
-    /// - Cycles estimés : ~200 sur ARM NEON, ~150 sur x86 AVX2
+    /// Pour toute tuile SLHA v2 complète, utiliser [`Self::analyze_tile`].
+    ///
+    /// L'échelle globale uniforme peut être ignorée ici parce que le cosinus et le
+    /// classifieur normalisé sont invariants à une multiplication positive commune.
+    ///
+    /// Zéro allocation sur le tas ; le vecteur temporaire reste sur la pile.
     pub fn analyze(&mut self, latent_kv: &[u8; LATENT_BYTES]) -> SafetyResult {
         let decoded = Self::decode_nibbles(latent_kv);
+        self.analyze_dequantized(&decoded)
+    }
+
+    /// Analyse une tuile SLHA v2 complète avec son codec réel.
+    ///
+    /// Le décodage est délégué à [`SciRustSlhaTile::dequant_latent`], source
+    /// canonique commune aux kernels de score. Cette méthode respecte donc :
+    ///
+    /// - l'échelle globale et les micro-échelles par groupe ;
+    /// - INT4 simple et groupé ;
+    /// - NF4 ;
+    /// - Mixed ;
+    /// - TQ3 et son éventuel état sans correction ;
+    /// - MIX3 et son éventuel état sans correction.
+    ///
+    /// Le tableau déquantifié est placé sur la pile : aucune allocation sur le tas.
+    #[inline]
+    pub fn analyze_tile(&mut self, tile: &SciRustSlhaTile) -> SafetyResult {
+        let decoded = tile.dequant_latent();
         self.analyze_dequantized(&decoded)
     }
 
@@ -282,6 +303,17 @@ impl LatentSafetyGuard {
 
         // Signal 1 : cosinus vs référence (référence unitaire → dot / norm_v).
         let cosine = Self::dot_product(&self.reference, v) / norm_v;
+
+        // Une référence mal configurée (NaN/Inf) ne doit jamais permettre un
+        // contournement du filtre. Toute valeur non finie est rejetée fail-safe.
+        if !cosine.is_finite() {
+            self.last_cosine = 0.0;
+            return SafetyResult::Anomalous {
+                deviation: self.dot_threshold.abs().max(f32::EPSILON),
+                reason: SafetyReason::DotProductDeviation,
+            };
+        }
+
         self.last_cosine = cosine;
         if cosine < self.dot_threshold {
             return SafetyResult::Anomalous {
@@ -293,9 +325,18 @@ impl LatentSafetyGuard {
         // Signal 2 : classifieur linéaire (poids unitaires → magnitude invariant).
         if let Some(ref weights) = self.weights {
             let linear_score = Self::dot_product(weights, v) / norm_v + self.linear_bias;
-            if linear_score < self.orthogonal_threshold {
+
+            // Des poids ou un biais non finis représentent une configuration
+            // invalide : le filtre doit échouer fermé, jamais retourner Safe.
+            if !linear_score.is_finite() || linear_score < self.orthogonal_threshold {
+                let deviation = if linear_score.is_finite() {
+                    self.orthogonal_threshold - linear_score
+                } else {
+                    self.orthogonal_threshold.abs().max(f32::EPSILON)
+                };
+
                 return SafetyResult::Anomalous {
-                    deviation: self.orthogonal_threshold - linear_score,
+                    deviation,
                     reason: SafetyReason::OrthogonalIsolation,
                 };
             }
@@ -309,9 +350,16 @@ impl LatentSafetyGuard {
         }
         if self.drift_count >= DRIFT_WINDOW {
             let mean = Self::window_mean(&self.drift_window);
-            if mean < self.drift_threshold {
+
+            if !mean.is_finite() || mean < self.drift_threshold {
+                let deviation = if mean.is_finite() {
+                    self.drift_threshold - mean
+                } else {
+                    self.drift_threshold.abs().max(f32::EPSILON)
+                };
+
                 return SafetyResult::Anomalous {
-                    deviation: self.drift_threshold - mean,
+                    deviation,
                     reason: SafetyReason::ActivationDrift,
                 };
             }
@@ -481,6 +529,60 @@ mod tests {
                 ..
             } => {}
             other => panic!("attendu DotProductDeviation, obtenu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_non_finite_reference_fails_closed() {
+        let mut reference = ones_unit();
+        reference[0] = f32::NAN;
+
+        let mut guard = LatentSafetyGuard::new(reference, 0.5);
+
+        match guard.analyze_dequantized(&ones_unit()) {
+            SafetyResult::Anomalous {
+                reason: SafetyReason::DotProductDeviation,
+                deviation,
+            } => assert!(deviation.is_finite() && deviation > 0.0),
+            other => panic!("une référence NaN doit échouer fermée, obtenu {other:?}"),
+        }
+
+        assert_eq!(guard.last_cosine(), 0.0);
+    }
+
+    #[test]
+    fn test_non_finite_linear_classifier_fails_closed() {
+        let mut weights = ones_unit();
+        weights[0] = f32::NAN;
+
+        let mut bad_weights = LatentSafetyGuard::with_linear_classifier(
+            ones_unit(),
+            weights,
+            0.0,
+            DEFAULT_ORTHOGONAL_THRESHOLD,
+        );
+
+        match bad_weights.analyze_dequantized(&ones_unit()) {
+            SafetyResult::Anomalous {
+                reason: SafetyReason::OrthogonalIsolation,
+                deviation,
+            } => assert!(deviation.is_finite() && deviation > 0.0),
+            other => panic!("des poids NaN doivent échouer fermés, obtenu {other:?}"),
+        }
+
+        let mut bad_bias = LatentSafetyGuard::with_linear_classifier(
+            ones_unit(),
+            ones_unit(),
+            f32::INFINITY,
+            DEFAULT_ORTHOGONAL_THRESHOLD,
+        );
+
+        match bad_bias.analyze_dequantized(&ones_unit()) {
+            SafetyResult::Anomalous {
+                reason: SafetyReason::OrthogonalIsolation,
+                deviation,
+            } => assert!(deviation.is_finite() && deviation > 0.0),
+            other => panic!("un biais infini doit échouer fermé, obtenu {other:?}"),
         }
     }
 

@@ -26,6 +26,16 @@ fn aligned_buffer_default_align_is_128() {
 }
 
 #[test]
+fn aligned_buffer_is_zero_initialized() {
+    let b = AlignedBuffer::new_aligned128(4096).unwrap();
+
+    assert!(
+        b.as_slice().iter().all(|&byte| byte == 0),
+        "une API sûre ne doit jamais exposer de mémoire non initialisée"
+    );
+}
+
+#[test]
 fn aligned_buffer_read_write_roundtrip() {
     let mut b = AlignedBuffer::new_aligned128(64).unwrap();
     let payload: Vec<u8> = (0..64u8).collect();

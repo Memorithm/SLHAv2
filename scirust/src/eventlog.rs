@@ -10,14 +10,17 @@
 //! ```text
 //! Header (16 bytes):
 //!   [u32 magic = 0x534C4C47 ("SLLG")]
-//!   [u32 version = 1]
+//!   [u32 version = 2]
 //!   [u32 tile_size = 128]   // sanity: must match the compiled tile
 //!   [u32 reserved = 0]
 //! Record (144 bytes), repeated:
 //!   [u64 seq]               // the slot's insertion sequence at eviction
 //!   [u32 slot]              // the arena slot it was evicted from
-//!   [u32 reserved = 0]
+//!   [u32 checksum]          // FNV-1a(seq || slot || tile), version 2
 //!   [128 bytes tile]        // see `tile_to_bytes`
+//!
+//! Version 1 used zero in place of `checksum`. It remains readable and
+//! appendable for backward compatibility.
 //! ```
 //!
 //! ## Determinism
@@ -38,8 +41,10 @@ use std::path::Path;
 
 /// Magic bytes at the start of an EventLog file: "SLLG".
 const MAGIC: u32 = 0x534C_4C47;
-/// On-disk format version.
-const VERSION: u32 = 1;
+/// Legacy format without per-record checksums.
+const VERSION_V1: u32 = 1;
+/// Current format with a checksum in every record.
+const VERSION: u32 = 2;
 /// Serialized size of one tile, in bytes (the 128-byte tile invariant).
 pub const TILE_BYTES: usize = 128;
 /// Size of the file header, in bytes.
@@ -133,6 +138,34 @@ pub fn tile_from_bytes(b: &[u8; TILE_BYTES]) -> SciRustSlhaTile {
     }
 }
 
+/// Deterministic zero-dependency checksum for one version-2 record.
+///
+/// FNV-1a is not cryptographic. Its role is to detect accidental corruption,
+/// torn writes and unexpected byte modifications.
+fn record_checksum(seq: u64, slot: u32, tile: &[u8; TILE_BYTES]) -> u32 {
+    const OFFSET: u32 = 0x811C_9DC5;
+    const PRIME: u32 = 0x0100_0193;
+
+    let mut hash = OFFSET;
+
+    for byte in seq.to_le_bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+
+    for byte in slot.to_le_bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+
+    for &byte in tile {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+
+    hash
+}
+
 /// Append-only log of evicted tiles.
 ///
 /// Holds an open file handle positioned at the end of the log. Reads scan the
@@ -142,80 +175,210 @@ pub fn tile_from_bytes(b: &[u8; TILE_BYTES]) -> SciRustSlhaTile {
 pub struct EventLog {
     file: File,
     records: u64,
+    version: u32,
+    writable: bool,
 }
 
 impl EventLog {
-    /// Create a fresh log at `path` (truncating any existing file) and write
-    /// the header.
+    /// Create a fresh log at `path`, truncating an existing file.
+    ///
+    /// Prefer [`Self::create_new`] when overwriting an existing log would be a
+    /// data-loss bug.
     ///
     /// # Errors
     /// Returns any I/O error from opening or writing the file.
     pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)?;
+        Self::create_impl(path, false)
+    }
+
+    /// Create a log only if `path` does not already exist.
+    ///
+    /// # Errors
+    /// Returns [`io::ErrorKind::AlreadyExists`] rather than truncating an
+    /// existing journal.
+    pub fn create_new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::create_impl(path, true)
+    }
+
+    fn create_impl<P: AsRef<Path>>(path: P, exclusive: bool) -> io::Result<Self> {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+
+        if exclusive {
+            options.create_new(true);
+        } else {
+            options.create(true).truncate(true);
+        }
+
+        let mut file = options.open(path)?;
         let mut header = [0u8; HEADER_BYTES];
+
         header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         header[4..8].copy_from_slice(&VERSION.to_le_bytes());
         header[8..12].copy_from_slice(&(TILE_BYTES as u32).to_le_bytes());
         // header[12..16] reserved = 0.
+
         file.write_all(&header)?;
-        Ok(Self { file, records: 0 })
+
+        Ok(Self {
+            file,
+            records: 0,
+            version: VERSION,
+            writable: true,
+        })
     }
 
-    /// Open an existing log at `path`, validating the header.
+    /// Open an existing log strictly, validating its header, complete-record
+    /// framing and all version-2 checksums.
     ///
     /// # Errors
-    /// Returns [`io::ErrorKind::InvalidData`] if the magic, version, or tile
-    /// size do not match, or if the body is not a whole number of records;
-    /// otherwise any underlying I/O error.
+    /// Returns [`io::ErrorKind::InvalidData`] if the file is truncated,
+    /// corrupted or uses an unsupported format.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        let len = file.seek(SeekFrom::End(0))?;
+        Self::open_impl(path, false, true)
+    }
+
+    /// Open an existing log and recover from one partial record at the tail.
+    ///
+    /// Only bytes after the final complete record are removed. Header errors,
+    /// checksum failures and corruption of complete records remain fatal.
+    pub fn open_recover<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::open_impl(path, true, true)
+    }
+
+    /// Open and validate an existing log in read-only mode.
+    ///
+    /// Reading and lookup remain available, but [`Self::append`] and
+    /// [`Self::append_durable`] return [`io::ErrorKind::PermissionDenied`].
+    pub fn open_read_only<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::open_impl(path, false, false)
+    }
+
+    fn open_impl<P: AsRef<Path>>(path: P, recover_tail: bool, writable: bool) -> io::Result<Self> {
+        let mut options = OpenOptions::new();
+        options.read(true).write(writable);
+
+        let mut file = options.open(path)?;
+        let mut len = file.seek(SeekFrom::End(0))?;
+
         if len < HEADER_BYTES as u64 {
             return Err(invalid("EventLog: file shorter than header"));
         }
+
         file.seek(SeekFrom::Start(0))?;
+
         let mut header = [0u8; HEADER_BYTES];
         file.read_exact(&mut header)?;
+
         let at = |o: usize| u32::from_le_bytes(header[o..o + 4].try_into().unwrap());
+
         if at(0) != MAGIC {
             return Err(invalid("EventLog: bad magic"));
         }
-        if at(4) != VERSION {
+
+        let version = at(4);
+
+        if version != VERSION_V1 && version != VERSION {
             return Err(invalid("EventLog: unsupported version"));
         }
+
         if at(8) != TILE_BYTES as u32 {
             return Err(invalid("EventLog: tile-size mismatch"));
         }
+
         let body = len - HEADER_BYTES as u64;
-        if !body.is_multiple_of(RECORD_BYTES as u64) {
-            return Err(invalid("EventLog: truncated record"));
+        let remainder = body % RECORD_BYTES as u64;
+
+        if remainder != 0 {
+            if !recover_tail {
+                return Err(invalid("EventLog: truncated record"));
+            }
+
+            len -= remainder;
+            file.set_len(len)?;
+            file.sync_all()?;
         }
-        file.seek(SeekFrom::End(0))?;
-        Ok(Self {
+
+        let records = (len - HEADER_BYTES as u64) / RECORD_BYTES as u64;
+
+        let mut log = Self {
             file,
-            records: body / RECORD_BYTES as u64,
-        })
+            records,
+            version,
+            writable,
+        };
+
+        log.validate_records()?;
+        log.file.seek(SeekFrom::End(0))?;
+
+        Ok(log)
     }
 
     /// Append one `(seq, slot, tile)` record at the end of the log.
     ///
+    /// Version-2 records carry a deterministic checksum. Version-1 logs remain
+    /// appendable and continue writing zero in the legacy reserved field.
+    ///
     /// # Errors
-    /// Returns any I/O error from writing; on failure the record count is not
-    /// incremented (the log stays consistent).
+    /// On a normal write failure, the implementation attempts to restore the
+    /// previous file length before returning the I/O error.
     pub fn append(&mut self, seq: u64, slot: u32, tile: &SciRustSlhaTile) -> io::Result<()> {
-        self.file.seek(SeekFrom::End(0))?;
+        if !self.writable {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "EventLog: log opened read-only",
+            ));
+        }
+
+        let start = self.file.seek(SeekFrom::End(0))?;
+        let tile_bytes = tile_to_bytes(tile);
+
         let mut rec = [0u8; RECORD_BYTES];
         rec[0..8].copy_from_slice(&seq.to_le_bytes());
         rec[8..12].copy_from_slice(&slot.to_le_bytes());
-        // rec[12..16] reserved = 0.
-        rec[16..16 + TILE_BYTES].copy_from_slice(&tile_to_bytes(tile));
-        self.file.write_all(&rec)?;
+
+        if self.version == VERSION {
+            let checksum = record_checksum(seq, slot, &tile_bytes);
+            rec[12..16].copy_from_slice(&checksum.to_le_bytes());
+        }
+
+        rec[16..16 + TILE_BYTES].copy_from_slice(&tile_bytes);
+
+        if let Err(error) = self.file.write_all(&rec) {
+            let _ = self.file.set_len(start);
+            let _ = self.file.seek(SeekFrom::End(0));
+            return Err(error);
+        }
+
         self.records += 1;
+        Ok(())
+    }
+
+    /// Append a record and synchronize it to durable storage before returning.
+    ///
+    /// If synchronization fails, the implementation attempts to remove the
+    /// newly appended record and restore the previous record count.
+    pub fn append_durable(
+        &mut self,
+        seq: u64,
+        slot: u32,
+        tile: &SciRustSlhaTile,
+    ) -> io::Result<()> {
+        let start = self.file.seek(SeekFrom::End(0))?;
+        let previous_records = self.records;
+
+        self.append(seq, slot, tile)?;
+
+        if let Err(sync_error) = self.sync() {
+            if self.file.set_len(start).is_ok() {
+                self.records = previous_records;
+                let _ = self.file.seek(SeekFrom::End(0));
+                let _ = self.file.sync_all();
+            }
+
+            return Err(sync_error);
+        }
+
         Ok(())
     }
 
@@ -241,27 +404,58 @@ impl EventLog {
         self.file.sync_all()
     }
 
+    fn decode_record(&self, rec: &[u8; RECORD_BYTES]) -> io::Result<LogRecord> {
+        let seq = u64::from_le_bytes(rec[0..8].try_into().unwrap());
+        let slot = u32::from_le_bytes(rec[8..12].try_into().unwrap());
+
+        let mut tile_bytes = [0u8; TILE_BYTES];
+        tile_bytes.copy_from_slice(&rec[16..16 + TILE_BYTES]);
+
+        if self.version == VERSION {
+            let stored = u32::from_le_bytes(rec[12..16].try_into().unwrap());
+            let expected = record_checksum(seq, slot, &tile_bytes);
+
+            if stored != expected {
+                return Err(invalid("EventLog: record checksum mismatch"));
+            }
+        }
+
+        Ok(LogRecord {
+            seq,
+            slot,
+            tile: tile_from_bytes(&tile_bytes),
+        })
+    }
+
+    fn validate_records(&mut self) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(HEADER_BYTES as u64))?;
+        let mut rec = [0u8; RECORD_BYTES];
+
+        for _ in 0..self.records {
+            self.file.read_exact(&mut rec)?;
+            self.decode_record(&rec)?;
+        }
+
+        self.file.seek(SeekFrom::End(0))?;
+        Ok(())
+    }
+
     /// Read every record, in append order.
     ///
     /// # Errors
-    /// Returns any I/O error, or [`io::ErrorKind::InvalidData`] if the file was
-    /// truncated since it was opened.
+    /// Returns any I/O error or [`io::ErrorKind::InvalidData`] for truncation
+    /// or a version-2 checksum mismatch.
     pub fn read_all(&mut self) -> io::Result<Vec<LogRecord>> {
         self.file.seek(SeekFrom::Start(HEADER_BYTES as u64))?;
+
         let mut out = Vec::with_capacity(usize::try_from(self.records).unwrap_or(0));
         let mut rec = [0u8; RECORD_BYTES];
+
         for _ in 0..self.records {
             self.file.read_exact(&mut rec)?;
-            let seq = u64::from_le_bytes(rec[0..8].try_into().unwrap());
-            let slot = u32::from_le_bytes(rec[8..12].try_into().unwrap());
-            let mut tile_bytes = [0u8; TILE_BYTES];
-            tile_bytes.copy_from_slice(&rec[16..16 + TILE_BYTES]);
-            out.push(LogRecord {
-                seq,
-                slot,
-                tile: tile_from_bytes(&tile_bytes),
-            });
+            out.push(self.decode_record(&rec)?);
         }
+
         self.file.seek(SeekFrom::End(0))?;
         Ok(out)
     }
@@ -403,6 +597,183 @@ mod tests {
         let by_slot = log.fetch_last_for_slot(0).unwrap().unwrap();
         assert!(tiles_eq(&by_slot.tile, &sample_tile(2)));
         assert!(log.fetch_by_seq(999).unwrap().is_none());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn append_durable_round_trips_after_reopen() {
+        let path = tmp_path("durable");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut log = EventLog::create(&path).unwrap();
+
+            log.append_durable(77, 4, &sample_tile(7)).unwrap();
+
+            assert_eq!(log.len(), 1);
+        }
+
+        let mut reopened = EventLog::open(&path).unwrap();
+        let records = reopened.read_all().unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 77);
+        assert_eq!(records[0].slot, 4);
+        assert!(tiles_eq(&records[0].tile, &sample_tile(7)));
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn read_only_log_allows_reads_but_rejects_appends() {
+        let path = tmp_path("readonly");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut log = EventLog::create(&path).unwrap();
+            log.append_durable(1, 2, &sample_tile(3)).unwrap();
+        }
+
+        let mut read_only = EventLog::open_read_only(&path).unwrap();
+
+        assert_eq!(read_only.read_all().unwrap().len(), 1);
+
+        let error = read_only
+            .append(2, 3, &sample_tile(4))
+            .expect_err("read-only EventLog must reject append");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(read_only.len(), 1);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn create_new_refuses_to_overwrite_existing_log() {
+        let path = tmp_path("create_new");
+        let _ = std::fs::remove_file(&path);
+
+        let log = EventLog::create_new(&path).unwrap();
+        drop(log);
+
+        let error = match EventLog::create_new(&path) {
+            Ok(_) => panic!("create_new must not overwrite an existing log"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn version_two_detects_record_corruption() {
+        let path = tmp_path("checksum");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut log = EventLog::create(&path).unwrap();
+            log.append(7, 3, &sample_tile(9)).unwrap();
+            log.sync().unwrap();
+        }
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[HEADER_BYTES + 16 + 5] ^= 0x80;
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = match EventLog::open(&path) {
+            Ok(_) => panic!("corrupted record must not open successfully"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("checksum"),
+            "unexpected error: {error}"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn open_recover_discards_only_the_partial_tail() {
+        let path = tmp_path("recover");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut log = EventLog::create(&path).unwrap();
+            log.append(10, 1, &sample_tile(1)).unwrap();
+            log.append(20, 2, &sample_tile(2)).unwrap();
+            log.sync().unwrap();
+        }
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.truncate(bytes.len() - 17);
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(
+            EventLog::open(&path).is_err(),
+            "strict open must reject a partial tail"
+        );
+
+        let mut recovered = EventLog::open_recover(&path).unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        let records = recovered.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 10);
+        assert!(tiles_eq(&records[0].tile, &sample_tile(1)));
+
+        recovered.append(30, 3, &sample_tile(3)).unwrap();
+        recovered.sync().unwrap();
+        drop(recovered);
+
+        let mut reopened = EventLog::open(&path).unwrap();
+        assert_eq!(reopened.len(), 2);
+
+        let records = reopened.read_all().unwrap();
+        assert_eq!(records[0].seq, 10);
+        assert_eq!(records[1].seq, 30);
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            (HEADER_BYTES + 2 * RECORD_BYTES) as u64
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn legacy_version_one_remains_readable_and_appendable() {
+        let path = tmp_path("legacy_v1");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut log = EventLog::create(&path).unwrap();
+            log.append(1, 4, &sample_tile(4)).unwrap();
+            log.sync().unwrap();
+        }
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..8].copy_from_slice(&VERSION_V1.to_le_bytes());
+        bytes[HEADER_BYTES + 12..HEADER_BYTES + 16].fill(0);
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut legacy = EventLog::open(&path).unwrap();
+        assert_eq!(legacy.len(), 1);
+
+        let records = legacy.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 1);
+        assert!(tiles_eq(&records[0].tile, &sample_tile(4)));
+
+        legacy.append(2, 5, &sample_tile(5)).unwrap();
+        legacy.sync().unwrap();
+        drop(legacy);
+
+        let mut reopened = EventLog::open(&path).unwrap();
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(reopened.read_all().unwrap().len(), 2);
+
         std::fs::remove_file(&path).unwrap();
     }
 

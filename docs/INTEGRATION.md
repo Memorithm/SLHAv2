@@ -100,7 +100,7 @@ float compute_attention_slha(query, token_idx) {
 1. **Forker llama.cpp** : `git clone https://github.com/ggerganov/llama.cpp`
 2. **Ajouter SLHA comme sous-module** :
    ```bash
-   git submodule add https://github.com/CHECKUPAUTO/SLHAv2 extern/SLHAv2
+   git submodule add https://github.com/Memorithm/SLHAv2 extern/SLHAv2
    ```
 3. **Modifier `llama.cpp`** : remplacer le stockage KV par la structure SLHA
 4. **Compiler** : `make LLAMA_SLHA=1`
@@ -179,7 +179,7 @@ class SLHABlock:
 ```rust
 // Cargo.toml
 // [dependencies]
-// scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2" }
+// scirust = { git = "https://github.com/Memorithm/SLHAv2" }
 
 use scirust::attention::slha_v2;
 
@@ -240,6 +240,6 @@ Après intégration, vérifiez ces points :
 
 ## Support
 
-- **Issues** : https://github.com/CHECKUPAUTO/SLHAv2/issues
+- **Issues** : https://github.com/Memorithm/SLHAv2/issues
 - **Spécification** : [`SLHAv2.md`](../SLHAv2.md)
 - **API Reference** : [`api.md`](api.md)

@@ -30,7 +30,7 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 
 - **Le mécanisme est correct et implémentable.** Tuile 128 o sans gaspillage,
   score fusionné conforme à l'éq. (2.3), kernels scalaire/AVX2/AVX-512/NEON
-  **prouvés équivalents** (78 tests scirust dont property/fuzz, clippy `-D warnings`, CI).
+  **prouvés équivalents** (suite scirust complète, dont property/fuzz, clippy `-D warnings`, CI).
 - **Le « Soft-Paging » tient — et tourne.** À faible énergie résiduelle, libérer
   le résidu 1-bit (WARM) est quasi sans perte ; le résidu redevient utile quand
   la base bas-rang laisse passer de l'énergie. La politique HOT/WARM/COLD est
@@ -190,4 +190,4 @@ tranche en Phase 2 (llama.cpp), pas par plus de réglage linéaire.
    commande par couche via `dump_activations.py --layer N`.
 
 ---
-*Réf. : crate `scirust/` (78 tests dont property/fuzz + doctests + calibration λ + CCOS, criterion, CI), paper `SLHAv2.md` §1–8.*
+*Réf. : crate `scirust/` (suite automatisée incluant property/fuzz, doctests, calibration λ et CCOS ; Criterion et CI), paper `SLHAv2.md` §1–8.*

@@ -45,7 +45,7 @@ pub enum NumaError {
     Os(i32),
     /// Argument invalide (CPU/nœud hors plage, longueur nulle, alignement non power-of-2…).
     InvalidArgument(&'static str),
-    /// Échec d'allocation (`std::alloc::alloc` a rendu null).
+    /// Échec d'allocation (`std::alloc::alloc_zeroed` a rendu null).
     Alloc,
 }
 
@@ -93,8 +93,9 @@ fn check_align(align: usize) -> Result<(), NumaError> {
 /// Allocation heap alignée, portable (aucune dépendance, toutes cibles).
 ///
 /// La mémoire est allouée via l'allocateur global `std::alloc` avec un `Layout`
-/// d'alignement `align` (128 o par défaut). Le buffer est non initialisé à
-/// l'allocation ; utiliser [`AlignedBuffer::zero`] pour le remplir de zéros.
+/// d'alignement `align` (128 o par défaut). Le buffer est initialisé à zéro
+/// dès l'allocation, afin que les méthodes sûres ne puissent jamais exposer
+/// des octets non initialisés.
 pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     layout: Layout,
@@ -102,7 +103,7 @@ pub struct AlignedBuffer {
 }
 
 impl AlignedBuffer {
-    /// Alloue `len` octets alignés sur `align` (non initialisé).
+    /// Alloue `len` octets alignés sur `align`, initialisés à zéro.
     pub fn new(len: usize, align: usize) -> Result<Self, NumaError> {
         check_align(align)?;
         if len == 0 {
@@ -116,7 +117,8 @@ impl AlignedBuffer {
         let layout = Layout::from_size_align(len, align)
             .map_err(|_| NumaError::InvalidArgument("layout overflow"))?;
         // SAFETY: layout valide (taille > 0, align power-of-2, pas d'overflow).
-        let ptr = unsafe { alloc::alloc(layout) };
+        // L'initialisation à zéro est nécessaire avant d'exposer un slice Rust sûr.
+        let ptr = unsafe { alloc::alloc_zeroed(layout) };
         let ptr = NonNull::new(ptr).ok_or(NumaError::Alloc)?;
         Ok(Self { ptr, layout, len })
     }
@@ -151,8 +153,9 @@ impl AlignedBuffer {
         self.ptr.as_ptr()
     }
 
-    /// Slice en lecture. Contenu non initialisé tant que le buffer n'est pas écrit
-    /// (le lecteur assume la sécurité mémoire).
+    /// Slice en lecture.
+    ///
+    /// Le contenu est toujours initialisé : l'allocation commence remplie de zéros.
     pub fn as_slice(&self) -> &[u8] {
         if self.len == 0 {
             &[]
@@ -190,7 +193,7 @@ impl AlignedBuffer {
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
         if self.len > 0 {
-            // SAFETY: ptr vient de `alloc::alloc` avec ce `layout` ; on le libère une fois.
+            // SAFETY: ptr vient de `alloc::alloc_zeroed` avec ce `layout` ; libération unique.
             unsafe { alloc::dealloc(self.ptr.as_ptr(), self.layout) };
         }
     }

@@ -88,6 +88,19 @@ pub enum EvictionPolicy {
     Importance { sink_window: usize },
 }
 
+/// Persistence guarantee required before a live tile may become COLD.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EvictionDurability {
+    /// Preserve the historical behaviour: count EventLog errors but continue
+    /// the in-memory eviction.
+    #[default]
+    BestEffort,
+
+    /// The tile becomes COLD only after its EventLog record has been appended
+    /// and synchronized successfully.
+    RequireDurable,
+}
+
 /// Elastic KV-cache over a contiguous arena of [`SciRustSlhaTile`].
 pub struct ElasticKvCache {
     tiles: Vec<SciRustSlhaTile>,
@@ -101,12 +114,14 @@ pub struct ElasticKvCache {
     policy: PageOutPolicy,
     eviction: EvictionPolicy,
     next_seq: u64,
-    /// Optional persistence sink (plan: COLD → EventLog). `None` ⇒ the cache
-    /// behaves exactly as before this field existed — eviction is in-memory
-    /// recycling only. Attach one with [`Self::attach_event_log`].
+    /// Optional persistence sink for COLD evictions.
     event_log: Option<crate::eventlog::EventLog>,
-    /// Count of failed EventLog appends (see [`Self::evict`] error policy).
+    /// Persistence guarantee applied to EventLog-backed evictions.
+    eviction_durability: EvictionDurability,
+    /// Number of EventLog append or synchronization failures.
     log_errors: u64,
+    /// Number of evictions blocked by [`EvictionDurability::RequireDurable`].
+    blocked_evictions: u64,
 }
 
 impl ElasticKvCache {
@@ -122,17 +137,28 @@ impl ElasticKvCache {
             eviction: EvictionPolicy::default(),
             next_seq: 0,
             event_log: None,
+            eviction_durability: EvictionDurability::BestEffort,
             log_errors: 0,
+            blocked_evictions: 0,
         }
     }
 
-    /// Attach an [`EventLog`](crate::eventlog::EventLog) so that evicted
-    /// (COLD) tiles are snapshotted to durable storage before their slot is
-    /// recycled, enabling later [`Self::rehydrate`]. Without one, eviction is
-    /// in-memory only (the historical behaviour). Attaching does not touch
-    /// already-live tiles.
+    /// Attach an EventLog using best-effort persistence.
+    ///
+    /// Append failures are counted, but the tile is still evicted. This
+    /// preserves the historical behaviour.
     pub fn attach_event_log(&mut self, log: crate::eventlog::EventLog) {
         self.event_log = Some(log);
+        self.eviction_durability = EvictionDurability::BestEffort;
+    }
+
+    /// Attach an EventLog requiring durable persistence before COLD eviction.
+    ///
+    /// A failed append or synchronization keeps the tile live and prevents its
+    /// slot from being recycled.
+    pub fn attach_durable_event_log(&mut self, log: crate::eventlog::EventLog) {
+        self.event_log = Some(log);
+        self.eviction_durability = EvictionDurability::RequireDurable;
     }
 
     /// Number of EventLog appends that failed during eviction. Eviction never
@@ -141,6 +167,18 @@ impl ElasticKvCache {
     #[must_use]
     pub fn log_errors(&self) -> u64 {
         self.log_errors
+    }
+
+    /// Number of COLD transitions refused because durable persistence failed.
+    #[must_use]
+    pub fn blocked_evictions(&self) -> u64 {
+        self.blocked_evictions
+    }
+
+    /// Persistence policy currently attached to the cache.
+    #[must_use]
+    pub fn eviction_durability(&self) -> EvictionDurability {
+        self.eviction_durability
     }
 
     /// Convenience constructor with the recommended default policy (the hybrid
@@ -178,22 +216,38 @@ impl ElasticKvCache {
         crate::numa::pin_current_thread_local().ok()
     }
 
-    /// Insert a HOT tile, reusing a recycled (COLD) slot when available. Returns
-    /// the slot id. The slot's H2O importance is (re)set to 0.
+    /// Insert a tile, reusing a recycled (COLD) slot when available.
+    ///
+    /// The logical state is derived from the tile's encoded [`FLAG_WARM`]:
+    /// an already-degraded WARM tile must not be advertised as HOT.
+    /// The slot's H2O importance is (re)set to 0.
     pub fn insert(&mut self, tile: SciRustSlhaTile) -> usize {
+        let state = if tile.is_warm() {
+            TileState::Warm
+        } else {
+            TileState::Hot
+        };
+
+        self.insert_with_state(tile, state)
+    }
+
+    fn insert_with_state(&mut self, tile: SciRustSlhaTile, state: TileState) -> usize {
+        debug_assert_ne!(state, TileState::Cold);
+
         let slot = if let Some(s) = self.free.pop() {
             self.tiles[s] = tile;
-            self.state[s] = TileState::Hot;
+            self.state[s] = state;
             self.seq[s] = self.next_seq;
             self.importance[s] = 0.0;
             s
         } else {
             self.tiles.push(tile);
-            self.state.push(TileState::Hot);
+            self.state.push(state);
             self.seq.push(self.next_seq);
             self.importance.push(0.0);
             self.tiles.len() - 1
         };
+
         self.next_seq += 1;
         slot
     }
@@ -213,38 +267,73 @@ impl ElasticKvCache {
     /// `scores` is typically the output of [`Self::score_all`]; cold slots it
     /// references are skipped (they carry no attention once evicted).
     pub fn observe_scores(&mut self, scores: &[(usize, f32)], temperature: f32) {
-        if scores.is_empty() {
+        if scores.is_empty() || !temperature.is_finite() || temperature <= 0.0 {
             return;
         }
-        let m = scores
+
+        // Les slots absents ou COLD ne doivent pas absorber une partie de la
+        // masse softmax destinée aux éléments réellement actifs.
+        let live: Vec<(usize, f32)> = scores
             .iter()
-            .map(|&(_, s)| s)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        let mut w = vec![0.0f32; scores.len()];
-        for (i, &(_, s)) in scores.iter().enumerate() {
-            w[i] = ((s - m) / temperature).exp();
-            sum += w[i];
+            .copied()
+            .filter(|&(slot, _)| slot < self.state.len() && self.state[slot] != TileState::Cold)
+            .collect();
+
+        if live.is_empty() || live.iter().any(|&(_, score)| !score.is_finite()) {
+            return;
         }
-        // Guard against degenerate inputs that would otherwise write NaN into
-        // the importance vector: all-(-inf) scores give `m = -inf` ⇒ `s - m` =
-        // NaN; a zero temperature divides by 0 ⇒ inf/NaN. Treat both (and the
-        // empty-mass case) as a safe no-op rather than corrupting `importance`.
+
+        let m = live
+            .iter()
+            .map(|&(_, score)| score)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        let mut sum = 0.0f32;
+        let mut weights = vec![0.0f32; live.len()];
+
+        for (i, &(_, score)) in live.iter().enumerate() {
+            weights[i] = ((score - m) / temperature).exp();
+            sum += weights[i];
+        }
+
         if !sum.is_finite() || sum <= 0.0 {
             return;
         }
+
         let inv = 1.0 / sum;
-        for (i, &(slot, _)) in scores.iter().enumerate() {
-            if slot < self.importance.len() && self.state[slot] != TileState::Cold {
-                self.importance[slot] += w[i] * inv;
-            }
+
+        for (i, &(slot, _)) in live.iter().enumerate() {
+            self.importance[slot] += weights[i] * inv;
         }
     }
 
-    /// Fused attention score for a (non-COLD) slot. WARM slots return the coarse
-    /// term only (the kernel honours `FLAG_WARM`).
+    /// Fused attention score for an existing live slot.
+    ///
+    /// Returns `None` for an absent or COLD slot. WARM slots return the coarse
+    /// term only because the kernel honours [`FLAG_WARM`].
+    pub fn try_score(
+        &self,
+        slot: usize,
+        q_coarse: &[f32; D_C],
+        q_sign: &[u64; RESIDUAL_WORDS],
+    ) -> Option<f32> {
+        let tile = self.tiles.get(slot)?;
+
+        match self.state.get(slot)? {
+            TileState::Cold => None,
+            TileState::Hot | TileState::Warm => Some(tile.compute_score(q_coarse, q_sign)),
+        }
+    }
+
+    /// Fused attention score for a live slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics with an explicit diagnostic for an absent or COLD slot. New code
+    /// handling untrusted slot identifiers should prefer [`Self::try_score`].
     pub fn score(&self, slot: usize, q_coarse: &[f32; D_C], q_sign: &[u64; RESIDUAL_WORDS]) -> f32 {
-        self.tiles[slot].compute_score(q_coarse, q_sign)
+        self.try_score(slot, q_coarse, q_sign)
+            .expect("cannot score an absent or COLD CCOS slot")
     }
 
     /// Score the query against every live (non-COLD) tile: `(slot, score)`.
@@ -299,34 +388,53 @@ impl ElasticKvCache {
     }
 
     /// Evict a slot (→ COLD) and recycle it for a future `insert`.
-    pub fn evict(&mut self, slot: usize) {
-        if self.state[slot] != TileState::Cold {
-            // Snapshot to the EventLog (if attached) BEFORE the slot is marked
-            // COLD and made recyclable. Error policy: a failed append must NOT
-            // corrupt the in-memory cache — the tile is still evicted (memory
-            // semantics preserved) and the failure is counted in `log_errors`.
-            if let Some(log) = self.event_log.as_mut() {
-                if log
-                    .append(self.seq[slot], slot as u32, &self.tiles[slot])
-                    .is_err()
-                {
-                    self.log_errors += 1;
+    ///
+    /// Returns `true` when the slot transitioned to COLD. Under
+    /// [`EvictionDurability::RequireDurable`], persistence failure returns
+    /// `false` and leaves the slot live.
+    pub fn evict(&mut self, slot: usize) -> bool {
+        if self.state.get(slot) != Some(&TileState::Hot)
+            && self.state.get(slot) != Some(&TileState::Warm)
+        {
+            return false;
+        }
+
+        if let Some(log) = self.event_log.as_mut() {
+            let persisted = match self.eviction_durability {
+                EvictionDurability::BestEffort => {
+                    log.append(self.seq[slot], slot as u32, &self.tiles[slot])
+                }
+                EvictionDurability::RequireDurable => {
+                    log.append_durable(self.seq[slot], slot as u32, &self.tiles[slot])
+                }
+            };
+
+            if persisted.is_err() {
+                self.log_errors += 1;
+
+                if self.eviction_durability == EvictionDurability::RequireDurable {
+                    self.blocked_evictions += 1;
+                    return false;
                 }
             }
-            self.state[slot] = TileState::Cold;
-            self.free.push(slot);
+        } else if self.eviction_durability == EvictionDurability::RequireDurable {
+            self.blocked_evictions += 1;
+            return false;
         }
+
+        self.state[slot] = TileState::Cold;
+        self.free.push(slot);
+        true
     }
 
     /// Restore a previously-evicted tile from the attached
-    /// [`EventLog`](crate::eventlog::EventLog) by its eviction `seq`, inserting
-    /// it back into the cache as a fresh HOT tile. Returns the new slot, or
-    /// `None` if no log is attached or no record matches `seq`.
+    /// [`EventLog`](crate::eventlog::EventLog) by its eviction `seq`.
     ///
-    /// By design the restored tile re-enters as HOT with importance reset (a
-    /// fresh [`Self::insert`]); its stored `flags`/scales/latent are exactly
-    /// those at eviction time. The rehydrated tile gets a **new** insertion
-    /// `seq` — it is treated as a fresh admission, not a rewind of history.
+    /// The restored logical state matches the encoded tile: a record carrying
+    /// [`FLAG_WARM`] is restored as WARM, otherwise as HOT. Importance is reset
+    /// and the rehydrated tile gets a **new** insertion `seq`; this is a fresh
+    /// admission, not a rewind of history. Returns `None` if no log is attached
+    /// or no record matches `seq`.
     ///
     /// # Errors
     /// Propagates I/O errors from reading the log.
@@ -337,7 +445,14 @@ impl ElasticKvCache {
         let Some(rec) = log.fetch_by_seq(seq)? else {
             return Ok(None);
         };
-        Ok(Some(self.insert(rec.tile)))
+
+        let state = if rec.tile.is_warm() {
+            TileState::Warm
+        } else {
+            TileState::Hot
+        };
+
+        Ok(Some(self.insert_with_state(rec.tile, state)))
     }
 
     /// Elastic logical footprint: Σ over live slots (HOT 128, WARM 96, COLD 0;
@@ -403,8 +518,7 @@ impl ElasticKvCache {
             PageOutPolicy::LowestImpactFirst => slots.sort_by(|&a, &b| {
                 self.tiles[a]
                     .residual_sigma
-                    .partial_cmp(&self.tiles[b].residual_sigma)
-                    .unwrap_or(core::cmp::Ordering::Equal)
+                    .total_cmp(&self.tiles[b].residual_sigma)
             }),
             PageOutPolicy::OldestFirst => slots.sort_by_key(|&s| self.seq[s]),
         }
@@ -425,15 +539,15 @@ impl ElasticKvCache {
     ///    [`EvictionPolicy`]: default `Causal` (oldest first), or `Importance`
     ///    (plan axis A5: lowest cumulative attention first, attention sinks
     ///    pinned) — dropping a token is the harder loss.
-    pub fn enforce_budget(&mut self) {
+    pub fn enforce_budget(&mut self) -> bool {
         if self.live_bytes() <= self.budget_bytes {
-            return;
+            return true;
         }
 
         // Phase 1 — HOT TQ3 correction planes.
         for s in self.slots_in_paging_order(TileState::Hot) {
             if self.live_bytes() <= self.budget_bytes {
-                return;
+                return true;
             }
             self.drop_correction(s);
         }
@@ -441,7 +555,7 @@ impl ElasticKvCache {
         // Phase 2 — HOT→WARM.
         for s in self.slots_in_paging_order(TileState::Hot) {
             if self.live_bytes() <= self.budget_bytes {
-                return;
+                return true;
             }
             self.page_out(s);
         }
@@ -450,7 +564,7 @@ impl ElasticKvCache {
         // already lost theirs in phase 1; this catches inserted-WARM tiles).
         for s in self.slots_in_paging_order(TileState::Warm) {
             if self.live_bytes() <= self.budget_bytes {
-                return;
+                return true;
             }
             self.drop_correction(s);
         }
@@ -470,20 +584,19 @@ impl ElasticKvCache {
                     let sa = self.tiles[a].position < sw;
                     let sb = self.tiles[b].position < sw;
                     sa.cmp(&sb)
-                        .then_with(|| {
-                            self.importance[a]
-                                .partial_cmp(&self.importance[b])
-                                .unwrap_or(core::cmp::Ordering::Equal)
-                        })
+                        .then_with(|| self.importance[a].total_cmp(&self.importance[b]))
                         .then_with(|| self.seq[a].cmp(&self.seq[b]))
                 });
             }
         }
         for s in live {
             if self.live_bytes() <= self.budget_bytes {
-                return;
+                return true;
             }
+
             self.evict(s);
         }
+
+        self.live_bytes() <= self.budget_bytes
     }
 }

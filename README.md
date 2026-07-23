@@ -1,6 +1,6 @@
 # SLHA v2 — Faites tourner une IA locale sans carte graphique
 
-[![CI](https://github.com/CHECKUPAUTO/SLHAv2/actions/workflows/ci.yml/badge.svg)](https://github.com/CHECKUPAUTO/SLHAv2/actions)
+[![CI](https://github.com/Memorithm/SLHAv2/actions/workflows/ci.yml/badge.svg)](https://github.com/Memorithm/SLHAv2/actions)
 [![Rust](https://img.shields.io/badge/rust-2021+-blue.svg)](https://rust-lang.org)
 
 ---
@@ -78,16 +78,19 @@ Le noyau **`scirust`** est à **zéro dépendance externe par défaut** (build o
 ## Installation (30 secondes)
 
 ```bash
-# Option 1 : One-click installer
-curl -sSL https://raw.githubusercontent.com/CHECKUPAUTO/SLHAv2/master/install.sh | bash
-
-# Option 2 : Manuel
-git clone https://github.com/CHECKUPAUTO/SLHAv2.git
+git clone https://github.com/Memorithm/SLHAv2.git
 cd SLHAv2
-cargo build --release
+git rev-parse HEAD
+less install.sh
+./install.sh
+
+# Installation manuelle
+cargo build --locked --release -p scirust -p slha-mcp -p slha-c
+cargo test --locked -p scirust -p slha-mcp -p slha-c
 ```
 
-**Prérequis :** [Rust](https://rustup.rs) (si pas installé, le script le fait pour vous).
+**Prérequis :** Git et Rust doivent être installés au préalable.
+L’installeur local ne télécharge aucun script et ne supprime aucun répertoire.
 
 ---
 
@@ -160,7 +163,7 @@ Ajoutez à votre `Cargo.toml` :
 
 ```toml
 [dependencies]
-scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2" }
+scirust = { git = "https://github.com/Memorithm/SLHAv2" }
 ```
 
 Puis dans votre code :
@@ -215,7 +218,7 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 
 ## État du projet
 
-- ✅ **Mécanisme validé** : **85 tests** workspace (78 `scirust` + 7 `slha-mcp` : unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
+- ✅ **Mécanisme validé** : suite workspace complète couvrant le noyau, l’auto-audit, CCOS, l’ABI C, le serveur MCP et le binding Python ; tests unitaires, intégration, property/fuzz et doctests ; Clippy `-D warnings` et CI
 - ✅ **Performance** : x86 **AVX2 ~×11,5 / AVX-512 ~×14,1** (banc Xeon partagé) ; ARM **NEON ~×5,7** (Jetson Thor AGX 128) — vs scalaire. _Ratios **indicatifs**, dépendants du CPU et de l'auto-vectorisation ; mesurez les vôtres : `cargo run --example cycles --release`._
 - ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512/VPOPCNTDQ) + ARM AArch64 (NEON, **mesuré sur Jetson Thor** ; `sve2` détecté) — kit `examples/platform_report`
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
@@ -231,14 +234,14 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 ## Contribuer
 
 Les contributions sont les bienvenues — voir [`CONTRIBUTING.md`](CONTRIBUTING.md)
-et les [issues](https://github.com/CHECKUPAUTO/SLHAv2/issues).
+et les [issues](https://github.com/Memorithm/SLHAv2/issues).
 
 ```bash
-git clone https://github.com/CHECKUPAUTO/SLHAv2.git
+git clone https://github.com/Memorithm/SLHAv2.git
 cd SLHAv2
-cargo test                              # 85 tests (workspace), doivent passer
+cargo test --workspace --all-features   # suite complète, tous les membres
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 ---

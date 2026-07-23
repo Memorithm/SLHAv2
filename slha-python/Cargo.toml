@@ -6,6 +6,12 @@ rust-version = "1.89"
 authors = ["Forge CHECKUPAUTO <forge@checkupauto.io>"]
 description = "Python bindings for SLHA v2 kernel."
 license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/Memorithm/SLHAv2"
+homepage = "https://github.com/Memorithm/SLHAv2"
+documentation = "https://github.com/Memorithm/SLHAv2/tree/master/slha-python"
+readme = "../README.md"
+keywords = ["python", "llm", "kv-cache", "attention", "quantization"]
+categories = ["api-bindings", "science"]
 
 [lib]
 name = "slha_core"
@@ -13,7 +19,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.23" }
 
 [build-dependencies]
 pyo3-build-config = "0.23"

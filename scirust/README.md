@@ -14,7 +14,7 @@ Hybrid Attention) décrit dans [`../SLHAv2.md`](../SLHAv2.md).
 ## Build / test / mesure
 
 ```sh
-cargo test                                       # 51 tests : unitaires + intégration + property/fuzz + doctests
+cargo test -p scirust --all-features            # suite noyau : unitaires + intégration + property/fuzz + doctests
                                                  #  (Hamming, layout 128 o, zero-point, WARM, sign-LSH, Jacobi,
                                                  #   PCA, MX, NF4, sortie d'attention, SGD, SIMD≡scalaire, calibration λ,
                                                  #   CCOS Soft-Paging : page_out/evict/budget/recyclage de slots ;
