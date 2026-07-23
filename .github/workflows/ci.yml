@@ -43,9 +43,9 @@ jobs:
         # so these runs do not recompile.
         run: |
           python3 scripts/dump_activations.py --synthetic --out "$RUNNER_TEMP/act" --seed 1 --rows 192 --dim 192
-          cargo run -p scirust --example offline_validation -- --dump "$RUNNER_TEMP/act"
-          cargo run -p scirust --example train_on_real_activations -- --dump "$RUNNER_TEMP/act" --out "$RUNNER_TEMP/proj.slhw"
-          cargo run -p scirust --example offline_validation -- --dump "$RUNNER_TEMP/act" --weights "$RUNNER_TEMP/proj.slhw"
+          cargo --locked run -p scirust --example offline_validation -- --dump "$RUNNER_TEMP/act"
+          cargo --locked run -p scirust --example train_on_real_activations -- --dump "$RUNNER_TEMP/act" --out "$RUNNER_TEMP/proj.slhw"
+          cargo --locked run -p scirust --example offline_validation -- --dump "$RUNNER_TEMP/act" --weights "$RUNNER_TEMP/proj.slhw"
       - name: Benchmarks compile (workspace)
         # P1-F keeps `pyo3/extension-module` in Maturin-only wheel builds.
         # Normal Cargo targets link Python normally, so the complete workspace
