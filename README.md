@@ -219,7 +219,7 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 
 ## État du projet
 
-- ✅ **Mécanisme validé** : **85 tests** workspace (78 `scirust` + 7 `slha-mcp` : unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS), clippy `-D warnings` clean, CI
+- ✅ **Mécanisme validé** : suite workspace complète couvrant le noyau, l’auto-audit, CCOS, l’ABI C, le serveur MCP et le binding Python ; tests unitaires, intégration, property/fuzz et doctests ; Clippy `-D warnings` et CI
 - ✅ **Performance** : x86 **AVX2 ~×11,5 / AVX-512 ~×14,1** (banc Xeon partagé) ; ARM **NEON ~×5,7** (Jetson Thor AGX 128) — vs scalaire. _Ratios **indicatifs**, dépendants du CPU et de l'auto-vectorisation ; mesurez les vôtres : `cargo run --example cycles --release`._
 - ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512/VPOPCNTDQ) + ARM AArch64 (NEON, **mesuré sur Jetson Thor** ; `sve2` détecté) — kit `examples/platform_report`
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)

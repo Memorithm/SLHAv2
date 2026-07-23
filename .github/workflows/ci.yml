@@ -16,17 +16,17 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy (warnings = errors, all targets)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Build all targets (lib + tests + benches + examples)
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --all-features
       - name: Tests (unit + integration + property/fuzz + doctests)
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
       - name: Docs (warnings = errors)
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --all-features --no-deps
       - name: Self-audit (slha-audit end-to-end)
-        run: cargo run --bin slha-audit -- --json
+        run: cargo run -p scirust --bin slha-audit -- --json
       - name: Offline plumbing (Python dump → Rust harness contract)
         # Guards the `.bin` format contract shared by the Phase-0 writer
         # (scripts/dump_activations.py) and reader (the offline examples): a
@@ -41,15 +41,11 @@ jobs:
           cargo run -p scirust --example offline_validation -- --dump "$RUNNER_TEMP/act"
           cargo run -p scirust --example train_on_real_activations -- --dump "$RUNNER_TEMP/act" --out "$RUNNER_TEMP/proj.slhw"
           cargo run -p scirust --example offline_validation -- --dump "$RUNNER_TEMP/act" --weights "$RUNNER_TEMP/proj.slhw"
-      - name: Benchmarks compile (scirust criterion)
-        # Only `scirust` ships benches. `cargo bench --workspace` would also try
-        # to link `slha-python`'s cdylib test target in the bench (release/LTO)
-        # profile, which fails: pyo3 `extension-module` intentionally does not
-        # link libpython (the interpreter provides it at load time), and LTO
-        # then flags the unresolved `Py_*` symbols. `cargo build --workspace
-        # --all-targets` and `cargo test --workspace` (dev profile, no LTO) stay
-        # green; only the release/bench link is affected.
-        run: cargo bench -p scirust --no-run
+      - name: Benchmarks compile (workspace)
+        # P1-F keeps `pyo3/extension-module` in Maturin-only wheel builds.
+        # Normal Cargo targets link Python normally, so the complete workspace
+        # bench graph must compile without excluding `slha-python`.
+        run: cargo bench --workspace --all-features --no-run
       - name: AArch64 cross-check (NEON path + C-ABI crate)
         # Type-check scirust (NEON kernel path), slha-c (C-ABI, the crate that
         # broke on aarch64 because of `*mut i8` vs `*mut c_char`) and slha-mcp
@@ -104,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
       - name: Check workspace on the declared MSRV
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --all-features
       - name: Check `numa` feature on the declared MSRV
         # `libc`'s own MSRV is well below 1.89, so the feature path must also
         # compile on the crate's declared MSRV.

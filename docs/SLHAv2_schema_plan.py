@@ -674,7 +674,7 @@ def page_plan_intro(c: C):
     W = PAGE_W - 2 * MARGIN
     y = PAGE_H - MARGIN - 26
 
-    intro = ("Le projet a validé la *mécanique* (51 tests, équivalences SIMD, Soft-Paging quasi sans "
+    intro = ("Le projet a validé la *mécanique* (suite de tests automatisés, équivalences SIMD, Soft-Paging quasi sans "
              "perte, sortie d'attention cos 0,95–0,997) et identifié, par la mesure, ses *vrais* "
              "leviers : la projection bas-rang (A1) et le résidu 1-bit (A2/A3) — la quantification du "
              "latent n'est pas le goulot. Le plan ci-dessous priorise donc la fidélité et la politique "

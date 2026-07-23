@@ -20,13 +20,10 @@ La CI exige que ces commandes passent — lancez-les en local :
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace          # 85 tests (78 scirust + 7 slha-mcp ; unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + MCP)
-cargo build --workspace --all-targets
-cargo bench -p scirust --no-run    # seul `scirust` a des benches ; `--workspace`
-                                  # casserait au link de `slha-python` (pyo3
-                                  # extension-module + LTO → symboles Py_* non
-                                  # résolus en profil release/bench)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features   # suite complète : noyau + C + MCP + Python
+cargo build --workspace --all-targets --all-features
+cargo bench --workspace --all-features --no-run   # compile le graphe bench complet
 ```
 
 Pour le chemin NEON (ARM), vérifiez la cross-compilation :

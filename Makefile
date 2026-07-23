@@ -43,11 +43,11 @@ example: ## Lance l'exemple de base
 	cargo run --example basic_usage
 
 lint: ## Vérifie le style de code
-	cargo fmt --check
+	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 fmt: ## Formate le code
-	cargo fmt
+	cargo fmt --all
 
 doc: ## Génère la documentation
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps

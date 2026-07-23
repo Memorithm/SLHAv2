@@ -337,12 +337,12 @@ Voir aussi `scirust/examples/basic_usage.rs` (exemple exécutable identique).
 ## Build / test / bench (depuis la racine, workspace)
 
 ```sh
-cargo test                 # 78 tests scirust (unitaires + intégration + property/fuzz + doctests + calibration λ + CCOS + JSON + audit)
+cargo test --workspace --all-features   # suite complète : noyau + C + MCP + Python
 cargo bench                # micro-benchs criterion (scalaire / AVX2 / AVX-512)
 cargo run -p scirust --example basic_usage
 cargo run --release -p scirust --example platform_report   # kit x86/ARM : features SIMD, cache, débit
 cargo run --bin slha-audit                                 # auto-audit → Markdown (--json / --out FILE / --diff PRIOR.json)
-cargo build --workspace --all-targets   # compile lib + tests + benches + exemples
+cargo build --workspace --all-targets --all-features   # compile tous les membres et toutes les cibles
 ```
 
 ### Auto-audit (`slha-audit`) et modules `audit` / `json`
