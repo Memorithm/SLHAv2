@@ -14,19 +14,19 @@ jobs:
           components: rustfmt, clippy
           targets: aarch64-unknown-linux-gnu
       - name: Format
-        run: cargo fmt --all --check
+        run: cargo --locked fmt --all --check
       - name: Clippy (warnings = errors, all targets)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo --locked clippy --workspace --all-targets --all-features -- -D warnings
       - name: Build all targets (lib + tests + benches + examples)
-        run: cargo build --workspace --all-targets --all-features
+        run: cargo --locked build --workspace --all-targets --all-features
       - name: Tests (unit + integration + property/fuzz + doctests)
-        run: cargo test --workspace --all-features
+        run: cargo --locked test --workspace --all-features
       - name: Docs (warnings = errors)
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo --locked doc --workspace --all-features --no-deps
       - name: Self-audit (slha-audit end-to-end)
-        run: cargo run -p scirust --bin slha-audit -- --json
+        run: cargo --locked run -p scirust --bin slha-audit -- --json
       - name: Offline plumbing (Python dump → Rust harness contract)
         # Guards the `.bin` format contract shared by the Phase-0 writer
         # (scripts/dump_activations.py) and reader (the offline examples): a
@@ -45,7 +45,7 @@ jobs:
         # P1-F keeps `pyo3/extension-module` in Maturin-only wheel builds.
         # Normal Cargo targets link Python normally, so the complete workspace
         # bench graph must compile without excluding `slha-python`.
-        run: cargo bench --workspace --all-features --no-run
+        run: cargo --locked bench --workspace --all-features --no-run
       - name: AArch64 cross-check (NEON path + C-ABI crate)
         # Type-check scirust (NEON kernel path), slha-c (C-ABI, the crate that
         # broke on aarch64 because of `*mut i8` vs `*mut c_char`) and slha-mcp
@@ -56,9 +56,9 @@ jobs:
         # (`slha-c` is a cdylib, `slha-mcp` a bin; both link). The `*mut i8` vs
         # `*mut u8` regression is a type error (E0308), caught at check time.
         # slha-python (PyO3) is excluded: it needs aarch64 Python dev libs.
-        run: cargo check -p scirust -p slha-c -p slha-mcp --target aarch64-unknown-linux-gnu
+        run: cargo --locked check -p scirust -p slha-c -p slha-mcp --target aarch64-unknown-linux-gnu
       - name: Publish dry-run (scirust is crates.io-ready)
-        run: cargo publish -p scirust --dry-run
+        run: cargo --locked publish -p scirust --dry-run
 
   # The `numa` feature is opt-in (pulls `libc`, Linux-only) and kept OUT of the
   # default build so scirust stays zero-dependency. This job exercises the feature
@@ -75,23 +75,23 @@ jobs:
           components: clippy
           targets: aarch64-unknown-linux-gnu
       - name: Format
-        run: cargo fmt --all --check
+        run: cargo --locked fmt --all --check
       - name: Clippy with `numa` (warnings = errors, all targets)
-        run: cargo clippy -p scirust --features numa --all-targets -- -D warnings
+        run: cargo --locked clippy -p scirust --features numa --all-targets -- -D warnings
       - name: Build with `numa`
-        run: cargo build -p scirust --features numa --all-targets
+        run: cargo --locked build -p scirust --features numa --all-targets
       - name: Tests with `numa` (real Linux syscalls on the runner)
-        run: cargo test -p scirust --features numa
+        run: cargo --locked test -p scirust --features numa
       - name: Docs with `numa` (warnings = errors)
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc -p scirust --features numa --no-deps
+        run: cargo --locked doc -p scirust --features numa --no-deps
       - name: AArch64 cross-check with `numa` (NEON + Linux NUMA path)
         # The `numa` impl lives behind `#[cfg(all(feature = "numa", target_os = "linux"))]`,
         # which holds on aarch64-linux → this verifies the libc FFI (sched_setaffinity,
         # mbind, mmap) type-checks against the aarch64 target too. `cargo check` (no
         # link) avoids needing an aarch64 cross-linker.
-        run: cargo check -p scirust --features numa --target aarch64-unknown-linux-gnu
+        run: cargo --locked check -p scirust --features numa --target aarch64-unknown-linux-gnu
 
   msrv:
     name: MSRV (Rust 1.89)
@@ -100,8 +100,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@451ce45ce31d200b52705aadd15ce75018b006de # 1.89.0
       - name: Check workspace on the declared MSRV
-        run: cargo check --workspace --all-targets --all-features
+        run: cargo --locked check --workspace --all-targets --all-features
       - name: Check `numa` feature on the declared MSRV
         # `libc`'s own MSRV is well below 1.89, so the feature path must also
         # compile on the crate's declared MSRV.
-        run: cargo check -p scirust --features numa --all-targets
+        run: cargo --locked check -p scirust --features numa --all-targets
