@@ -24,31 +24,30 @@ Résultat : l'IA tourne sur un PC normal, pas besoin d'une carte graphique à
 - Un ordinateur sous **Linux**, **macOS** ou **Windows** (avec WSL)
 - **Rust** installé (le langage de programmation, pas le jeu vidéo)
 
-Si vous n'avez pas Rust, installez-le en une commande :
+Installez préalablement Git et Rust depuis leurs sources officielles.
+
+### Option A : installation locale contrôlée
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/Memorithm/SLHAv2.git
+cd SLHAv2
+git rev-parse HEAD
+less install.sh
+./install.sh
 ```
 
-### Option A : Installeur automatique (recommandé)
-
-```bash
-curl -sSL https://raw.githubusercontent.com/Memorithm/SLHAv2/master/install.sh | bash
-```
-
-Ce script installe Rust (si besoin), clone le projet, le compile et lance les
-tests. En 2 minutes c'est prêt.
+Le script ne télécharge aucun code et ne supprime aucun répertoire.
 
 ### Option B : Installation manuelle
 
 ```bash
 git clone https://github.com/Memorithm/SLHAv2.git
 cd SLHAv2
-cargo build --release \
+cargo build --locked --release \
     -p scirust \
     -p slha-mcp \
     -p slha-c
-cargo test -p scirust -p slha-mcp -p slha-c
+cargo test --locked -p scirust -p slha-mcp -p slha-c
 ```
 
 ---

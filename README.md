@@ -78,20 +78,19 @@ Le noyau **`scirust`** est à **zéro dépendance externe par défaut** (build o
 ## Installation (30 secondes)
 
 ```bash
-# Option 1 : One-click installer
-curl -sSL https://raw.githubusercontent.com/Memorithm/SLHAv2/master/install.sh | bash
-
-# Option 2 : Manuel
 git clone https://github.com/Memorithm/SLHAv2.git
 cd SLHAv2
-cargo build --release \
-    -p scirust \
-    -p slha-mcp \
-    -p slha-c
-cargo test -p scirust -p slha-mcp -p slha-c
+git rev-parse HEAD
+less install.sh
+./install.sh
+
+# Installation manuelle
+cargo build --locked --release -p scirust -p slha-mcp -p slha-c
+cargo test --locked -p scirust -p slha-mcp -p slha-c
 ```
 
-**Prérequis :** [Rust](https://rustup.rs) (si pas installé, le script le fait pour vous).
+**Prérequis :** Git et Rust doivent être installés au préalable.
+L’installeur local ne télécharge aucun script et ne supprime aucun répertoire.
 
 ---
 
