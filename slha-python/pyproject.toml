@@ -4,6 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "slha_core"
+version = "0.2.0"
+description = "Validated Python bindings for the SLHA v2 KV-cache kernel."
 requires-python = ">=3.8"
 dependencies = []
 license = {text = "PolyForm-Noncommercial-1.0.0"}
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "slha_core"
+features = ["pyo3/extension-module"]

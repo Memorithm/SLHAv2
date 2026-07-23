@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.23" }
 
 [build-dependencies]
 pyo3-build-config = "0.23"
