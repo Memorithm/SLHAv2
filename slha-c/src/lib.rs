@@ -99,6 +99,7 @@ fn ffi_status(f: impl FnOnce() -> Result<(), FfiError>) -> i32 {
     }
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn pointer_is_aligned<T>(pointer: *const T) -> bool {
     (pointer as usize) % align_of::<T>() == 0
 }
