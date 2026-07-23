@@ -73,19 +73,55 @@ fi
 cd "$DIR"
 
 # ── 3. Compiler ─────────────────────────────────────────────────────
-info "Compilation en mode release (2-3 minutes)..."
-cargo build --release
+info "Compilation du noyau, du serveur MCP et de l’ABI C..."
+cargo build --release \
+    -p scirust \
+    -p slha-mcp \
+    -p slha-c
 
 # ── 4. Lancer les tests ─────────────────────────────────────────────
 info "Lancement des tests..."
-cargo test 2>&1 | tail -5
+cargo test \
+    -p scirust \
+    -p slha-mcp \
+    -p slha-c \
+    2>&1 | tail -20
+
+# Le binding Python nécessite une installation Python de développement capable
+# de lier libpython. Il reste optionnel afin que l'installation du noyau,
+# du serveur MCP et de l'ABI C soit portable et ne dépende pas de Python.
+if command -v python3 >/dev/null 2>&1 \
+    && command -v python3-config >/dev/null 2>&1 \
+    && python3-config --embed --ldflags >/dev/null 2>&1
+then
+    info "Environnement Python de développement détecté."
+
+    cargo build --release -p slha-python
+    cargo test -p slha-python
+
+    if command -v maturin >/dev/null 2>&1; then
+        info "Construction de la roue Python avec Maturin..."
+
+        (
+            cd slha-python
+            maturin build --release
+        )
+    else
+        warn "Maturin absent : module Rust validé, roue Python non construite."
+        warn "Commande facultative : cargo install maturin"
+    fi
+else
+    warn "Binding Python ignoré : python3-config/libpython indisponible."
+    warn "Le noyau, le serveur MCP et l'ABI C sont néanmoins validés."
+fi
 
 # ── 5. Premier essai ────────────────────────────────────────────────
 echo ""
 info "SLHA v2 est installé et prêt !"
 echo ""
 echo -e "  ${CYAN}Commandes utiles :${NC}"
-echo "  cargo test                                  # Lancer tous les tests"
+echo "  cargo test -p scirust -p slha-mcp -p slha-c   # Suite portable sans Python"
+echo "  cargo test --workspace --all-features          # Suite complète (Python dev requis)"
 echo "  cargo run --example measure --release       # Benchmark complet"
 echo "  cargo run --example basic_usage             # Exemple simple"
 echo "  cargo bench                                 # Micro-benchmarks"
