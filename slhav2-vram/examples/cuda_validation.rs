@@ -1,10 +1,9 @@
 //! CUDA validation example — run under compute-sanitizer:
 //!   cargo run --features cuda --example cuda_validation
-//!   compute-sanitizer --tool memcheck cargo run --features cuda --example cuda_validation
+//!   compute-sanitizer --tool memcheck target/debug/examples/cuda_validation
 
 use slhav2_vram::codec;
 use slhav2_vram::mem::tile::SerializedTile;
-use slhav2_vram::traits::{DeviceAllocation, DeviceEngine};
 
 fn make_test_tile(scale: f32, warm: bool) -> SerializedTile {
     let mut tile = SerializedTile::zeroed();
@@ -16,8 +15,7 @@ fn make_test_tile(scale: f32, warm: bool) -> SerializedTile {
     } else {
         tile.set_flags(0);
     }
-
-    for d in 0..codec::LATENT_KV_WORDS {
+    for d in 0..codec::LATENT_BYTES {
         let lo = (d as u8) & 0x0F;
         let hi = ((d as u8) >> 4) & 0x0F;
         tile.as_bytes_mut()[d] = (hi << 4) | lo;
@@ -25,11 +23,20 @@ fn make_test_tile(scale: f32, warm: bool) -> SerializedTile {
     tile
 }
 
+#[cfg(not(feature = "cuda"))]
+fn main() {
+    eprintln!("This example requires the 'cuda' feature.");
+    eprintln!("  cargo run --features cuda --example cuda_validation");
+    std::process::exit(0);
+}
+
 #[cfg(feature = "cuda")]
-fn run_cuda_validation() -> Result<(), Box<dyn std::error::Error>> {
+fn run_validation() -> Result<(), Box<dyn std::error::Error>> {
+    use slhav2_vram::backends::cuda::{CudaEngine, CudaModule};
+    use slhav2_vram::traits::DeviceEngine;
+
     eprintln!("Initializing CUDA driver API...");
-    let engine = slhav2_vram::backends::cuda::CudaEngine::new()?;
-    eprintln!("  CUDA context created on device {}", engine.ctx.device);
+    let engine = CudaEngine::new()?;
 
     let tiles: Vec<SerializedTile> = (0..32)
         .map(|i| make_test_tile(0.5 + i as f32 * 0.1, i % 4 == 0))
@@ -38,9 +45,17 @@ fn run_cuda_validation() -> Result<(), Box<dyn std::error::Error>> {
     let q_coarse: Vec<f32> = (0..codec::D_C).map(|i| (i as f32).sin() * 0.5).collect();
     let q_sign: Vec<u64> = vec![0xDEAD_BEEF_CAFE_FACEu64; codec::RESIDUAL_WORDS];
 
+    // Reference scores
     let ref_scores: Vec<f32> = tiles.iter().map(|t| t.score(&q_coarse, &q_sign)).collect();
-    eprintln!("  Reference scores (first 4): {:?}", &ref_scores[..4]);
+    eprintln!("  Reference (CPU) scores (first 4): {:?}", &ref_scores[..4]);
 
+    // Load PTX
+    let ptx = include_bytes!(concat!(env!("OUT_DIR"), "/slha_score.ptx"));
+    eprintln!("  Loading kernel from PTX ({} bytes)", ptx.len());
+    let module = CudaModule::load_ptx(&engine, ptx)?;
+    let kernel = module.get_function("slha_score_kernel")?;
+
+    // Allocate GPU memory
     let total_tile_bytes = tiles.len() * codec::TILE_BYTES;
     let mut q_coarse_dev = engine.allocate(codec::D_C * 4)?;
     let mut q_sign_dev = engine.allocate(codec::RESIDUAL_WORDS * 8)?;
@@ -49,16 +64,13 @@ fn run_cuda_validation() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("  Allocated GPU memory ({} B tiles)", total_tile_bytes);
 
+    // Copy data to GPU
     engine.copy_to_device(
-        &bytemuck::cast_slice(&q_coarse),
+        &codec::f32_slice_to_le_bytes(&q_coarse),
         &mut q_coarse_dev,
         0,
     )?;
-    engine.copy_to_device(
-        &bytemuck::cast_slice(&q_sign),
-        &mut q_sign_dev,
-        0,
-    )?;
+    engine.copy_to_device(&codec::u64_slice_to_le_bytes(&q_sign), &mut q_sign_dev, 0)?;
 
     let mut tiles_buf = vec![0u8; total_tile_bytes];
     for (i, tile) in tiles.iter().enumerate() {
@@ -68,70 +80,62 @@ fn run_cuda_validation() -> Result<(), Box<dyn std::error::Error>> {
     engine.copy_to_device(&tiles_buf, &mut tiles_dev, 0)?;
     eprintln!("  Copied data to GPU");
 
-    let ptx_path = std::path::Path::new(&std::env::var("OUT_DIR").unwrap_or_default()).join("slha_score.ptx");
-    let ptx_bytes = std::fs::read(&ptx_path).unwrap_or_else(|_| {
-        let fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("kernels")
-            .join("slha_score.ptx");
-        std::fs::read(&fallback).expect("PTX not found — compile with nvcc on PATH")
-    });
-    eprintln!("  Loading kernel from PTX ({} bytes)", ptx_bytes.len());
-    let kernel_fn = engine.load_ptx(&ptx_bytes)?;
-
+    // Launch kernel
     engine.score_tiles(
         &q_coarse_dev,
         &q_sign_dev,
         &tiles_dev,
         &scores_dev,
         tiles.len() as i32,
-        &kernel_fn,
+        &kernel,
     )?;
     engine.synchronize()?;
     eprintln!("  Kernel launched and synchronized");
 
+    // Read back scores
     let mut scores_buf = vec![0u8; tiles.len() * 4];
     engine.copy_to_host(&scores_dev, 0, &mut scores_buf)?;
-    let gpu_scores: Vec<f32> = scores_buf
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
+    let gpu_scores =
+        codec::le_bytes_to_f32_vec(&scores_buf).map_err(|e| format!("score conversion: {e}"))?;
 
     eprintln!("  GPU scores (first 4): {:?}", &gpu_scores[..4]);
 
-    let mut max_diff = 0.0f32;
+    // Compare
+    let mut max_abs = 0.0f32;
     let mut mismatches = 0;
     for (i, (&gpu, &ref_s)) in gpu_scores.iter().zip(ref_scores.iter()).enumerate() {
         let diff = (gpu - ref_s).abs();
+        max_abs = max_abs.max(diff);
         if diff > 1e-3 {
-            mismatches += 1;
-            max_diff = max_diff.max(diff);
-            if mismatches <= 5 {
-                eprintln!("  MISMATCH tile {i}: gpu={gpu} ref={ref_s} diff={diff}");
+            if mismatches < 5 {
+                eprintln!("  MISMATCH tile {i}: gpu={gpu}  ref={ref_s}  diff={diff:.6e}");
             }
+            mismatches += 1;
         }
     }
 
-    if mismatches == 0 {
-        eprintln!("  All {} scores match reference", tiles.len());
-    } else {
-        eprintln!("  {mismatches} mismatches, max diff = {max_diff}");
+    if mismatches > 0 {
+        eprintln!("FAIL: {mismatches}/{mismatches} mismatches, max_abs={max_abs:.6e}");
+        return Err(format!("{mismatches} mismatches, max_abs={max_abs:.6e}").into());
     }
 
-    eprintln!("Validation complete.");
+    eprintln!(
+        "PASS: all {} scores match, max_abs={max_abs:.6e}",
+        tiles.len()
+    );
     Ok(())
 }
 
-#[cfg(not(feature = "cuda"))]
-fn run_cuda_validation() -> Result<(), Box<dyn std::error::Error>> {
-    Err("CUDA feature not enabled (build with --features cuda)".into())
-}
-
+#[cfg(feature = "cuda")]
 fn main() {
-    match run_cuda_validation() {
-        Ok(()) => eprintln!("PASS"),
+    match run_validation() {
+        Ok(()) => {
+            eprintln!("PASS");
+            std::process::exit(0);
+        }
         Err(e) => {
-            eprintln!("SKIP: {e}");
-            // Exit 0 so the example works in CI without CUDA
+            eprintln!("FAIL: {e}");
+            std::process::exit(1);
         }
     }
 }

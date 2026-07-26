@@ -14,7 +14,7 @@ fn build_tiles(n: usize) -> Vec<SerializedTile> {
         t.set_dynamic_lambda(0.05);
         t.set_group_scales(&[128u8; 8]);
         t.set_flags(0);
-        for d in 0..codec::LATENT_KV_WORDS {
+        for d in 0..codec::LATENT_BYTES {
             let lo = ((i + d) as u8) & 0x0F;
             let hi = (((i + d) >> 4) as u8) & 0x0F;
             t.as_bytes_mut()[d] = (hi << 4) | lo;

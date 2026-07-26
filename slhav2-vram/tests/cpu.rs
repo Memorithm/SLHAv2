@@ -1,172 +1,346 @@
+use scirust::SciRustSlhaTile;
+
 use slhav2_vram::backends::cpu::CpuEngine;
+use slhav2_vram::codec;
 use slhav2_vram::mem::tile::SerializedTile;
 use slhav2_vram::pipeline::{score_tiles_cpu, ScoringInput};
 use slhav2_vram::traits::{DeviceAllocation, DeviceEngine};
-use slhav2_vram::codec;
 
-fn make_test_tile_int4(warm: bool) -> SerializedTile {
-    let mut tile = SerializedTile::zeroed();
-    // Fill latent with alternating INT4 values
-    for d in 0..64 {
-        // byte = (nib_hi << 4) | nib_lo
-        let lo = ((d as u8) & 0x0F).min(0x0F);
-        let hi = ((d as u8) >> 4).min(0x0F);
-        tile.as_bytes_mut()[d] = (hi << 4) | lo;
-    }
-    tile.set_scale(1.0);
-    tile.set_dynamic_lambda(0.05);
-    tile.set_group_scales(&[128u8; 8]);
-    if warm {
-        tile.set_flags(codec::FLAG_WARM);
-    }
-    tile
-}
-
-fn make_test_query() -> (Vec<f32>, Vec<u64>) {
-    let q_coarse: Vec<f32> = (0..codec::D_C).map(|i| (i as f32) * 0.01).collect();
-    let q_sign = vec![0xABCDEF0123456789u64; codec::RESIDUAL_WORDS];
-    (q_coarse, q_sign)
-}
-
-fn reference_score_int4_host(
-    q_coarse: &[f32],
-    latent_kv: &[u8],
+fn ref_tile(
+    latent: [u8; codec::LATENT_BYTES],
     scale: f32,
-    group_scales: &[u8],
-) -> f32 {
-    let mut sum = 0.0;
-    for d in 0..codec::D_C {
-        let byte = latent_kv[d >> 1];
-        let nib = if (d & 1) != 0 { byte >> 4 } else { byte & 0x0F };
-        let level = (nib as i32 - 8) as f32;
-        let gs = scale * (group_scales[d / 16] as f32) * (1.0 / 255.0);
-        sum += q_coarse[d] * level * gs;
+    lambda: f32,
+    residual: [u64; codec::RESIDUAL_WORDS],
+    flags: u16,
+    group_scales: [u8; codec::N_GROUP_SCALES],
+) -> SciRustSlhaTile {
+    SciRustSlhaTile {
+        latent_kv: latent,
+        residual_bitmap: residual,
+        scale,
+        dynamic_lambda: lambda,
+        residual_sigma: 0.0,
+        token_id: 0,
+        position: 0,
+        head_id: 0,
+        flags,
+        group_scales,
     }
-    sum
+}
+
+fn q_coarse_all(val: f32) -> [f32; codec::D_C] {
+    [val; codec::D_C]
+}
+
+fn q_sign_all(val: u64) -> [u64; codec::RESIDUAL_WORDS] {
+    [val; codec::RESIDUAL_WORDS]
+}
+
+fn fill_latent(val: u8) -> [u8; codec::LATENT_BYTES] {
+    [val; codec::LATENT_BYTES]
+}
+
+fn fill_latent_seq() -> [u8; codec::LATENT_BYTES] {
+    let mut l = [0u8; codec::LATENT_BYTES];
+    for i in 0..codec::LATENT_BYTES {
+        l[i] = i as u8;
+    }
+    l
 }
 
 #[test]
-fn test_cpu_engine_allocate() {
+fn test_int4_zero_point_0x88() {
+    // 0x88 → both nibbles = 8 → level = 0 → score should be 0
+    let latent = fill_latent(0x88);
+    let gs = [255u8; 8];
+    let q = q_coarse_all(1.0);
+    let qs = q_sign_all(0);
+
+    let st = ref_tile(latent, 1.0, 0.0, [0; 4], codec::FLAG_HOT, gs);
+    let expected = st.compute_score_scalar(&q, &qs);
+
+    assert!(expected.abs() < 1e-6, "scirust: 0x88 → 0, got {expected}");
+
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&fill_latent(0x88));
+    stile.set_scale(1.0);
+    stile.set_group_scales(&[255u8; 8]);
+    let got = stile.score(&q, &qs);
+    assert!((got - 0.0).abs() < 1e-4, "slhav2-vram: 0x88 → 0, got {got}");
+    assert!((got - expected).abs() < 1e-4, "parity: {got} vs {expected}");
+}
+
+#[test]
+fn test_int4_zero_point_0x00() {
+    // 0x00 → both nibbles = 0 → level = -8 each
+    let latent = fill_latent(0x00);
+    let gs = [255u8; 8];
+    let q = q_coarse_all(1.0);
+    let qs = q_sign_all(0);
+
+    let st = ref_tile(latent, 1.0, 0.0, [0; 4], codec::FLAG_HOT, gs);
+    let expected = st.compute_score_scalar(&q, &qs);
+    let expected_numerical: f32 = codec::D_C as f32 * (-8.0);
+    assert!((expected - expected_numerical).abs() < 1e-4);
+
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&fill_latent(0x00));
+    stile.set_scale(1.0);
+    stile.set_group_scales(&[255u8; 8]);
+    let got = stile.score(&q, &qs);
+    assert!((got - expected).abs() < 1e-4, "parity: {got} vs {expected}");
+}
+
+#[test]
+fn test_int4_zero_point_0xff() {
+    // 0xFF → both nibbles = 0xF → level = 7 each
+    let latent = fill_latent(0xFF);
+    let gs = [255u8; 8];
+    let q = q_coarse_all(1.0);
+    let qs = q_sign_all(0);
+
+    let st = ref_tile(latent, 1.0, 0.0, [0; 4], codec::FLAG_HOT, gs);
+    let expected = st.compute_score_scalar(&q, &qs);
+    let expected_numerical: f32 = codec::D_C as f32 * 7.0;
+    assert!((expected - expected_numerical).abs() < 1e-4);
+
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&fill_latent(0xFF));
+    stile.set_scale(1.0);
+    stile.set_group_scales(&[255u8; 8]);
+    let got = stile.score(&q, &qs);
+    assert!((got - expected).abs() < 1e-4, "parity: {got} vs {expected}");
+}
+
+#[test]
+fn test_int4_hot_parity() {
+    let latent = fill_latent_seq();
+    let residual = q_sign_all(0xDEAD_BEEF_CAFE_FACE);
+    let gs = [128, 150, 100, 200, 180, 90, 210, 140];
+
+    let st = ref_tile(latent, 0.75, 0.05, residual, codec::FLAG_HOT, gs);
+    let q = q_coarse_all(0.01);
+    let qs = q_sign_all(0xDEAD_BEEF_CAFE_FACE); // match residual → zero hamming
+    let expected = st.compute_score_scalar(&q, &qs);
+
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&latent);
+    stile.set_residual(&residual);
+    stile.set_scale(0.75);
+    stile.set_dynamic_lambda(0.05);
+    stile.set_group_scales(&gs);
+    let got = stile.score(&q, &qs);
+
+    let diff = (got - expected).abs();
+    assert!(
+        diff < 1e-4,
+        "INT4 HOT parity: {got} vs {expected}, diff {diff}"
+    );
+}
+
+#[test]
+fn test_int4_warm_parity() {
+    let latent = fill_latent_seq();
+    let gs = [128, 150, 100, 200, 180, 90, 210, 140];
+    let residual = [0u64; 4];
+
+    let st = ref_tile(latent, 0.75, 0.0, residual, codec::FLAG_WARM, gs);
+    let q = q_coarse_all(0.01);
+    let qs = q_sign_all(0);
+    let expected = st.compute_score_scalar(&q, &qs);
+
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&latent);
+    stile.set_scale(0.75);
+    stile.set_dynamic_lambda(0.05); // should be ignored in WARM mode
+    stile.set_group_scales(&gs);
+    stile.set_flags(codec::FLAG_WARM);
+    let got = stile.score(&q, &qs);
+
+    let diff = (got - expected).abs();
+    assert!(
+        diff < 1e-4,
+        "INT4 WARM parity: {got} vs {expected}, diff {diff}"
+    );
+}
+
+#[test]
+fn test_nf4_hot_parity() {
+    let mut latent = [0u8; codec::LATENT_BYTES];
+    // Fill with NF4 codeword indices 0..15 repeating
+    for i in 0..codec::LATENT_BYTES {
+        let lo = ((i * 2) % 16) as u8;
+        let hi = ((i * 2 + 1) % 16) as u8;
+        latent[i] = (hi << 4) | lo;
+    }
+    let residual = q_sign_all(0x1234_5678_9ABC_DEF0);
+    let gs = [200u8; 8];
+
+    let mut st = ref_tile(latent, 1.0, 0.1, residual, codec::FLAG_NF4, gs);
+    st.flags |= codec::FLAG_NF4;
+    let q = q_coarse_all(0.5);
+    let qs = q_sign_all(0x1234_5678_9ABC_DEF0);
+    let expected = st.compute_score_scalar(&q, &qs);
+
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&latent);
+    stile.set_residual(&residual);
+    stile.set_scale(1.0);
+    stile.set_dynamic_lambda(0.1);
+    stile.set_group_scales(&gs);
+    stile.set_flags(codec::FLAG_NF4);
+    let got = stile.score(&q, &qs);
+
+    let diff = (got - expected).abs();
+    assert!(
+        diff < 1e-4,
+        "NF4 HOT parity: {got} vs {expected}, diff {diff}"
+    );
+}
+
+#[test]
+fn test_nf4_warm_parity() {
+    let mut latent = [0u8; codec::LATENT_BYTES];
+    for i in 0..codec::LATENT_BYTES {
+        let lo = ((i * 2 + 3) % 16) as u8;
+        let hi = ((i * 2 + 5) % 16) as u8;
+        latent[i] = (hi << 4) | lo;
+    }
+    let gs = [200u8; 8];
+
+    let mut st = ref_tile(
+        latent,
+        1.0,
+        0.0,
+        [0; 4],
+        codec::FLAG_WARM | codec::FLAG_NF4,
+        gs,
+    );
+    st.flags |= codec::FLAG_NF4;
+    let q = q_coarse_all(0.3);
+    let qs = q_sign_all(0);
+    let expected = st.compute_score_scalar(&q, &qs);
+
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&latent);
+    stile.set_scale(1.0);
+    stile.set_group_scales(&gs);
+    stile.set_flags(codec::FLAG_WARM | codec::FLAG_NF4);
+    let got = stile.score(&q, &qs);
+
+    let diff = (got - expected).abs();
+    assert!(
+        diff < 1e-4,
+        "NF4 WARM parity: {got} vs {expected}, diff {diff}"
+    );
+}
+
+#[test]
+fn test_flag_precedence_nf4_takes_priority() {
+    // When both INT4 (no flags) and NF4 are set, NF4 should be used.
+    // The scirust dequant_at checks is_nf4() first.
+    let latent = fill_latent(0x88); // 0x88 → INT4 level 0, NF4 codebook index 8
+    let gs = [255u8; 8];
+    let q = q_coarse_all(1.0);
+    let qs = q_sign_all(0);
+
+    let mut st = ref_tile(latent, 1.0, 0.0, [0; 4], codec::FLAG_NF4, gs);
+    st.flags = codec::FLAG_NF4;
+    let expected = st.compute_score_scalar(&q, &qs);
+
+    // NF4: nibble 0x8 → codebook index 8 → value 0.0421
+    let expected_nf4: f32 = codec::D_C as f32 * 0.0421;
+    assert!((expected - expected_nf4).abs() < 1e-4);
+
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&fill_latent(0x88));
+    stile.set_scale(1.0);
+    stile.set_group_scales(&[255u8; 8]);
+    stile.set_flags(codec::FLAG_NF4);
+    let got = stile.score(&q, &qs);
+    assert!((got - expected).abs() < 1e-4, "parity: {got} vs {expected}");
+}
+
+#[test]
+fn test_cpu_backend_basics() {
     let engine = CpuEngine::new();
     let alloc = engine.allocate(1024).unwrap();
     assert_eq!(alloc.size(), 1024);
-}
 
-#[test]
-fn test_cpu_engine_copy_roundtrip() {
-    let engine = CpuEngine::new();
-    let mut alloc = engine.allocate(16).unwrap();
+    let mut dst = engine.allocate(16).unwrap();
     let src = b"hello cpu world!";
-    engine.copy_to_device(src, &mut alloc, 0).unwrap();
+    engine.copy_to_device(src, &mut dst, 0).unwrap();
 
-    let mut dst = vec![0u8; src.len()];
-    engine.copy_to_host(&alloc, 0, &mut dst).unwrap();
-    assert_eq!(&dst, src);
+    let mut buf = vec![0u8; src.len()];
+    engine.copy_to_host(&dst, 0, &mut buf).unwrap();
+    assert_eq!(&buf, src);
 }
 
 #[test]
-fn test_cpu_score_int4_warm() {
-    let tile = make_test_tile_int4(true);
-    let (q_coarse, q_sign) = make_test_query();
-    let score = tile.score(&q_coarse, &q_sign);
-    let ref_score = reference_score_int4_host(
-        &q_coarse,
-        &tile.as_bytes()[..codec::LATENT_KV_WORDS],
-        tile.scale(),
-        tile.group_scales(),
-    );
-    assert!((score - ref_score).abs() < 1e-4);
-}
-
-#[test]
-fn test_cpu_score_int4_hot() {
-    let tile = make_test_tile_int4(false);
-    let (q_coarse, q_sign) = make_test_query();
-    let score = tile.score(&q_coarse, &q_sign);
-
-    let ref_coarse = reference_score_int4_host(
-        &q_coarse,
-        &tile.as_bytes()[..codec::LATENT_KV_WORDS],
-        tile.scale(),
-        tile.group_scales(),
-    );
-    // With q_sign matching residual (all zeros -> diff), ham = popcount(q_sign ^ 0) = lots
-    // Since residual is all zeros in our test tile, ham = popcount of each q_sign word
-    let ham_ref: u32 = q_sign.iter().map(|x| x.count_ones()).sum();
-    let expected = ref_coarse + tile.dynamic_lambda() * (256.0 - 2.0 * ham_ref as f32);
-    assert!((score - expected).abs() < 1e-4);
-}
-
-#[test]
-fn test_cpu_pipeline_batch() {
+fn test_pipeline_batch_parity() {
     let engine = CpuEngine::new();
-    let tiles: Vec<SerializedTile> = (0..4).map(|i| {
-        let mut t = make_test_tile_int4(i % 2 == 0);
-        t.set_scale(1.0 + i as f32 * 0.1);
-        t
-    }).collect();
-    let (q_coarse, q_sign) = make_test_query();
+
+    let tiles: Vec<SerializedTile> = (0..8)
+        .map(|i| {
+            let mut t = SerializedTile::zeroed();
+            let val = if i % 2 == 0 { 0x88 } else { 0x12 };
+            t.latent_mut().copy_from_slice(&fill_latent(val));
+            t.set_scale(1.0 + i as f32 * 0.1);
+            t.set_group_scales(&[128u8; 8]);
+            if i % 3 == 0 {
+                t.set_flags(codec::FLAG_WARM);
+            }
+            t
+        })
+        .collect();
+
+    let q = q_coarse_all(0.01);
+    let qs = q_sign_all(0xABCDEF0123456789);
     let mut scores = vec![0.0f32; tiles.len()];
 
     score_tiles_cpu(ScoringInput {
         engine: &engine,
         tiles: &tiles,
-        q_coarse: &q_coarse,
-        q_sign: &q_sign,
+        q_coarse: &q,
+        q_sign: &qs,
         scores: &mut scores,
     });
 
     for (i, t) in tiles.iter().enumerate() {
-        let expected = t.score(&q_coarse, &q_sign);
-        assert!((scores[i] - expected).abs() < 1e-4);
+        let expected = t.score(&q, &qs);
+        assert!(
+            (scores[i] - expected).abs() < 1e-4,
+            "tile {i}: pipeline {} vs direct {expected}",
+            scores[i]
+        );
     }
 }
 
 #[test]
-fn test_tile_nf4_flag() {
-    let mut tile = SerializedTile::zeroed();
-    tile.set_scale(1.0);
-    tile.set_group_scales(&[200u8; 8]);
-    tile.set_flags(codec::FLAG_NF4);
+fn test_slha_tile_to_serialized_parity() {
+    // Build a SciRustSlhaTile, compute score, then copy bytes into
+    // SerializedTile and verify the score matches.
+    let residual = [0xDEAD_BEEF_CAFE_FACEu64, 0, 0, 0];
+    let gs = [128, 150, 100, 200, 180, 90, 210, 140];
+    let latent = fill_latent_seq();
 
-    // Fill latent with NF4 indices
-    for nib_idx in 0..64 {
-        tile.as_bytes_mut()[nib_idx] = 0x77; // 0x7 in both nibbles
-    }
+    let st = ref_tile(latent, 0.75, 0.05, residual, codec::FLAG_NF4, gs);
+    let q = q_coarse_all(0.01);
+    let qs = q_sign_all(0xDEAD_BEEF_CAFE_FACE);
+    let expected = st.compute_score_scalar(&q, &qs);
 
-    let (q_coarse, q_sign) = make_test_query();
-    let score = tile.score(&q_coarse, &q_sign);
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&st.latent_kv);
+    stile.set_residual(&st.residual_bitmap);
+    stile.set_scale(st.scale);
+    stile.set_dynamic_lambda(st.dynamic_lambda);
+    stile.set_group_scales(&st.group_scales);
+    stile.set_flags(st.flags);
+    let got = stile.score(&q, &qs);
 
-    // NF4 value for 0x7 = 0.0 (index 7 in codebook)
-    let expected: f32 = 0.0;
-    assert!((score - expected).abs() < 1e-4);
-}
-
-#[test]
-fn test_int4_zero_point_not_twos_complement() {
-    // Verify: nibble 0x8 -> 0, not -8 (two's complement would be -8)
-    let mut tile = SerializedTile::zeroed();
-    tile.set_scale(1.0);
-    tile.set_group_scales(&[255u8; 8]);
-
-    // Set all nibbles to 0x8
-    for byte in tile.as_bytes_mut()[..codec::LATENT_KV_WORDS].iter_mut() {
-        *byte = 0x88;
-    }
-
-    let q_coarse: Vec<f32> = vec![1.0; codec::D_C];
-    let q_sign = vec![0u64; codec::RESIDUAL_WORDS];
-    let score = tile.score(&q_coarse, &q_sign);
-    // 0x8 -> level = 0, so score should be 0
-    assert!((score - 0.0).abs() < 1e-4,
-        "nibble 0x8 should decode to 0 (zero-point), got {score}");
-
-    // Set all nibbles to 0x0 -> level = -8
-    for byte in tile.as_bytes_mut()[..codec::LATENT_KV_WORDS].iter_mut() {
-        *byte = 0x00;
-    }
-    let score2 = tile.score(&q_coarse, &q_sign);
-    let expected2: f32 = q_coarse.iter().sum::<f32>() * (-8.0) * (255.0 / 255.0);
-    assert!((score2 - expected2).abs() < 1e-2,
-        "nibble 0x0 should decode to -8, got {score2} vs {expected2}");
+    let diff = (got - expected).abs();
+    assert!(
+        diff < 1e-4,
+        "SciRustSlhaTile→SerializedTile parity: {got} vs {expected}, diff {diff}"
+    );
 }
