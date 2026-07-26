@@ -30,7 +30,6 @@ struct FreeBlock {
 struct AllocBlock {
     offset: u64,
     size: u64,
-    cookie: u64,
 }
 
 impl<A> DeviceArena<A> {
@@ -94,7 +93,6 @@ impl<A> DeviceArena<A> {
             AllocBlock {
                 offset: block.offset,
                 size: aligned,
-                cookie,
             },
         );
 
