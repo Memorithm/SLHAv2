@@ -52,6 +52,25 @@ fmt: ## Formate le code
 doc: ## Génère la documentation
 	cargo doc --no-deps --workspace --all-features --open
 
+vram-all: ## Compile slhav2-vram (default features)
+	cargo build -p slhav2-vram
+
+vram-build-cuda: ## Compile slhav2-vram avec backend CUDA
+	cargo build -p slhav2-vram --features cuda
+
+vram-test: ## Tests slhav2-vram (CPU)
+	cargo test -p slhav2-vram -- --nocapture
+
+vram-test-cuda: ## Tests slhav2-vram avec CUDA
+	cargo test -p slhav2-vram --features cuda -- --nocapture
+
+vram-bench: ## Benchmarks RTX 4060
+	cargo test -p slhav2-vram --features cuda --test bench_rtx4060 -- --nocapture
+
+vram-ptx: ## Compile le kernel CUDA en PTX
+	cd slhav2-vram && nvcc -ptx -arch=sm_89 -O3 --use_fast_math \
+		kernels/lowrank_turboquant.cu -o kernels/lowrank_turboquant.ptx
+
 clean: ## Nettoie les artefacts de compilation
 	cargo clean
 

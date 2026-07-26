@@ -6,7 +6,7 @@
 #  workspace removes the duplication and keeps a single source of truth.)
 [workspace]
 resolver = "2"
-members = ["scirust", "slha-mcp"]
+members = ["scirust", "slha-mcp", "slhav2-vram"]
 # So root-level `cargo build / test / bench / run --example` target the scirust
 # crate without `-p` (the installer, Makefile and demo.sh rely on this).
 default-members = ["scirust"]
