@@ -19,3 +19,6 @@ Thumbs.db
 # Benchmark reports
 *.svg
 *.html
+
+# Generated CUDA PTX artifacts
+/slhav2-vram/kernels/*.ptx
