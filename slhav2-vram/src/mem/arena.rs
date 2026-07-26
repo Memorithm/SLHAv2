@@ -96,7 +96,7 @@ impl<A> DeviceArena<A> {
             },
         );
 
-        let remainder = block.size.checked_sub(aligned).unwrap_or(0);
+        let remainder = block.size.saturating_sub(aligned);
         if remainder > 0 {
             self.free_list.push(FreeBlock {
                 offset: block.offset + aligned,

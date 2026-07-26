@@ -1,4 +1,9 @@
 #![cfg(feature = "cuda")]
+#![allow(
+    clippy::needless_range_loop,
+    dead_code,
+    clippy::cloned_ref_to_slice_refs
+)]
 
 //! CUDA hardware integration tests.
 //! Requires: `SLHAV2_REQUIRE_CUDA=1 cargo test --features cuda -- --ignored --nocapture --test-threads=1`
@@ -75,7 +80,7 @@ fn score_tiles_gpu(
     let mut q_coarse_dev = engine.allocate(q_coarse.len() * 4).unwrap();
     let mut q_sign_dev = engine.allocate(q_sign.len() * 8).unwrap();
     let mut tiles_dev = engine.allocate(total_tile_bytes).unwrap();
-    let mut scores_dev = engine.allocate(num_tiles * 4).unwrap();
+    let scores_dev = engine.allocate(num_tiles * 4).unwrap();
 
     engine
         .copy_to_device(
@@ -184,10 +189,10 @@ fn test_cuda_int4_zero_point_parity() {
     let module = CudaModule::load_ptx(&engine, ptx_bytes()).expect("PTX load");
 
     // Test all three zero-point cases
-    for &(byte_val, expected_level) in &[(0x88u8, 0.0f32), (0x00, -8.0), (0xFF, 7.0)] {
+    for &(byte_val, _expected_level) in &[(0x88u8, 0.0f32), (0x00, -8.0), (0xFF, 7.0)] {
         let q = make_q_coarse(1.0);
         let qs = make_q_sign(0);
-        let mut tile = make_int4_tile(byte_val, 1.0, 0.0, &[0; 4], codec::FLAG_HOT);
+        let tile = make_int4_tile(byte_val, 1.0, 0.0, &[0; 4], codec::FLAG_HOT);
         let cpu_score = tile.score(&q, &qs);
 
         let gpu_scores = score_tiles_gpu(&engine, &module, &[tile], &q, &qs);
@@ -287,8 +292,8 @@ fn test_cuda_nf4_score_parity() {
     for i in 0..32 {
         let mut latent = [0u8; codec::LATENT_BYTES];
         for j in 0..codec::LATENT_BYTES {
-            let lo = ((i + j) * 2) % 16;
-            let hi = ((i + j) * 2 + 1) % 16;
+            let lo = (((i + j) * 2) % 16) as u8;
+            let hi = (((i + j) * 2 + 1) % 16) as u8;
             latent[j] = (hi << 4) | lo;
         }
         let mut t = SerializedTile::zeroed();
@@ -384,12 +389,11 @@ fn test_cuda_one_thousand_launches() {
     let qs = make_q_sign(0xCAFE_FACE_DEAD_BEEF);
     let tile = make_int4_tile(0x88, 1.0, 0.0, &[0; 4], codec::FLAG_HOT);
 
-    for _ in 0..1000 {
+    for i in 0..1000 {
         let scores = score_tiles_gpu(&engine, &module, &[tile.clone()], &q, &qs);
         assert!(
             scores[0].abs() < 1e-4,
-            "launch {}: expected 0, got {}",
-            _,
+            "launch {i}: expected 0, got {}",
             scores[0]
         );
     }
@@ -411,7 +415,7 @@ fn test_cuda_backend_lifecycle() {
 fn test_cuda_alloc_reuse_after_drop() {
     check_required();
     let engine = CudaEngine::new().expect("CudaEngine::new");
-    let module = CudaModule::load_ptx(&engine, ptx_bytes()).expect("PTX load");
+    let _module = CudaModule::load_ptx(&engine, ptx_bytes()).expect("PTX load");
 
     // Allocate, write, free, then allocate again and verify the new
     // allocation is writable.

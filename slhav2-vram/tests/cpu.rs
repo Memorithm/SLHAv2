@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use scirust::SciRustSlhaTile;
 
 use slhav2_vram::backends::cpu::CpuEngine;

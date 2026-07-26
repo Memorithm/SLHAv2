@@ -1,3 +1,6 @@
+// These are numerical kernels: range loops and fused signatures are clearer.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 pub use scirust::attention::slha_v2::{
     FLAG_HOT, FLAG_NF4, FLAG_WARM, GROUP_DIM, NF4_CODEBOOK, N_GROUPS,
 };
@@ -223,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_f32_slice_to_le_bytes_roundtrip() {
-        let input = vec![1.0f32, -2.5, 3.14159];
+        let input = vec![1.0f32, -2.5, std::f32::consts::PI];
         let bytes = f32_slice_to_le_bytes(&input);
         let output = le_bytes_to_f32_vec(&bytes).unwrap();
         assert_eq!(input.len(), output.len());
@@ -252,10 +255,11 @@ mod tests {
 
     #[test]
     fn test_read_f32_le() {
-        let bytes = 3.14f32.to_le_bytes();
+        let orig = std::f32::consts::PI;
+        let bytes = orig.to_le_bytes();
         let buf = [bytes[0], bytes[1], bytes[2], bytes[3]];
         let val = read_f32_le(&buf, 0).unwrap();
-        assert!((val - 3.14).abs() < 1e-6);
+        assert!((val - orig).abs() < 1e-6);
     }
 
     #[test]
@@ -289,6 +293,6 @@ mod tests {
         assert_eq!(DYNAMIC_LAMBDA_OFFSET, 100);
         assert_eq!(FLAGS_OFFSET, 118);
         assert_eq!(GROUP_SCALES_OFFSET, 120);
-        assert!(GROUP_SCALES_OFFSET + 8 <= TILE_BYTES);
+        const _: () = assert!(GROUP_SCALES_OFFSET + 8 <= TILE_BYTES);
     }
 }

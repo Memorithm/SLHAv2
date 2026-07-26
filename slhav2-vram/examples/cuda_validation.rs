@@ -2,9 +2,12 @@
 //!   cargo run --features cuda --example cuda_validation
 //!   compute-sanitizer --tool memcheck target/debug/examples/cuda_validation
 
+#[cfg(feature = "cuda")]
 use slhav2_vram::codec;
+#[cfg(feature = "cuda")]
 use slhav2_vram::mem::tile::SerializedTile;
 
+#[cfg(feature = "cuda")]
 fn make_test_tile(scale: f32, warm: bool) -> SerializedTile {
     let mut tile = SerializedTile::zeroed();
     tile.set_scale(scale);
@@ -60,7 +63,7 @@ fn run_validation() -> Result<(), Box<dyn std::error::Error>> {
     let mut q_coarse_dev = engine.allocate(codec::D_C * 4)?;
     let mut q_sign_dev = engine.allocate(codec::RESIDUAL_WORDS * 8)?;
     let mut tiles_dev = engine.allocate(total_tile_bytes)?;
-    let mut scores_dev = engine.allocate(tiles.len() * 4)?;
+    let scores_dev = engine.allocate(tiles.len() * 4)?;
 
     eprintln!("  Allocated GPU memory ({} B tiles)", total_tile_bytes);
 

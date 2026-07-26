@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::error::Error;
 use std::ffi::CString;
 use std::fmt;
@@ -252,7 +251,7 @@ impl CudaEngine {
             return Ok(());
         }
 
-        let grid_dim = ((num_tiles as usize + 255) / 256) as u32;
+        let grid_dim = (num_tiles as usize).div_ceil(256) as u32;
         let block_dim = 256u32;
 
         let args: [*mut libc::c_void; 5] = [
@@ -323,7 +322,7 @@ impl DeviceEngine for CudaEngine {
     ) -> Result<(), CudaError> {
         if dst_offset
             .checked_add(src.len())
-            .map_or(true, |end| end > dst.len)
+            .is_none_or(|end| end > dst.len)
         {
             return Err(CudaError(format!(
                 "copy_to_device: offset {} + size {} exceeds allocation size {}",
@@ -356,7 +355,7 @@ impl DeviceEngine for CudaEngine {
     ) -> Result<(), CudaError> {
         if src_offset
             .checked_add(dst.len())
-            .map_or(true, |end| end > src.len)
+            .is_none_or(|end| end > src.len)
         {
             return Err(CudaError(format!(
                 "copy_to_host: offset {} + size {} exceeds allocation size {}",
@@ -400,6 +399,7 @@ impl DeviceEngine for CudaEngine {
 // ── FFI declarations ──────────────────────────────────────────────────────
 
 #[allow(non_snake_case, dead_code)]
+#[link(name = "cuda")]
 extern "C" {
     fn cuInit(flags: u32) -> CUresult;
     fn cuDriverGetVersion(version: *mut i32) -> CUresult;
