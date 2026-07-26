@@ -1,4 +1,3 @@
-pub mod cpu_ref;
-
 #[cfg(feature = "cuda")]
-pub mod cuda_driver;
+pub mod cuda;
+pub mod cpu;

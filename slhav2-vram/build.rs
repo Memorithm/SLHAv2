@@ -1,53 +1,67 @@
-use std::path::Path;
+use std::env;
+use std::path::PathBuf;
 use std::process::Command;
 
-/// Attempt to compile the CUDA kernel to PTX using the system nvcc.
-/// If nvcc is unavailable, skip silently (the .ptx must exist from a prior build
-/// or be included in the source tree).
+fn main() {
+    // Re-run if the kernel source changes
+    println!("cargo:rerun-if-changed=kernels/slha_score.cu");
+
+    // Only compile PTX when the CUDA feature is active
+    if cfg!(feature = "cuda") && cfg!(target_os = "linux") {
+        compile_kernels();
+    }
+}
+
 fn compile_kernels() {
-    let kernel_src = Path::new("kernels/lowrank_turboquant.cu");
-    let ptx_out = Path::new("kernels/lowrank_turboquant.ptx");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    let arch = env::var("SLHAV2_CUDA_ARCH").unwrap_or_else(|_| "sm_89".into());
+    let kernel_src = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").unwrap(),
+    )
+    .join("kernels")
+    .join("slha_score.cu");
+
+    let ptx_out = out_dir.join("slha_score.ptx");
 
     if !kernel_src.exists() {
+        println!("cargo:warning=Kernel source not found: {}", kernel_src.display());
         return;
     }
 
-    let nvcc_ok = match Command::new("nvcc").arg("--version").output() {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
-    };
+    // Check if nvcc is available
+    let nvcc_ok = Command::new("nvcc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
     if !nvcc_ok {
+        println!("cargo:warning=nvcc not found; skipping PTX compilation");
+        println!("cargo:warning=Pre-compiled PTX will be required at runtime");
         return;
     }
 
     let status = Command::new("nvcc")
         .args([
             "-ptx",
-            "-arch=sm_89",
+            &format!("-arch={arch}"),
             "-O3",
-            "--use_fast_math",
             "-o",
         ])
-        .arg(ptx_out)
-        .arg(kernel_src)
+        .arg(&ptx_out)
+        .arg(&kernel_src)
         .status();
 
     match status {
+        Ok(s) if s.success() => {
+            println!("cargo:warning=PTX compiled -> {}", ptx_out.display());
+        }
         Ok(s) => {
-            if s.success() {
-                println!("cargo:warning=PTX compiled successfully -> {}", ptx_out.display());
-            } else {
-                println!("cargo:warning=nvcc exited with code {:?}", s.code());
-                println!("cargo:warning=using pre-existing PTX if available");
-            }
+            println!("cargo:warning=nvcc exited with code {:?}", s.code());
         }
         Err(e) => {
-            println!("cargo:warning=Failed to execute nvcc: {e}");
+            println!("cargo:warning=nvcc execution failed: {e}");
         }
     }
-}
-
-fn main() {
-    println!("cargo:rerun-if-changed=kernels/lowrank_turboquant.cu");
-    compile_kernels();
 }

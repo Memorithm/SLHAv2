@@ -3,7 +3,7 @@ name = "slhav2-vram"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
-description = "Hardware-agnostic VRAM management and execution engine for SLHAv2."
+description = "Hardware-agnostic VRAM management and SLHAv2 tile scoring on GPU."
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -22,3 +22,11 @@ cuda = ["libc"]
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+bytemuck = { version = "1", features = [] }
+
+[[bench]]
+name = "score"
+harness = false
+
+[profile.bench]
+debug = 1
