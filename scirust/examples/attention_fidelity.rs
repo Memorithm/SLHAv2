@@ -70,7 +70,7 @@ fn main() {
             let s_warm: Vec<f32> = tiles
                 .iter()
                 .map(|t| {
-                    let mut w = t.clone();
+                    let mut w = *t;
                     w.flags |= FLAG_WARM;
                     w.compute_score(&qc, &qs)
                 })

@@ -75,9 +75,9 @@ fn warm_mode_drops_the_binary_term() {
     let q_sign = proj.sign_bits(&q);
 
     let hot = build_tile(&proj, &toks[0], 0, false);
-    let mut warm = hot.clone();
+    let mut warm = hot;
     warm.flags |= FLAG_WARM;
-    let mut hot_lambda0 = hot.clone();
+    let mut hot_lambda0 = hot;
     hot_lambda0.dynamic_lambda = 0.0;
 
     let s_warm = warm.compute_score(&q, &q_sign);
@@ -143,7 +143,7 @@ fn hot_ranks_at_least_as_well_as_warm() {
     for (i, t) in toks.iter().enumerate() {
         s_true.push(dot(&q, &t.k_real));
         let hot = build_tile(&proj, t, i as u32, false);
-        let mut warm = hot.clone();
+        let mut warm = hot;
         warm.flags |= FLAG_WARM;
         s_hot.push(hot.compute_score(&q, &q_sign));
         s_warm.push(warm.compute_score(&q, &q_sign));

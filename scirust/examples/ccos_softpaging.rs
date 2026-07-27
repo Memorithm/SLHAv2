@@ -59,7 +59,7 @@ fn main() {
     let budget_a = n * 112; // between WARM(96) and HOT(128) totals -> pages, never evicts
     let mut cache = ElasticKvCache::with_budget(budget_a);
     for (i, t) in tiles.iter().enumerate() {
-        cache.insert(t.clone());
+        cache.insert(*t);
         if i % 256 == 0 {
             cache.enforce_budget();
         }
@@ -94,7 +94,7 @@ fn main() {
     let budget_b = n * 40;
     let mut cache_b = ElasticKvCache::new(budget_b, PageOutPolicy::OldestFirst);
     for (i, t) in tiles.iter().enumerate() {
-        cache_b.insert(t.clone());
+        cache_b.insert(*t);
         if i % 256 == 0 {
             cache_b.enforce_budget();
         }

@@ -80,7 +80,7 @@ fn main() {
         for (i, t) in toks.iter().enumerate() {
             s_true.push(dot(&q, &t.k_real));
             let hot = build_tile(&proj, t, i as u32, false);
-            let mut warm = hot.clone();
+            let mut warm = hot;
             warm.flags |= scirust::attention::slha_v2::FLAG_WARM;
             s_hot.push(hot.compute_score(&q, &q_sign));
             s_warm.push(warm.compute_score(&q, &q_sign));

@@ -190,7 +190,7 @@ fn fidelity_section(checks: &mut Vec<(String, bool)>) -> Json {
     let s_warm: Vec<f32> = tiles
         .iter()
         .map(|t| {
-            let mut w = t.clone();
+            let mut w = *t;
             w.flags |= FLAG_WARM;
             w.compute_score(&q, &qs)
         })
@@ -226,7 +226,7 @@ fn ccos_section(checks: &mut Vec<(String, bool)>) -> Json {
     let budget = n * 112; // between WARM(96) and HOT(128) totals → pages, never evicts
     let mut cache = ElasticKvCache::with_budget(budget);
     for (i, t) in tiles.iter().enumerate() {
-        cache.insert(t.clone());
+        cache.insert(*t);
         if i % 256 == 0 {
             cache.enforce_budget();
         }

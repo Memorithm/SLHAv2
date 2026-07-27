@@ -6,9 +6,10 @@
 #  workspace removes the duplication and keeps a single source of truth.)
 [workspace]
 resolver = "2"
-members = ["scirust", "slha-mcp", "slhav2-vram"]
-# So root-level `cargo build / test / bench / run --example` target the scirust
-# crate without `-p` (the installer, Makefile and demo.sh rely on this).
+members = ["scirust", "slha-mcp", "slha-c", "slha-python", "slhav2-vram"]
+# Unqualified Cargo commands intentionally target the dependency-free `scirust`
+# core, preserving lightweight builds and unambiguous example/benchmark commands.
+# Product-wide build and validation surfaces must pass `--workspace` explicitly.
 default-members = ["scirust"]
 
 # Release profile lives at the workspace root (a member's [profile] is ignored).

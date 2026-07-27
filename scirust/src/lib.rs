@@ -21,14 +21,22 @@
 // position reads closer to the math than iterator-chain rewrites would.
 #![allow(clippy::needless_range_loop)]
 
+pub mod adapter;
 pub mod attention;
 pub mod audit;
 pub mod ccos;
+pub mod eventlog;
+pub mod incoherence;
 pub mod json;
 pub mod learned;
 pub mod linalg;
 pub mod metrics;
+pub mod numa;
+pub mod residual;
 pub mod rng;
+pub mod rope;
+pub mod safety;
 pub mod scenario;
+pub mod weights;
 
 pub use attention::slha_v2::{SciRustSlhaTile, D_C, D_S, LATENT_BYTES, RESIDUAL_WORDS};

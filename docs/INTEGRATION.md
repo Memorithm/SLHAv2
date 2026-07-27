@@ -3,11 +3,18 @@
 Ce guide explique comment brancher SLHA v2 dans **llama.cpp**, **Ollama**,
 **vLLM** ou votre propre moteur d'inférence.
 
-> **Statut : esquisse de conception.** Les sections llama.cpp / Ollama / vLLM
-> sont du **pseudo-code** illustratif — les drapeaux `LLAMA_SLHA`,
-> `--kv-cache=slha`, etc. **n'existent pas encore**. Seule la section « moteur
-> Rust custom » utilise l'API réelle du crate. Aucune de ces intégrations n'a
-> été mesurée sur un vrai modèle.
+> **Statut.** La **Phase 2 llama.cpp** est engagée pour de vrai et
+> **partiellement livrée** — voir [`integration/llama.cpp/`](../integration/llama.cpp/) :
+> le **pont ABI C** (`slha-c` : `slha_weights_load` / `slha_encode_key` /
+> `slha_decode_latent` / `slha_weights_free`) est **implémenté et testé**, une
+> **perplexité de référence est mesurée** (Qwen2.5-0.5B Q8_0, WikiText-2 :
+> **PPL 17,72**), et le **point d'insertion du patch est identifié dans le
+> code** (`llama_kv_cache::cpy_k`, `ggml_map_custom1`). Ce qui reste (le shim
+> ggml + projections par couche + mesure du Δppl) y est spécifié précisément.
+>
+> Les sections **Ollama / vLLM ci-dessous restent du pseudo-code** illustratif
+> (les drapeaux `--kv-cache=slha` etc. n'existent pas) ; seules la Phase 2
+> llama.cpp et la section « moteur Rust custom » reposent sur du code réel.
 
 ---
 
@@ -93,7 +100,7 @@ float compute_attention_slha(query, token_idx) {
 1. **Forker llama.cpp** : `git clone https://github.com/ggerganov/llama.cpp`
 2. **Ajouter SLHA comme sous-module** :
    ```bash
-   git submodule add https://github.com/CHECKUPAUTO/SLHAv2 extern/SLHAv2
+   git submodule add https://github.com/Memorithm/SLHAv2 extern/SLHAv2
    ```
 3. **Modifier `llama.cpp`** : remplacer le stockage KV par la structure SLHA
 4. **Compiler** : `make LLAMA_SLHA=1`
@@ -172,7 +179,7 @@ class SLHABlock:
 ```rust
 // Cargo.toml
 // [dependencies]
-// scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2" }
+// scirust = { git = "https://github.com/Memorithm/SLHAv2" }
 
 use scirust::attention::slha_v2;
 
@@ -233,6 +240,6 @@ Après intégration, vérifiez ces points :
 
 ## Support
 
-- **Issues** : https://github.com/CHECKUPAUTO/SLHAv2/issues
+- **Issues** : https://github.com/Memorithm/SLHAv2/issues
 - **Spécification** : [`SLHAv2.md`](../SLHAv2.md)
 - **API Reference** : [`api.md`](api.md)

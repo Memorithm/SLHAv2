@@ -1,0 +1,21 @@
+[package]
+name = "slha-c"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.89"
+authors = ["Forge CHECKUPAUTO <forge@checkupauto.io>"]
+description = "C-ABI interface for SLHA v2 kernel."
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/Memorithm/SLHAv2"
+homepage = "https://github.com/Memorithm/SLHAv2"
+documentation = "https://github.com/Memorithm/SLHAv2/blob/master/slha-c/include/slha.h"
+readme = "../README.md"
+keywords = ["ffi", "c-api", "llm", "kv-cache", "attention"]
+categories = ["api-bindings", "science"]
+
+[lib]
+name = "slha"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+scirust = { version = "0.2", path = "../scirust" }

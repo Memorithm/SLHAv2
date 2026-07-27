@@ -104,9 +104,9 @@ fn prop_warm_equals_coarse_only() {
         let hot = rand_int4_tile(&mut rng, false);
         let q = rand_q(&mut rng);
         let qs = rand_q_sign(&mut rng);
-        let mut warm = hot.clone();
+        let mut warm = hot;
         warm.flags |= FLAG_WARM;
-        let mut hot_lambda0 = hot.clone();
+        let mut hot_lambda0 = hot;
         hot_lambda0.dynamic_lambda = 0.0;
         let sw = warm.compute_score(&q, &qs);
         let s0 = hot_lambda0.compute_score(&q, &qs);
@@ -165,7 +165,7 @@ fn prop_dequant_error_within_bound() {
 
         // NF4: error ≤ ~half the widest codebook gap (~0.15) times the group absmax.
         let (lk, sc, gs) = quantize_latent_nf4(&v);
-        let mut t2 = t.clone();
+        let mut t2 = t;
         t2.latent_kv = lk;
         t2.scale = sc;
         t2.group_scales = gs;
@@ -228,7 +228,7 @@ fn prop_residual_term_bounded_by_lambda_ds() {
         let tile = rand_int4_tile(&mut rng, false);
         let q = rand_q(&mut rng);
         let qs = rand_q_sign(&mut rng);
-        let mut warm = tile.clone();
+        let mut warm = tile;
         warm.flags |= FLAG_WARM;
         let residual = tile.compute_score(&q, &qs) - warm.compute_score(&q, &qs);
         let bound = tile.dynamic_lambda.abs() * D_S as f32;
@@ -267,7 +267,7 @@ fn prop_degenerate_tiles_stay_finite() {
     let q = [1.0e3f32; D_C];
     let qs = [u64::MAX; RESIDUAL_WORDS];
     assert!(base.compute_score(&q, &qs).is_finite());
-    let mut nf4 = base.clone();
+    let mut nf4 = base;
     nf4.flags |= FLAG_NF4;
     assert!(nf4.compute_score(&q, &qs).is_finite());
 }

@@ -28,7 +28,7 @@ fn alpha_star(proj: &Projection, rho: f32, recalibrate: bool) -> f32 {
             if recalibrate {
                 hot.dynamic_lambda = calibrated_lambda(hot.residual_sigma);
             }
-            let mut warm = hot.clone();
+            let mut warm = hot;
             warm.flags |= FLAG_WARM;
             let coarse = warm.compute_score(&q, &q_sign);
             let lamr = hot.compute_score(&q, &q_sign) - coarse; // λ · r

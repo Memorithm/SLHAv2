@@ -24,28 +24,30 @@ Résultat : l'IA tourne sur un PC normal, pas besoin d'une carte graphique à
 - Un ordinateur sous **Linux**, **macOS** ou **Windows** (avec WSL)
 - **Rust** installé (le langage de programmation, pas le jeu vidéo)
 
-Si vous n'avez pas Rust, installez-le en une commande :
+Installez préalablement Git et Rust depuis leurs sources officielles.
+
+### Option A : installation locale contrôlée
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/Memorithm/SLHAv2.git
+cd SLHAv2
+git rev-parse HEAD
+less install.sh
+./install.sh
 ```
 
-### Option A : Installeur automatique (recommandé)
-
-```bash
-curl -sSL https://raw.githubusercontent.com/CHECKUPAUTO/SLHAv2/master/install.sh | bash
-```
-
-Ce script installe Rust (si besoin), clone le projet, le compile et lance les
-tests. En 2 minutes c'est prêt.
+Le script ne télécharge aucun code et ne supprime aucun répertoire.
 
 ### Option B : Installation manuelle
 
 ```bash
-git clone https://github.com/CHECKUPAUTO/SLHAv2.git
+git clone https://github.com/Memorithm/SLHAv2.git
 cd SLHAv2
-cargo build --release
-cargo test
+cargo build --locked --release \
+    -p scirust \
+    -p slha-mcp \
+    -p slha-c
+cargo test --locked -p scirust -p slha-mcp -p slha-c
 ```
 
 ---
@@ -91,8 +93,17 @@ Personne : "Tu te souviens de ce que j'ai dit ?"
 |---|---|
 | 1 token = ~2048 octets | 1 token = **128 octets** |
 | Pour 100 000 tokens = **200 Mo** | Pour 100 000 tokens = **12 Mo** |
-| Doit tenir en RAM/VRAM | Tient dans le cache CPU (L1/L2) |
-| Lent (200 Go/s de bande passante) | Rapide (cache hit en 1-4 cycles) |
+| Doit tenir en RAM/VRAM | Empreinte plus petite (reste plus longtemps résident) |
+| Limité par la bande passante RAM | Moins d'octets/token à lire |
+
+> **Ce sont des projections de compression, pas toutes mesurées.** Le ratio
+> **mesuré** au niveau kernel est 128 o vs 256 o pour une clé bf16 = **2× moins
+> d'octets/token** (§7.5) ; le débit dépend du CPU et de l'auto-vectorisation
+> (~2,5× tokens/s sur un banc Xeon AVX2, ~1,3× sur CPU scalaire). La résidence
+> **en cache** n'est qu'un effet indirect (compteurs `perf` indisponibles dans
+> le banc, §6.1) : 12 Mo ne tiennent pas en L1/L2 (32 Ko–2 Mo), mais la
+> empreinte réduite garde le working set résident plus longtemps. Le gain de
+> bout en bout sur un LLM réel reste à mesurer.
 
 ### Les deux composants
 
@@ -108,8 +119,9 @@ Le score final combine les deux : `score = base + λ × correctif`
 ### Le Soft-Paging
 
 Quand la mémoire sature, SLHA peut **jeter le correctif** et ne garder que la
-base. C'est une perte de qualité minime (~5%), mais ça libère 30% de mémoire
-instantanément.
+base (tuile WARM = 96 o contre 128 o en HOT, soit **−25 %** d'empreinte).
+Mesuré : pager la moitié des tuiles HOT→WARM laisse la sortie d'attention à
+**cos ≈ 0,9995** vs tout-HOT (§4) — une déviation de l'ordre de 0,05 %, pas 5 %.
 
 ---
 
@@ -146,7 +158,7 @@ débit **scalaire / AVX2 / AVX-512**. Extrait représentatif (chiffres réels) :
 ```rust
 // 1. Ajouter la dépendance
 // [dependencies]
-// scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2" }
+// scirust = { git = "https://github.com/Memorithm/SLHAv2" }
 
 use scirust::attention::slha_v2;
 
@@ -179,18 +191,27 @@ Voir le [guide d'intégration complet](INTEGRATION.md).
 ## 8. FAQ
 
 **Q : Ça marche sur mon Raspberry Pi ?**
-R : Oui, SLHA v2 a un kernel optimisé pour ARM NEON. Pas besoin de GPU.
+R : Le kernel a un chemin ARM NEON et compile sur AArch64 ; le kit
+`examples/platform_report` détecte et rapporte les capacités du CPU. À ce jour
+aucun banc n'a été exécuté sur Raspberry Pi — mesurez le vôtre
+(`cargo run --example platform_report --release`).
 
 **Q : Quel est l'impact sur la qualité des réponses ?**
-R : Mesuré à cosinus 0,95-0,997 vs l'attention complète. La différence est
-imperceptible pour l'utilisateur final.
+R : La fidélité de la **sortie** d'attention est mesurée à cosinus 0,95-0,997 vs
+l'attention complète — sur des données **synthétiques** (cf. `FINDINGS.md`,
+§7.6). C'est un proxy de la perplexité accessible hors LLM réel ; aucune
+évaluation humaine ni mesure sur vrai modèle n'a été faite.
 
 **Q : Je peux l'utiliser avec mon propre modèle ?**
 R : Oui, SLHA v2 est un composant que vous branchez dans votre pipeline
 d'inférence. Il ne remplace pas le modèle, il optimise sa mémoire.
 
 **Q : C'est gratuit ?**
-R : Oui, licence MIT + Apache-2.0. Utilisez-le comme vous voulez.
+R : Les usages non-commerciaux et personnels sont gratuits sous la licence
+PolyForm Noncommercial 1.0.0 (voir `LICENSE.md`). Tout usage commercial
+requiert une licence commerciale séparée, offerte pour les déploiements
+**CCOS** — SLHAv2 et TurboQuant sont des modules compagnons de CCOS
+(voir `LICENSING.md`).
 
 ---
 

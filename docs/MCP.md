@@ -44,13 +44,20 @@ L'agent voit alors 5 outils. Demandez par exemple : *« audite le noyau SLHA »*
 | Outil | Arguments | Renvoie |
 |---|---|---|
 | `slha.audit` | — | Le rapport d'auto-audit **JSON** complet (invariants de tuile, équivalence SIMD≡scalaire *live*, features/cache, fidélité vs attention complète, budget CCOS, déterminisme). |
-| `slha.explain` | — | Une explication en prose de SLHA v2 (tuile 128 o, score hybride, CCOS) que l'agent peut relayer. |
-| `slha.compress` | `key`: 128 nombres | Quantifie la clé en latent INT4 et rapporte la compression (512 o FP32 → 128 o, ×4). |
+| `slha.explain` | — | Une explication en prose de SLHA v2 (tuile 128 o, codecs latents, score hybride, CCOS) que l'agent peut relayer. |
+| `slha.compress` | `key`: 128 nombres ; `codec`? : `"int4"` \| `"grouped"` \| `"nf4"` \| `"mixed"` \| `"tq3"` (défaut `"int4"`) | Quantifie la clé dans le latent 64 o de la tuile avec le codec choisi et rapporte la compression (512 o FP32 → 128 o, ×4), l'échelle, les micro-échelles par groupe et le drapeau posé (`FLAG_NF4` / `FLAG_MIXED` / `FLAG_TQ3` ; 0 pour `int4`/`grouped`). |
 | `slha.score` | `key`, `query`: 128 nombres | Construit une tuile depuis `key` et calcule le score SLHA pour `query` vs le produit scalaire exact (montre l'erreur de reconstruction INT4). |
 | `slha.benchmark` | `n`? (défaut 200000) | Débit de scoring sur la machine hôte : `scores_per_sec`, `ns_per_score`, chemin SIMD dispatché. |
 
 > `slha.audit` est l'outil phare : un agent (ou un humain) obtient en un appel
 > l'état de santé vérifié du système, **les mêmes faits** que `slha-audit` en CLI.
+
+Le paramètre `codec` de `slha.compress` reprend le mapping de l'exemple
+`offline_validation` (`--codec grouped|nf4|mixed|tq3`), plus `int4` (INT4 à
+échelle simple — le défaut, comportement historique de l'outil). `tq3` est le
+port du codec TurboQuant (grille 3 bits + plan de correction de signe 1 bit
+dans les mêmes 64 o) — mesures et trade-offs dans
+[`TURBOQUANT.md`](TURBOQUANT.md).
 
 ## Protocole
 

@@ -5,15 +5,26 @@ edition = "2021"
 rust-version = "1.89"
 authors = ["Forge CHECKUPAUTO <forge@checkupauto.io>"]
 description = "SLHA v2 reference kernel: sub-low-rank latent + 1-bit residual hybrid attention, cache-line-aware tiling."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/CHECKUPAUTO/SLHAv2"
-homepage = "https://github.com/CHECKUPAUTO/SLHAv2"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/Memorithm/SLHAv2"
+homepage = "https://github.com/Memorithm/SLHAv2"
 documentation = "https://docs.rs/scirust"
 readme = "README.md"
 keywords = ["llm", "kv-cache", "attention", "quantization", "simd"]
 categories = ["algorithms", "science", "compression"]
 # MSRV is 1.89: the runtime-dispatched AVX-512 intrinsics (stdarch_x86_avx512)
 # stabilized in 1.89, and `usize::is_multiple_of` in 1.87.
+
+[features]
+# NUMA-aware pool + thread pinning (Linux only). Pulls in `libc` as an *optional*
+# dependency — the default build stays ZERO external dependencies. Off-target
+# (non-Linux) or feature off → graceful stubs returning `NumaError::Unavailable`.
+numa = ["libc"]
+
+[dependencies]
+# Optional, only with `numa`. Kept off the default build so the crate remains
+# zero-dependency offline.
+libc = { version = "0.2", optional = true, default-features = false }
 
 [lib]
 name = "scirust"
@@ -25,11 +36,13 @@ path = "src/lib.rs"
 name = "slha-audit"
 path = "src/bin/slha_audit.rs"
 
-# The library itself has ZERO external dependencies (it builds offline and adds
-# nothing to a consumer's tree). It ships a tiny, std-only `build.rs` that probes
-# the native host's cache-line size to choose the tile alignment — it pulls in no
-# crates and is a no-op under cross-compilation. The only dev-dependency is a
-# *lean* criterion (no plotters/rayon/html) used solely by `cargo bench`.
+# The library itself has ZERO external dependencies in its default build (it
+# builds offline and adds nothing to a consumer's tree). The optional `numa`
+# feature pulls in `libc` (Linux only) — see `[features]` above. It ships a tiny,
+# std-only `build.rs` that probes the native host's cache-line size to choose the
+# tile alignment — it pulls in no crates and is a no-op under cross-compilation.
+# The only dev-dependency is a *lean* criterion (no plotters/rayon/html) used solely
+# by `cargo bench`.
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 

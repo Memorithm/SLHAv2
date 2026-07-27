@@ -13,13 +13,13 @@ install: ## Installe Rust si nécessaire, clone et compile
 	@bash install.sh
 
 build: ## Compile le projet (mode release)
-	cargo build --release
+	cargo build --release --workspace --all-targets --all-features
 
 dev: ## Compile en mode debug (plus rapide)
-	cargo build
+	cargo build --workspace --all-targets --all-features
 
 test: ## Lance tous les tests
-	cargo test
+	cargo test --workspace --all-features
 
 bench: ## Lance les micro-benchmarks
 	cargo bench
@@ -43,14 +43,14 @@ example: ## Lance l'exemple de base
 	cargo run --example basic_usage
 
 lint: ## Vérifie le style de code
-	cargo fmt --check
-	cargo clippy -- -D warnings
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 fmt: ## Formate le code
-	cargo fmt
+	cargo fmt --all
 
 doc: ## Génère la documentation
-	cargo doc --no-deps --workspace --all-features --open
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 vram-all: ## Compile slhav2-vram (default features)
 	cargo build -p slhav2-vram

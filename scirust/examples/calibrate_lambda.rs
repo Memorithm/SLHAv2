@@ -70,7 +70,7 @@ fn main() {
             let mut true_v = vec![0.0f32; n];
             for (i, tok) in toks.iter().enumerate() {
                 let hot = build_tile(&proj, tok, i as u32, false);
-                let mut warm = hot.clone();
+                let mut warm = hot;
                 warm.flags |= FLAG_WARM;
                 let coarse = warm.compute_score(&q, &q_sign);
                 let lamr = hot.compute_score(&q, &q_sign) - coarse; // = λ_formula · r
