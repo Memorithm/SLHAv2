@@ -1,0 +1,68 @@
+diff -ru llama.cpp/src/CMakeLists.txt llama.cpp.modified/src/CMakeLists.txt
+--- llama.cpp/src/CMakeLists.txt	2026-07-27 16:36:07.273487000 +0200
++++ llama.cpp.modified/src/CMakeLists.txt	2026-07-27 16:41:59.443164178 +0200
+@@ -43,6 +43,10 @@
+             ${LLAMA_MODELS_SOURCES}
+             )
+ 
++if (SLHA_INTEGRATION)
++    target_sources(llama PRIVATE slha_llama.cpp)
++endif()
++
+ set_target_properties(llama PROPERTIES
+     VERSION ${LLAMA_INSTALL_VERSION}
+     SOVERSION 0
+diff -ru llama.cpp/src/llama-kv-cache.cpp llama.cpp.modified/src/llama-kv-cache.cpp
+--- llama.cpp/src/llama-kv-cache.cpp	2026-07-27 16:36:07.277487066 +0200
++++ llama.cpp.modified/src/llama-kv-cache.cpp	2026-07-27 16:42:14.647407204 +0200
+@@ -5,6 +5,10 @@
+ #include "llama-model.h"
+ #include "llama-context.h"
+ 
++#if defined(SLHA_INTEGRATION)
++#include "slha_llama.hpp"
++#endif
++
+ #include <algorithm>
+ #include <cassert>
+ #include <cmath>
+@@ -375,6 +379,18 @@
+         }
+     }
+ 
++
++#if defined(SLHA_INTEGRATION)
++    // Initialize SLHA K-cache integration if enabled via environment variable.
++    {
++        slha_kv_mode mode = slha_kv_mode_from_env();
++        if (mode != SLHA_KV_OFF) {
++            const char * weights_dir = getenv("SLHA_WEIGHTS_DIR");
++            slha_global_init(weights_dir, mode);
++        }
++    }
++#endif
++
+     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
+     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+ }
+@@ -1327,6 +1343,20 @@
+ 
+     k_cur = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
+ 
++#if defined(SLHA_INTEGRATION)
++    // Apply SLHA transformation to K if enabled.
++    slha_layer_state * layer_state = slha_get_layer_state(il);
++    if (layer_state && layer_state->mode != SLHA_KV_OFF) {
++        k_cur = ggml_map_custom1(
++            ctx,
++            k_cur,
++            slha_k_transform,
++            GGML_N_TASKS_MAX,
++            layer_state
++        );
++    }
++#endif
++
+     const int64_t n_stream = k->ne[2];
+ 
+     if (n_stream > 1) {
