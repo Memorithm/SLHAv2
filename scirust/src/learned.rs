@@ -266,6 +266,39 @@ impl LearnedModel {
         r
     }
 
+    /// Reconstruct the full key vector from a tile, including a linear estimate
+    /// of the residual from the sign-LSH bitmap. When the model uses incoherence
+    /// processing (RHT) the residual estimate is omitted because the random
+    /// Hadamard transform is not invertible from sign bits alone.
+    pub fn reconstruct_from_tile(&self, tile: &SciRustSlhaTile) -> Vec<f32> {
+        let mut key = self.reconstruct(&tile.dequant_latent());
+
+        if self.rht.is_some() {
+            // The residual was computed in the RHT domain; we cannot recover it
+            // without the inverse transform. Return the coarse reconstruction.
+            return key;
+        }
+
+        // Spectral estimate of the residual from the sign sketch:
+        //   E[ sign(z_i · e) · z_i ] = sqrt(2/π) · e / ||e||
+        // Rescale by σ_e · sqrt(π/2) so the estimate matches the residual RMS.
+        let scale = tile.residual_sigma * (std::f32::consts::PI / 2.0f32).sqrt() / D_S as f32;
+        for s in 0..D_S {
+            let word = s >> 6;
+            let bit = s & 63;
+            let sign = if (tile.residual_bitmap[word] >> bit) & 1 != 0 {
+                -1.0f32
+            } else {
+                1.0f32
+            };
+            let row = &self.z[s * self.d_pad..(s + 1) * self.d_pad];
+            for i in 0..self.d {
+                key[i] += sign * scale * row[i];
+            }
+        }
+        key
+    }
+
     /// Packed sign bits of `Z · v` (`v` length `d`). With incoherence
     /// processing enabled the effective projection is `Z · RHT`, realised by
     /// transforming `v` (zero-padded to `d_pad`) before the dot — the result is

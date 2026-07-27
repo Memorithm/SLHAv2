@@ -207,6 +207,20 @@ int32_t slha_decode_latent(
 );
 
 /**
+ * Decode and reconstruct a tile's full key vector (latent + residual sign
+ * sketch) into d floats.
+ *
+ * out is not modified on failure. Unaligned tile and output storage are
+ * accepted.
+ */
+int32_t slha_decode_key(
+    const SlhaModel* model,
+    const SciRustSlhaTile* tile,
+    float* out,
+    size_t d
+);
+
+/**
  * Release a model and return an explicit status. NULL is a no-op.
  */
 int32_t slha_weights_release(SlhaModel* model);
