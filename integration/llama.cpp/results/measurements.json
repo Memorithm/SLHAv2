@@ -3,7 +3,7 @@
     "experiment": "SLHA v2 K-cache quality round-trip",
     "llama_cpp_tag": "b9860",
     "llama_cpp_commit": "fdb1db877c526ec90f668eca1b858da5dba85560",
-    "slha_repo_commit": "PLACEHOLDER",
+    "slha_repo_commit": "97f4d6bf4db51672973f9f368429fc6ea495700f",
     "model_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
     "model_file": "qwen2.5-1.5b-instruct-q8_0.gguf",
     "model_sha256": "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8",
