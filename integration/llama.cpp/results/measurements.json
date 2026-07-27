@@ -1,0 +1,80 @@
+{
+  "meta": {
+    "experiment": "SLHA v2 K-cache quality round-trip",
+    "llama_cpp_tag": "b9860",
+    "llama_cpp_commit": "fdb1db877c526ec90f668eca1b858da5dba85560",
+    "slha_repo_commit": "PLACEHOLDER",
+    "model_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+    "model_file": "qwen2.5-1.5b-instruct-q8_0.gguf",
+    "model_sha256": "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8",
+    "dataset_test": "WikiText-2-raw-v1 split=test",
+    "dataset_test_file": "wiki.test.raw",
+    "dataset_test_sha256": "136677b69515d194d28d42728ac1ba29850b67cd30715bbb7a4a023815ab01d5",
+    "dataset_calib": "WikiText-2-raw-v1 split=train",
+    "dataset_calib_file": "wiki.train.raw",
+    "dataset_calib_sha256": "981baada725bd8d768ceadc500e52ec4d8571f5a2904c62fbe5ad03cf6bd1293",
+    "weights_manifest_sha256": "485031d795546a16a8a7106ac2baec7a3c4d34c8512f61e612b3ffc38e77eecb",
+    "chunks": 12,
+    "n_ctx": 512,
+    "threads": 4,
+    "calibration_max_chars": 120000,
+    "total_eval_tokens": 6144,
+    "insertion_point": "llama_kv_cache::cpy_k after ggml_view_2d"
+  },
+  "modes": {
+    "baseline": {
+      "slha_kv_mode": "off",
+      "codec": null,
+      "ppl": 11.8753,
+      "ppl_std": 0.58762,
+      "seconds_per_pass": 45.85,
+      "total_seconds": 137.559,
+      "tokens_per_second": 44.66,
+      "notes": "original llama.cpp build"
+    },
+    "passthrough": {
+      "slha_kv_mode": "passthrough",
+      "codec": null,
+      "ppl": 11.8753,
+      "ppl_std": 0.58762,
+      "seconds_per_pass": 45.71,
+      "total_seconds": 137.101,
+      "tokens_per_second": 44.81,
+      "delta_ppl_absolute": 0.0,
+      "delta_ppl_relative": 0.0,
+      "notes": "custom GGML op copies K unchanged; confirms hook inertness"
+    },
+    "roundtrip_mixed": {
+      "slha_kv_mode": "roundtrip",
+      "codec": "mixed",
+      "ppl": 16.5976,
+      "ppl_std": 0.85361,
+      "seconds_per_pass": 48.67,
+      "total_seconds": 145.339,
+      "tokens_per_second": 42.28,
+      "delta_ppl_absolute": 4.7223,
+      "delta_ppl_relative": 0.3977,
+      "notes": "SLHA encode/decode through 128-byte tile with latent+residual reconstruction"
+    },
+    "roundtrip_mix3": {
+      "slha_kv_mode": "roundtrip",
+      "codec": "mix3",
+      "ppl": 16.6460,
+      "ppl_std": 0.85697,
+      "seconds_per_pass": 48.25,
+      "total_seconds": 145.525,
+      "tokens_per_second": 42.22,
+      "delta_ppl_absolute": 4.7707,
+      "delta_ppl_relative": 0.4017,
+      "notes": "MIX3 codec (mixed 8-bit head + TQ3 separable body)"
+    }
+  },
+  "commands": {
+    "baseline": "WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh baseline",
+    "passthrough": "WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh passthrough",
+    "collect_calib": "CALIB_DIR=/tmp/slha-llama/calibration DATA_FILE=/tmp/slha-llama/wiki.train.raw WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh collect",
+    "train_weights": "WORK=/tmp/slha-llama CALIB_DIR=/tmp/slha-llama/calibration WEIGHTS_DIR=/tmp/slha-llama/weights integration/llama.cpp/scripts/train_layer_weights.sh mixed",
+    "roundtrip_mixed": "SLHA_CODEC=mixed WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip",
+    "roundtrip_mix3": "SLHA_CODEC=mix3 WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip"
+  }
+}

@@ -1,107 +1,154 @@
-# SLHA v2 × llama.cpp — Phase 2 integration
+# SLHA v2 × llama.cpp — K-cache quality round-trip
 
-Status: **staged, honest partial.** This directory holds the reproducible
-baseline and the concrete patch plan for measuring SLHA's end-to-end quality
-cost on a real LLM (PLAN.md Phase 2). What is done here is real and tested;
-what is not is stated plainly.
+This directory implements and measures the first real-LLM quality-path
+integration for SLHA v2: every K vector is encoded to a 128-byte SLHA tile and
+decoded back to the original K dimension *before* it is stored in llama.cpp's
+normal KV cache. Attention is untouched. The goal is to isolate and quantify
+the perplexity cost of SLHA-compressing K on a real model.
 
-## Scope (read this first)
+> This is **not** the final fused-score bandwidth phase. It does not claim any
+> KV memory reduction or attention-speed gain.
 
-The goal of this phase is the **quality-path GO/NO-GO**: round-trip every K
-vector through an SLHA tile (encode → decode) *before* it is stored in
-llama.cpp's KV cache, leaving the attention math untouched, and measure the
-change in perplexity vs baseline. This isolates the quality cost of
-SLHA-compressing K on a real model.
+## Status
 
-It is **not** the fused-score bandwidth win (scoring the compressed tile
-without decompressing). That is a separate, later phase; the quality path
-answers "does the compression preserve the model?" first.
+Implemented and measured:
 
-## What is done (real, in this repo)
+* Inert passthrough hook (proves the custom GGML op does not move perplexity).
+* Per-layer K activation collection mode (writes `layer-N-k.bin`).
+* Automated per-layer projection training script (outputs `layer-NNN.slhw` +
+  `manifest.json`).
+* SLHA K round-trip callback using `slha_encode_key` + `slha_decode_key`.
+* Reproducible build/apply/measure scripts.
 
-1. **The C ABI bridge** an engine needs — implemented and tested in `slha-c`
-   (`slha-c/src/lib.rs`, header `slha-c/include/slha.h`):
-   - `slha_weights_load(path)` / `slha_weights_free(model)` — load a `.slhw`
-     projection (one per layer);
-   - `size_t slha_model_dim(model)` — the projection input dim `d`;
-   - `slha_encode_key(model, key, d, pos, codec, out_tile)` — encode a
-     `d`-dim K vector into a 128-byte tile (`codec`: 0 int4-single, 1
-     int4-grouped, 2 nf4, 3 mixed, 4 tq3, 5 mix3);
-   - `slha_decode_latent(model, tile, out, d)` — reconstruct the tile's latent
-     back into the original `d`-dim space.
-   Panic-free (NULL checks + `catch_unwind`), round-trip tested end to end
-   (`cargo test -p slha-c`).
+Measured conclusion on the chosen configuration: **the round-trip path does not
+preserve perplexity within the pre-registered ≤1 % gate** (ΔPPL ≈ +40 %). See
+[`results/measurements.json`](results/measurements.json).
 
-2. **A reproducible baseline** — `build_and_baseline.sh` clones llama.cpp at a
-   pinned tag, builds it CPU-only, fetches a small model + a WikiText-2 slice,
-   builds `libslha`, and runs `llama-perplexity`.
+## Why Qwen2.5-1.5B instead of 0.5B
 
-   Measured baseline (Qwen2.5-0.5B-Instruct Q8_0, WikiText-2 test, 12 chunks,
-   4 threads, llama.cpp tag **b9860**):
+The integration seam is `llama_kv_cache::cpy_k`, where K has shape
+`[n_embd_gqa = head_dim × n_kv_heads]`. Qwen2.5-0.5B uses GQA with
+`n_kv_heads = 2` and `head_dim = 64`, so `n_embd_gqa = 128`. SLHA requires
+`d > D_C = 128` for a non-trivial residual, so the 0.5B model cannot be used at
+this seam. The 1.5B checkpoint has `n_embd_gqa = 256`, satisfying the constraint.
 
-   | run | PPL |
-   |---|---|
-   | baseline (no SLHA) | **17.72 ± 0.96** |
+## Layout
 
-## What is not done (the staged patch)
-
-The K-cache interception is **not yet applied**. The remaining work is now
-concretely specified against this llama.cpp version:
-
-### The patch seam
-
-The K vectors are written to the cache in
-`src/llama-kv-cache.cpp`, function `llama_kv_cache::cpy_k(ctx, k_cur, k_idxs,
-il, sinfo)` (~line 1311). It builds a ggml graph node:
-
-```cpp
-k_cur = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
-...
-return ggml_set_rows(ctx, k, k_cur, k_idxs);   // <- k_cur written here
+```text
+integration/llama.cpp/
+├── README.md                         # this file
+├── build_and_roundtrip.sh            # clone, patch, build, run all modes
+├── patches/0001-slha-k-passthrough.patch
+├── shim/slha_llama.cpp               # C++ shim (collect / passthrough / roundtrip)
+├── shim/slha_llama.hpp
+├── scripts/prepare_calibration.sh    # build a separate calibration corpus
+├── scripts/train_layer_weights.sh    # train one .slhw per layer
+└── results/
+    ├── measurements.json             # machine-readable results
+    └── README.md                     # Markdown report
 ```
 
-`cpy_k` is graph-building, not eager, so the SLHA round-trip must be a graph
-node too. The clean insertion is a `ggml_map_custom1` between the view and
-`ggml_set_rows`:
-
-```cpp
-// libslha: one projection per layer, trained offline (see below)
-k_cur = ggml_map_custom1(ctx, k_cur, slha_roundtrip_k, GGML_N_TASKS_MAX,
-                         g_slha_layer[il]);
-return ggml_set_rows(ctx, k, k_cur, k_idxs);
-```
-
-`slha_roundtrip_k` is a small C++ shim (CPU): for each column (one token's
-`n_embd_gqa`-dim K vector) it calls `slha_encode_key` then
-`slha_decode_latent` via `libslha`, writing the reconstructed vector back in
-place. Attention downstream is unchanged; only the stored K is the
-SLHA-reconstructed K.
-
-### The remaining tasks
-
-1. **Per-layer projections.** SLHA needs `d > D_C = 128`; a per-head
-   `head_dim` (64–128) is too small, so operate on the **full K row**
-   (`n_embd_gqa`, e.g. 896 for Qwen-0.5B) as one `d`-dim vector per token per
-   layer, with **one `.slhw` projection per layer**. Train them offline: a
-   calibration pass dumps each layer's K activations (via a `map_custom` in
-   collect-only mode, or `llama-eval-callback`), then `scirust`'s
-   `train_on_real_activations` produces one projection per layer.
-2. **The shim + build glue.** Add `slha_roundtrip_k`, a global
-   `g_slha_layer[]` of loaded models (env-gated so a normal build is
-   untouched), and link `libslha.a`.
-3. **Measure.** Re-run the baseline perplexity command with the shim active
-   for `{passthrough (sanity, Δ≈0), mixed, mix3}` and record Δppl + tok/s.
-
-The offline evidence already bounds what to expect: on real GPT-2 c6
-activations the best codec (mixed/mix3) reconstructs K at attention-output
-cosine 0.984 but KL 0.055 — above the strict pre-registered gate (see
-`docs/TURBOQUANT.md` §3bis/§3ter/§3quater). Whether that 0.055 KL actually
-moves perplexity on a real model is exactly the number this patch produces.
-
-## Reproduce the baseline
+## Quick reproduction
 
 ```bash
-# from the SLHAv2 repo root
+# 1. Build the C bridge
 cargo build --release -p slha-c
-WORK=/tmp/slha-llama integration/llama.cpp/build_and_baseline.sh
+
+# 2. Baseline
+WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh baseline
+
+# 3. Passthrough sanity
+WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh passthrough
+
+# 4. Calibration corpus (must be separate from evaluation data)
+WORK=/tmp/slha-llama integration/llama.cpp/scripts/prepare_calibration.sh
+
+# 5. Collect K activations on the calibration corpus
+CALIB_DIR=/tmp/slha-llama/calibration \
+  DATA_FILE=/tmp/slha-llama/wiki.train.raw \
+  WORK=/tmp/slha-llama \
+  integration/llama.cpp/build_and_roundtrip.sh collect
+
+# 6. Train per-layer projections (mixed codec)
+WORK=/tmp/slha-llama \
+  CALIB_DIR=/tmp/slha-llama/calibration \
+  WEIGHTS_DIR=/tmp/slha-llama/weights \
+  integration/llama.cpp/scripts/train_layer_weights.sh mixed
+
+# 7. Round-trip perplexity
+SLHA_CODEC=mixed WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip
+SLHA_CODEC=mix3 WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip
+```
+
+All scripts pin the llama.cpp tag (`b9860`) and verify the commit hash before
+building.
+
+## Runtime interface
+
+Modes are selected via environment variables:
+
+| Variable          | Values                              |
+|-------------------|-------------------------------------|
+| `SLHA_KV_MODE`    | `off` / `passthrough` / `collect` / `roundtrip` |
+| `SLHA_CODEC`      | `mixed` (default) / `mix3` / `grouped` / `nf4` / `tq3` |
+| `SLHA_WEIGHTS_DIR`| directory with `layer-NNN.slhw` and `manifest.json` |
+
+## Measured results
+
+Qwen2.5-1.5B-Instruct Q8_0, WikiText-2 test, 12 chunks, 512 context, 4 threads.
+
+| Mode        |      PPL | ΔPPL absolute | ΔPPL relative | tok/s | Notes           |
+| ----------- | -------: | ------------: | ------------: | ----: | --------------- |
+| baseline    | 11.8753  |             — |             — | 44.66 | original        |
+| passthrough | 11.8753  |          0.00 |          0.0% | 44.81 | hook sanity     |
+| mixed       | 16.5976  |          4.72 |         39.8% | 42.28 | SLHA round-trip |
+| mix3        | 16.6460  |          4.77 |         40.2% | 42.22 | SLHA round-trip |
+
+See [`results/measurements.json`](results/measurements.json) for exact SHAs,
+commands, and timestamps.
+
+## Why the regression is large
+
+The callback reconstructs K from the SLHA tile using the latent plus a linear
+estimate of the sign-LSH residual. While the latent captures the principal
+subspace of the calibration K activations, the 256-bit residual sketch is a
+*score-side* correction (it preserves attention dot products well in offline
+score tests) rather than a faithful inverse of the quantization error. Restoring
+the exact per-vector K value from sign bits alone is not what the residual was
+designed for, and the perplexity measurement reflects that limitation.
+
+This does **not** rule out the later fused-score path, where attention scores
+are computed directly on the compressed tiles without ever reconstructing K.
+That path is out of scope for this milestone.
+
+## Limitations and known issues
+
+* Per-layer projections are trained on K only (`fit_with`), not joint K/Q,
+  because the collection seam currently only exposes K.
+* The round-trip reconstruction uses a spectral residual estimate; it improves
+  over latent-only reconstruction but is not an exact inverse.
+* AddressSanitizer builds successfully but the runtime shadow memory could not
+  be allocated in the current container (`ulimit -v` insufficient). No memory
+  errors were observed in normal runs.
+* Only CPU inference is exercised here; GPU is out of scope.
+
+## Gates
+
+The Cargo workspace gates still pass:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo build --locked --workspace --all-targets --all-features
+cargo test --locked --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
+cargo +1.89.0 check --locked --workspace --all-targets --all-features
+```
+
+The llama.cpp integration gate:
+
+```bash
+WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh baseline
+WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh passthrough
+SLHA_CODEC=mixed WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip
 ```
