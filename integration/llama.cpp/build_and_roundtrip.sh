@@ -3,7 +3,7 @@
 #
 # Usage: WORK=/path/to/scratch ./build_and_roundtrip.sh [mode]
 #
-# Modes: baseline, passthrough, roundtrip, collect (default: passthrough)
+# Modes: baseline, passthrough, roundtrip, collect, shadow (default: passthrough)
 set -euo pipefail
 
 WORK="${WORK:-/tmp/slha-llama}"
@@ -113,6 +113,10 @@ elif [ "$MODE" = "roundtrip" ]; then
 elif [ "$MODE" = "collect" ]; then
     export SLHA_KV_MODE=collect
     export SLHA_WEIGHTS_DIR="$CALIB_DIR"
+elif [ "$MODE" = "shadow" ]; then
+    export SLHA_KV_MODE=tilestore
+    export SLHA_SCORE_MODE=shadow
+    export SLHA_WEIGHTS_DIR="$WORK/weights"
 else
     unset SLHA_KV_MODE
 fi
@@ -122,8 +126,18 @@ if [ "$MODE" = "roundtrip" ]; then
 else
     OUTPUT_FILE="$WORK/${MODE}_ppl.txt"
 fi
+FLASH_ATTN_FLAG=""
+PARALLEL_FLAG=""
+if [ "$MODE" = "shadow" ]; then
+    # Shadow scoring requires the non-flash attention path so kq logits are
+    # materialised for comparison, and a single stream so the tile store
+    # positions are contiguous.
+    FLASH_ATTN_FLAG="--flash-attn off"
+    PARALLEL_FLAG="--parallel 1"
+fi
+
 llama.cpp/build/bin/llama-perplexity \
-    -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" \
+    -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" $FLASH_ATTN_FLAG $PARALLEL_FLAG \
     2>&1 | tee "$OUTPUT_FILE" | grep -E "Final estimate|PPL"
 
 echo

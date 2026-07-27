@@ -16,12 +16,59 @@ enum slha_kv_mode : int {
     SLHA_KV_PASSTHROUGH = 1,
     SLHA_KV_ROUNDTRIP = 2,
     SLHA_KV_COLLECT = 3,
+    SLHA_KV_TILESTORE = 4,
+};
+
+enum slha_score_mode : int {
+    SLHA_SCORE_OFF = 0,
+    SLHA_SCORE_SHADOW = 1,
+    SLHA_SCORE_REPLACE = 2,
+};
+
+struct slha_layer_state;
+
+/** Experimental CPU-side compressed K tile store.
+ *
+ * One tile per (layer, cache position). Capacity is fixed per layer and
+ * position indices are bounds-checked. No unbounded growth. */
+struct slha_tile_store {
+    size_t n_layers = 0;
+    size_t capacity = 0;
+    size_t tile_bytes = 0;
+    std::vector<std::byte> tiles;
+    std::vector<uint8_t> valid;
+    mutable std::mutex mutex;
+
+    bool init(size_t n_layers, size_t capacity, size_t tile_bytes);
+    void reset();
+    bool write(int32_t layer_id, size_t position, const void * tile);
+    const void * read(int32_t layer_id, size_t position) const;
+    bool check_capacity(int32_t layer_id, size_t position) const;
+};
+
+/** Shadow-mode metrics accumulated per layer and per head. */
+struct slha_shadow_metrics {
+    mutable std::mutex mutex;
+    size_t n_samples = 0;
+    double max_abs_error = 0.0;
+    double sum_abs_error = 0.0;
+    double sum_rel_l2 = 0.0;
+    double sum_cosine = 0.0;
+    double sum_pearson = 0.0;
+    double sum_spearman = 0.0;
+    double sum_top1_overlap = 0.0;
+    size_t n_finite = 0;
+    size_t n_mismatch = 0;
+
+    void add_sample(double baseline, double slha);
+    void print(int32_t layer_id) const;
 };
 
 struct slha_layer_state {
     int32_t layer_id;
     int64_t n_embd_gqa;
-    slha_kv_mode mode;
+    slha_kv_mode kv_mode;
+    slha_score_mode score_mode;
     void * model_handle;
     void * scratch;
     
@@ -29,7 +76,11 @@ struct slha_layer_state {
     std::vector<float> collected_k;
     std::unique_ptr<std::mutex> collect_mutex;
     
-    slha_layer_state() : layer_id(0), n_embd_gqa(0), mode(SLHA_KV_OFF), 
+    // For shadow/replace modes
+    std::unique_ptr<slha_shadow_metrics> shadow_metrics;
+    
+    slha_layer_state() : layer_id(0), n_embd_gqa(0), kv_mode(SLHA_KV_OFF),
+                         score_mode(SLHA_SCORE_OFF),
                          model_handle(nullptr), scratch(nullptr),
                          collect_mutex(std::make_unique<std::mutex>()) {}
     
@@ -42,7 +93,10 @@ struct slha_layer_state {
     slha_layer_state& operator=(slha_layer_state&&) = default;
 };
 
+extern slha_tile_store g_slha_tile_store;
+
 slha_kv_mode slha_kv_mode_from_env();
+slha_score_mode slha_score_mode_from_env();
 
 int slha_global_init(const char * weights_dir, slha_kv_mode mode);
 
@@ -52,6 +106,10 @@ int slha_get_num_layers();
 
 slha_layer_state * slha_get_layer_state(int32_t il);
 
+/** K-cache write callback: encode tiles (tilestore mode) or round-trip.
+ *
+ * userdata is a slha_layer_state*. In tilestore mode this also receives the
+ * KV cache indices via the second input. */
 void slha_k_transform(
     ggml_tensor * dst,
     const ggml_tensor * a,
@@ -60,6 +118,30 @@ void slha_k_transform(
     void * userdata
 );
 
+void slha_k_transform_with_idxs(
+    ggml_tensor * dst,
+    const ggml_tensor * a,
+    const ggml_tensor * b,
+    int ith,
+    int nth,
+    void * userdata
+);
+
+/** Shadow-mode callback: compare baseline logits with SLHA direct scores.
+ *
+ * Inputs: baseline kq logits and q. Output is a copy of kq (attention
+ * unchanged). userdata is a slha_layer_state*. */
+void slha_shadow_score(
+    ggml_tensor * dst,
+    const struct ggml_tensor * kq,
+    const struct ggml_tensor * q,
+    int ith,
+    int nth,
+    void * userdata
+);
+
 void slha_flush_collected_activations(const char * output_dir);
+void slha_print_shadow_metrics();
+void slha_print_shadow_metrics_unlocked();
 
 #endif
