@@ -3,6 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
+#include <mutex>
+#include <string>
 
 struct ggml_context;
 struct ggml_tensor;
@@ -20,6 +23,10 @@ struct slha_layer_state {
     slha_kv_mode mode;
     void * model_handle;
     void * scratch;
+    
+    // For collect mode
+    std::vector<float> collected_k;
+    std::mutex collect_mutex;
 };
 
 slha_kv_mode slha_kv_mode_from_env();
@@ -39,5 +46,7 @@ void slha_k_transform(
     int nth,
     void * userdata
 );
+
+void slha_flush_collected_activations(const char * output_dir);
 
 #endif
