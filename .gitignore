@@ -29,3 +29,6 @@ __pycache__/
 
 # Rapport slha-audit genere (host-specific, ex. aarch64 NEON/cache)
 /audit.json
+
+# Generated CUDA PTX artifacts
+/slhav2-vram/kernels/*.ptx

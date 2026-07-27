@@ -6,7 +6,7 @@
 #  workspace removes the duplication and keeps a single source of truth.)
 [workspace]
 resolver = "2"
-members = ["scirust", "slha-mcp", "slha-c", "slha-python"]
+members = ["scirust", "slha-mcp", "slha-c", "slha-python", "slhav2-vram"]
 # Unqualified Cargo commands intentionally target the dependency-free `scirust`
 # core, preserving lightweight builds and unambiguous example/benchmark commands.
 # Product-wide build and validation surfaces must pass `--workspace` explicitly.
