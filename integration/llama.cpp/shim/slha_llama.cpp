@@ -211,6 +211,58 @@ void slha_shadow_metrics::add_sample(double baseline, double slha) {
     }
 }
 
+void slha_shadow_metrics::add_vector(const std::vector<double> & baseline, const std::vector<double> & slha) {
+    const size_t n = baseline.size();
+    if (n == 0 || n != slha.size()) {
+        return;
+    }
+
+    double dot = 0.0;
+    double norm_b = 0.0;
+    double norm_s = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(baseline[i]) || !std::isfinite(slha[i])) {
+            return;
+        }
+        dot += baseline[i] * slha[i];
+        norm_b += baseline[i] * baseline[i];
+        norm_s += slha[i] * slha[i];
+    }
+    const double denom = std::sqrt(norm_b * norm_s);
+    const double cosine = denom > 1e-18 ? dot / denom : 0.0;
+
+    std::vector<size_t> idx_b(n), idx_s(n);
+    for (size_t i = 0; i < n; ++i) {
+        idx_b[i] = i;
+        idx_s[i] = i;
+    }
+    std::sort(idx_b.begin(), idx_b.end(), [&](size_t a, size_t b) { return baseline[a] > baseline[b]; });
+    std::sort(idx_s.begin(), idx_s.end(), [&](size_t a, size_t b) { return slha[a] > slha[b]; });
+
+    const auto top_k_overlap = [&](size_t k) -> double {
+        k = std::min(k, n);
+        size_t overlap = 0;
+        for (size_t i = 0; i < k; ++i) {
+            for (size_t j = 0; j < k; ++j) {
+                if (idx_b[i] == idx_s[j]) {
+                    ++overlap;
+                    break;
+                }
+            }
+        }
+        return static_cast<double>(overlap) / static_cast<double>(k);
+    };
+
+    const double top1 = n >= 1 && idx_b[0] == idx_s[0] ? 1.0 : 0.0;
+    const double top5 = n >= 5 ? top_k_overlap(5) : top1;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    ++n_vectors;
+    sum_cosine += cosine;
+    sum_top1_overlap += top1;
+    sum_top5_overlap += top5;
+}
+
 static double slha_pearson(const std::vector<double> & x, const std::vector<double> & y) {
     const size_t n = x.size();
     if (n < 2 || n != y.size()) return 0.0;
@@ -257,15 +309,22 @@ static double slha_spearman(const std::vector<double> & x, const std::vector<dou
 
 void slha_shadow_metrics::print(int32_t layer_id) const {
     std::lock_guard<std::mutex> lock(mutex);
-    if (n_samples == 0) return;
-    const double mae = sum_abs_error / static_cast<double>(n_samples);
-    const double rel_l2 = sum_rel_l2 / static_cast<double>(n_samples);
+    if (n_samples == 0 && n_vectors == 0) return;
+    const double mae = n_samples ? sum_abs_error / static_cast<double>(n_samples) : 0.0;
+    const double rel_l2 = n_samples ? sum_rel_l2 / static_cast<double>(n_samples) : 0.0;
+    const double cosine = n_vectors ? sum_cosine / static_cast<double>(n_vectors) : 0.0;
+    const double top1 = n_vectors ? sum_top1_overlap / static_cast<double>(n_vectors) : 0.0;
+    const double top5 = n_vectors ? sum_top5_overlap / static_cast<double>(n_vectors) : 0.0;
     std::cout << "[SLHA] layer " << layer_id
               << " shadow n=" << n_samples
               << " max_abs_err=" << max_abs_error
               << " mae=" << mae
               << " rel_l2=" << rel_l2
               << " mismatches=" << n_mismatch
+              << " vectors=" << n_vectors
+              << " cosine=" << cosine
+              << " top1=" << top1
+              << " top5=" << top5
               << "\n";
 }
 
@@ -435,7 +494,9 @@ void slha_shadow_score(
     const int64_t head_dim = q->ne[0];
 
     if (q->ne[1] != n_token || q->ne[2] != n_head || q->ne[3] != kq->ne[3]) {
-        if (ith == 0) {
+        // Only complain if the layer has tiles; otherwise this is just a graph
+        // warmup/build call with dummy shapes.
+        if (ith == 0 && g_slha_tile_store.read(layer->layer_id, 0)) {
             std::cerr << "[SLHA] shadow score: unsupported shape (q="
                       << q->ne[0] << "," << q->ne[1] << "," << q->ne[2] << "," << q->ne[3]
                       << " kq=" << kq->ne[0] << "," << kq->ne[1] << "," << kq->ne[2] << "," << kq->ne[3]
@@ -447,7 +508,7 @@ void slha_shadow_score(
     const int64_t n_stream = kq->ne[3];
 
     if (layer->n_embd_gqa == 0 || layer->n_embd_gqa % head_dim != 0) {
-        if (ith == 0) {
+        if (ith == 0 && g_slha_tile_store.read(layer->layer_id, 0)) {
             std::cerr << "[SLHA] shadow score: unsupported dimensions: n_embd_gqa="
                       << layer->n_embd_gqa << " head_dim=" << head_dim << "\n";
         }
@@ -456,7 +517,7 @@ void slha_shadow_score(
 
     const int64_t n_kv_head = layer->n_embd_gqa / head_dim;
     if (n_kv_head == 0 || n_head % n_kv_head != 0) {
-        if (ith == 0) {
+        if (ith == 0 && g_slha_tile_store.read(layer->layer_id, 0)) {
             std::cerr << "[SLHA] shadow score: bad GQA geometry n_head=" << n_head
                       << " n_kv_head=" << n_kv_head << "\n";
         }
@@ -567,9 +628,14 @@ void slha_shadow_score(
         }
 
         const float * kq_head = kq_data + s * kq_stream_stride + t * kq_token_stride + h * kq_head_stride;
+        std::vector<double> baseline_vec(static_cast<size_t>(n_kv));
+        std::vector<double> slha_vec(static_cast<size_t>(n_kv));
         for (int64_t k = 0; k < n_kv; ++k) {
+            baseline_vec[k] = static_cast<double>(kq_head[k]);
+            slha_vec[k] = static_cast<double>(scores[k]);
             layer->shadow_metrics->add_sample(kq_head[k], scores[k]);
         }
+        layer->shadow_metrics->add_vector(baseline_vec, slha_vec);
     }
 }
 

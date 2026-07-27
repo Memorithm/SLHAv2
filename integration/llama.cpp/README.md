@@ -114,7 +114,7 @@ Qwen2.5-1.5B-Instruct Q8_0, WikiText-2 test, 12 chunks, 512 context, 4 threads.
 | passthrough | 11.8753  |          0.00 |          0.0% | 44.81 | hook sanity     |
 | mixed       | 16.5976  |          4.72 |         39.8% | 42.28 | SLHA round-trip |
 | mix3        | 16.6460  |          4.77 |         40.2% | 42.22 | SLHA round-trip |
-| shadow      | 11.8699  |         -0.01 |         -0.0% |  ~48  | score-only gate |
+| shadow      | 11.8699  |         -0.01 |         -0.0% | 22.44 | score-only gate; cosine 0.73-0.91, top-1 35-76%, top-5 43-57% |
 
 See [`results/measurements.json`](results/measurements.json) for exact SHAs,
 commands, and timestamps.

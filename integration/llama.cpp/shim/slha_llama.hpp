@@ -50,6 +50,7 @@ struct slha_tile_store {
 struct slha_shadow_metrics {
     mutable std::mutex mutex;
     size_t n_samples = 0;
+    size_t n_vectors = 0;
     double max_abs_error = 0.0;
     double sum_abs_error = 0.0;
     double sum_rel_l2 = 0.0;
@@ -57,10 +58,12 @@ struct slha_shadow_metrics {
     double sum_pearson = 0.0;
     double sum_spearman = 0.0;
     double sum_top1_overlap = 0.0;
+    double sum_top5_overlap = 0.0;
     size_t n_finite = 0;
     size_t n_mismatch = 0;
 
     void add_sample(double baseline, double slha);
+    void add_vector(const std::vector<double> & baseline, const std::vector<double> & slha);
     void print(int32_t layer_id) const;
 };
 
