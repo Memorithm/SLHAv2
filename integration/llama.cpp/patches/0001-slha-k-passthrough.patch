@@ -1,12 +1,15 @@
 diff -ru llama.cpp/src/CMakeLists.txt llama.cpp.modified/src/CMakeLists.txt
 --- llama.cpp/src/CMakeLists.txt	2026-07-27 16:36:07.273487000 +0200
 +++ llama.cpp.modified/src/CMakeLists.txt	2026-07-27 16:41:59.443164178 +0200
-@@ -43,6 +43,10 @@
+@@ -43,6 +43,13 @@
              ${LLAMA_MODELS_SOURCES}
              )
  
 +if (SLHA_INTEGRATION)
 +    target_sources(llama PRIVATE slha_llama.cpp)
++    target_compile_definitions(llama PRIVATE SLHA_INTEGRATION)
++    target_include_directories(llama PRIVATE ${SLHA_INCLUDE_DIR})
++    target_link_libraries(llama PRIVATE ${SLHA_LIB})
 +endif()
 +
  set_target_properties(llama PROPERTIES

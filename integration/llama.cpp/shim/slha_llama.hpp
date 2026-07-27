@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -26,7 +27,19 @@ struct slha_layer_state {
     
     // For collect mode
     std::vector<float> collected_k;
-    std::mutex collect_mutex;
+    std::unique_ptr<std::mutex> collect_mutex;
+    
+    slha_layer_state() : layer_id(0), n_embd_gqa(0), mode(SLHA_KV_OFF), 
+                         model_handle(nullptr), scratch(nullptr),
+                         collect_mutex(std::make_unique<std::mutex>()) {}
+    
+    // Non-copyable due to mutex
+    slha_layer_state(const slha_layer_state&) = delete;
+    slha_layer_state& operator=(const slha_layer_state&) = delete;
+    
+    // Movable
+    slha_layer_state(slha_layer_state&&) = default;
+    slha_layer_state& operator=(slha_layer_state&&) = default;
 };
 
 slha_kv_mode slha_kv_mode_from_env();

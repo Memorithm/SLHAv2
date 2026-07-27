@@ -580,6 +580,64 @@ pub unsafe extern "C" fn slha_decode_latent(
     })
 }
 
+/// Decode a full tile (latent + residual sign sketch) back into the original
+/// `d`-dimensional key vector.
+///
+/// Output is not modified on failure.
+///
+/// # Safety
+/// `model` must be a live model handle. `tile` points to one readable tile.
+/// `out` points to `d` writable f32s. Unaligned tile and output storage are
+/// accepted.
+#[no_mangle]
+pub unsafe extern "C" fn slha_decode_key(
+    model: *const SlhaModel,
+    tile: *const SciRustSlhaTile,
+    out: *mut f32,
+    d: usize,
+) -> i32 {
+    ffi_status(|| {
+        if tile.is_null() || out.is_null() {
+            return Err(ffi_error(
+                SLHA_ERR_NULL,
+                "slha_decode_key received a NULL data pointer",
+            ));
+        }
+
+        // SAFETY: the caller promises a live handle.
+        let model = unsafe { model_ref(model)? };
+
+        if d != model.inner.d {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                format!(
+                    "output dimension mismatch: received {d}, expected {}",
+                    model.inner.d
+                ),
+            ));
+        }
+
+        // SAFETY: the caller guarantees readable storage for one tile.
+        let tile = unsafe { tile.read_unaligned() };
+        validate_tile(&tile)?;
+
+        let reconstruction = model.inner.reconstruct_from_tile(&tile);
+
+        if reconstruction.len() != d {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                "model reconstruction returned an unexpected length",
+            ));
+        }
+
+        validate_finite(&reconstruction, "reconstruction")?;
+
+        // SAFETY: the caller guarantees writable storage for d f32s.
+        unsafe { write_slice_unaligned(out, &reconstruction) };
+        Ok(())
+    })
+}
+
 /// Release a model and return an explicit status. NULL is a no-op.
 ///
 /// # Safety
@@ -839,5 +897,53 @@ mod tests {
 
         assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn decode_key_reconstructs_residual_beyond_latent_only() {
+        let d = 256usize;
+        let train = gen_keys(1, 512, d, 64, 0.9, 0.02);
+        let model = LearnedModel::fit(&train, d, 0xB0BA, false);
+        let mut path = std::env::temp_dir();
+        path.push(format!("slha_c_decode_key_{}.slhw", std::process::id()));
+        weights::save(path.to_str().unwrap(), &model, 0xB0BA, false).expect("save weights");
+
+        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+        let handle = unsafe { slha_weights_load(cpath.as_ptr()) };
+        assert!(!handle.is_null());
+
+        let key = &gen_keys(2, 1, d, 64, 0.9, 0.02)[0];
+        let mut tile_storage = vec![0u8; size_of::<SciRustSlhaTile>()];
+        let tile = tile_storage.as_mut_ptr() as *mut SciRustSlhaTile;
+
+        let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, 0, 3, tile) };
+        assert_eq!(rc, SLHA_OK);
+
+        let mut latent = vec![0.0f32; d];
+        let mut full = vec![0.0f32; d];
+        assert_eq!(
+            unsafe { slha_decode_latent(handle, tile, latent.as_mut_ptr(), d) },
+            SLHA_OK
+        );
+        assert_eq!(
+            unsafe { slha_decode_key(handle, tile, full.as_mut_ptr(), d) },
+            SLHA_OK
+        );
+
+        let snr_latent = snr(key, &latent);
+        let snr_full = snr(key, &full);
+        assert!(
+            snr_full > snr_latent,
+            "full reconstruction ({snr_full} dB) should beat latent-only ({snr_latent} dB)"
+        );
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+
+        fn snr(a: &[f32], b: &[f32]) -> f32 {
+            let signal: f32 = a.iter().map(|x| x * x).sum();
+            let error: f32 = a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum();
+            10.0 * (signal / error.max(1e-12)).log10()
+        }
     }
 }

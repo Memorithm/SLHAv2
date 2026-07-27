@@ -1,5 +1,7 @@
 #include "slha_llama.hpp"
 
+#include "slha.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +18,7 @@ namespace {
 
 struct GlobalState {
     slha_kv_mode mode = SLHA_KV_OFF;
+    std::string weights_dir;
     std::vector<slha_layer_state> layers;
     std::mutex mutex;
     bool initialized = false;
@@ -55,6 +58,8 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
 
     state.mode = mode;
 
+    state.weights_dir = weights_dir ? weights_dir : "";
+
     if (mode == SLHA_KV_OFF) {
         state.initialized = true;
         return 0;
@@ -63,15 +68,16 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
     if (mode == SLHA_KV_PASSTHROUGH) {
         std::cout << "[SLHA] passthrough mode enabled (no compression)\n";
         state.initialized = true;
+        std::atexit(slha_global_shutdown);
         return 0;
     }
 
     if (mode == SLHA_KV_ROUNDTRIP || mode == SLHA_KV_COLLECT) {
-        if (!weights_dir) {
+        if (state.weights_dir.empty()) {
             std::cerr << "[SLHA] roundtrip/collect mode requires weights_dir\n";
             return -1;
         }
-        
+
         // Create layer states for up to 128 layers (will be initialized on first use)
         state.num_layers = 128;
         state.layers.resize(state.num_layers);
@@ -82,10 +88,11 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
             state.layers[i].model_handle = nullptr;
             state.layers[i].scratch = nullptr;
         }
-        
+
         std::cout << "[SLHA] " << (mode == SLHA_KV_ROUNDTRIP ? "roundtrip" : "collect")
-                  << " mode enabled, weights_dir=" << weights_dir << "\n";
+                  << " mode enabled, weights_dir=" << state.weights_dir << "\n";
         state.initialized = true;
+        std::atexit(slha_global_shutdown);
         return 0;
     }
 
@@ -98,11 +105,10 @@ void slha_global_shutdown() {
 
     // Flush collected activations if in collect mode
     if (state.mode == SLHA_KV_COLLECT) {
-        const char * output_dir = std::getenv("SLHA_WEIGHTS_DIR");
-        if (output_dir) {
+        if (!state.weights_dir.empty()) {
             // Unlock before calling flush (it will re-lock per layer)
             state.mutex.unlock();
-            slha_flush_collected_activations(output_dir);
+            slha_flush_collected_activations(state.weights_dir.c_str());
             state.mutex.lock();
         }
     }
@@ -134,6 +140,62 @@ slha_layer_state * slha_get_layer_state(int32_t il) {
     }
     return &state.layers[il];
 }
+
+namespace {
+
+int32_t slha_codec_from_env() {
+    const char * env = std::getenv("SLHA_CODEC");
+    if (!env) {
+        return SLHA_CODEC_MIXED;
+    }
+    std::string codec_str(env);
+    if (codec_str == "mixed")  return SLHA_CODEC_MIXED;
+    if (codec_str == "mix3")   return SLHA_CODEC_MIX3;
+    if (codec_str == "grouped") return SLHA_CODEC_INT4_GROUPED;
+    if (codec_str == "nf4")    return SLHA_CODEC_NF4;
+    if (codec_str == "tq3")    return SLHA_CODEC_TQ3;
+    std::cerr << "[SLHA] unknown SLHA_CODEC='" << codec_str
+              << "', falling back to mixed\n";
+    return SLHA_CODEC_MIXED;
+}
+
+std::string slha_layer_path(const std::string & weights_dir, int32_t layer_id) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "layer-%03d.slhw", layer_id);
+    return weights_dir + "/" + name;
+}
+
+bool slha_load_layer_model(slha_layer_state * layer, const std::string & weights_dir) {
+    if (layer->model_handle) {
+        return true;
+    }
+
+    std::string path = slha_layer_path(weights_dir, layer->layer_id);
+    SlhaModel * model = slha_weights_load(path.c_str());
+    if (!model) {
+        std::cerr << "[SLHA] layer " << layer->layer_id
+                  << ": failed to load weights from " << path
+                  << ": " << slha_last_error_message() << "\n";
+        layer->mode = SLHA_KV_OFF;
+        return false;
+    }
+
+    size_t expected_dim = static_cast<size_t>(layer->n_embd_gqa);
+    size_t model_dim = slha_model_dim(model);
+    if (model_dim != expected_dim) {
+        std::cerr << "[SLHA] layer " << layer->layer_id
+                  << ": dimension mismatch: model d=" << model_dim
+                  << ", expected " << expected_dim << "\n";
+        slha_weights_free(model);
+        layer->mode = SLHA_KV_OFF;
+        return false;
+    }
+
+    layer->model_handle = model;
+    return true;
+}
+
+} // namespace
 
 void slha_k_transform(
     ggml_tensor * dst,
@@ -192,7 +254,7 @@ void slha_k_transform(
         
         // Update dimension on first call (any thread can do this).
         if (layer->n_embd_gqa == 0) {
-            std::lock_guard<std::mutex> lock(layer->collect_mutex);
+            std::lock_guard<std::mutex> lock(*layer->collect_mutex);
             if (layer->n_embd_gqa == 0) {  // Double-check after acquiring lock
                 layer->n_embd_gqa = n_embd_gqa;
                 std::cout << "[SLHA] layer " << layer->layer_id 
@@ -229,7 +291,7 @@ void slha_k_transform(
         
         // Each thread collects its assigned tokens with mutex protection.
         {
-            std::lock_guard<std::mutex> lock(layer->collect_mutex);
+            std::lock_guard<std::mutex> lock(*layer->collect_mutex);
             for (int64_t t = token_start; t < token_end; ++t) {
                 const float * src_row = src_data + t * n_embd_gqa;
                 layer->collected_k.insert(
@@ -253,7 +315,121 @@ void slha_k_transform(
         return;
     }
 
-    // SLHA_KV_ROUNDTRIP is not yet implemented.
+    if (layer->mode == SLHA_KV_ROUNDTRIP) {
+        // First call: set the expected dimension and load the per-layer projection.
+        // Hold the per-layer mutex so that other threads do not observe a set
+        // dimension before the model handle is installed.
+        {
+            std::lock_guard<std::mutex> lock(*layer->collect_mutex);
+            if (layer->n_embd_gqa == 0) {
+                layer->n_embd_gqa = n_embd_gqa;
+                std::cout << "[SLHA] layer " << layer->layer_id
+                          << " roundtrip dim=" << n_embd_gqa << "\n";
+            }
+            if (!layer->model_handle) {
+                auto & state = get_global_state();
+                slha_load_layer_model(layer, state.weights_dir);
+            }
+        }
+
+        if (layer->mode == SLHA_KV_OFF) {
+            // Model loading failed: copy through unchanged.
+            const size_t row_bytes = ggml_row_size(a->type, n_embd_gqa);
+            const uint8_t * src = static_cast<const uint8_t *>(a->data);
+            uint8_t * dst_data = static_cast<uint8_t *>(dst->data);
+            for (int64_t t = token_start; t < token_end; ++t) {
+                std::memcpy(dst_data + t * dst->nb[1], src + t * a->nb[1], row_bytes);
+            }
+            return;
+        }
+
+        if (a->type != GGML_TYPE_F32) {
+            const size_t row_bytes = ggml_row_size(a->type, n_embd_gqa);
+            const uint8_t * src = static_cast<const uint8_t *>(a->data);
+            uint8_t * dst_data = static_cast<uint8_t *>(dst->data);
+            for (int64_t t = token_start; t < token_end; ++t) {
+                std::memcpy(dst_data + t * dst->nb[1], src + t * a->nb[1], row_bytes);
+            }
+            if (ith == 0) {
+                std::cerr << "[SLHA] WARNING: layer " << layer->layer_id
+                          << " roundtrip requires F32 input, got type " << a->type
+                          << "; passing through\n";
+            }
+            return;
+        }
+
+        SlhaModel * model = static_cast<SlhaModel *>(layer->model_handle);
+        if (!model) {
+            const size_t row_bytes = ggml_row_size(a->type, n_embd_gqa);
+            const uint8_t * src = static_cast<const uint8_t *>(a->data);
+            uint8_t * dst_data = static_cast<uint8_t *>(dst->data);
+            for (int64_t t = token_start; t < token_end; ++t) {
+                std::memcpy(dst_data + t * dst->nb[1], src + t * a->nb[1], row_bytes);
+            }
+            if (ith == 0) {
+                std::cerr << "[SLHA] WARNING: layer " << layer->layer_id
+                          << " has no model; passing through\n";
+            }
+            return;
+        }
+
+        const int32_t codec = slha_codec_from_env();
+        const size_t d = static_cast<size_t>(n_embd_gqa);
+        const size_t row_bytes = ggml_row_size(a->type, n_embd_gqa);
+        const size_t src_stride = a->nb[1];
+        const size_t dst_stride = dst->nb[1];
+
+        thread_local std::vector<float> in_row;
+        thread_local std::vector<float> out_row;
+        in_row.resize(d);
+        out_row.resize(d);
+
+        const uint8_t * src_base = static_cast<const uint8_t *>(a->data);
+        uint8_t * dst_base = static_cast<uint8_t *>(dst->data);
+
+        for (int64_t t = token_start; t < token_end; ++t) {
+            const float * src_ptr;
+            float * dst_ptr;
+            if (src_stride == row_bytes && dst_stride == row_bytes) {
+                src_ptr = reinterpret_cast<const float *>(src_base + t * src_stride);
+                dst_ptr = reinterpret_cast<float *>(dst_base + t * dst_stride);
+            } else {
+                const uint8_t * src_row = src_base + t * src_stride;
+                for (size_t i = 0; i < d; ++i) {
+                    in_row[i] = reinterpret_cast<const float *>(src_row)[i];
+                }
+                src_ptr = in_row.data();
+                dst_ptr = out_row.data();
+            }
+
+            alignas(SLHA_TILE_ALIGN) SciRustSlhaTile tile;
+            int rc = slha_encode_key(model, src_ptr, d, static_cast<uint32_t>(t), codec, &tile);
+            if (rc != SLHA_OK) {
+                std::cerr << "[SLHA] layer " << layer->layer_id
+                          << " token " << t << " encode failed: "
+                          << slha_last_error_message() << "; passing through\n";
+                std::memcpy(dst_ptr, src_ptr, row_bytes);
+                continue;
+            }
+
+            rc = slha_decode_key(model, &tile, dst_ptr, d);
+            if (rc != SLHA_OK) {
+                std::cerr << "[SLHA] layer " << layer->layer_id
+                          << " token " << t << " decode failed: "
+                          << slha_last_error_message() << "; passing through\n";
+                std::memcpy(dst_ptr, src_ptr, row_bytes);
+                continue;
+            }
+
+            if (dst_stride != row_bytes) {
+                uint8_t * dst_row = dst_base + t * dst_stride;
+                for (size_t i = 0; i < d; ++i) {
+                    reinterpret_cast<float *>(dst_row)[i] = out_row[i];
+                }
+            }
+        }
+        return;
+    }
 }
 
 void slha_flush_collected_activations(const char * output_dir) {
@@ -279,7 +455,7 @@ void slha_flush_collected_activations(const char * output_dir) {
         
         // Copy data under lock, then release before I/O.
         {
-            std::lock_guard<std::mutex> lock(layer.collect_mutex);
+            std::lock_guard<std::mutex> lock(*layer.collect_mutex);
             if (layer.collected_k.empty()) {
                 continue;
             }

@@ -8,11 +8,13 @@ set -euo pipefail
 
 WORK="${WORK:-/tmp/slha-llama}"
 LLAMA_TAG="${LLAMA_TAG:-b9860}"
-MODEL_REPO="${MODEL_REPO:-Qwen/Qwen2.5-0.5B-Instruct-GGUF}"
-MODEL_FILE="${MODEL_FILE:-qwen2.5-0.5b-instruct-q8_0.gguf}"
+MODEL_REPO="${MODEL_REPO:-Qwen/Qwen2.5-1.5B-Instruct-GGUF}"
+MODEL_FILE="${MODEL_FILE:-qwen2.5-1.5b-instruct-q8_0.gguf}"
 CHUNKS="${CHUNKS:-12}"
 THREADS="${THREADS:-4}"
 MODE="${1:-passthrough}"
+DATA_FILE="${DATA_FILE:-$WORK/wiki.test.raw}"
+CALIB_DIR="${CALIB_DIR:-$WORK/calibration}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$SCRIPT_DIR/../../..")"
@@ -67,10 +69,12 @@ if [ "$MODE" != "baseline" ]; then
 fi
 
 # 4. Build llama.cpp.
-echo "== building llama.cpp =="
+echo "== building llama.cpp ==="
 CMAKE_FLAGS="-DGGML_NATIVE=ON -DLLAMA_CURL=OFF"
 if [ "$MODE" != "baseline" ]; then
     CMAKE_FLAGS="$CMAKE_FLAGS -DSLHA_INTEGRATION=ON"
+    CMAKE_FLAGS="$CMAKE_FLAGS -DSLHA_INCLUDE_DIR=$REPO_ROOT/slha-c/include"
+    CMAKE_FLAGS="$CMAKE_FLAGS -DSLHA_LIB=$REPO_ROOT/target/release/libslha.a"
 fi
 
 cmake -S llama.cpp -B llama.cpp/build $CMAKE_FLAGS >/dev/null
@@ -87,10 +91,10 @@ hf_hub_download(repo_id=sys.argv[1], filename=sys.argv[2], local_dir=sys.argv[3]
 PY
 fi
 
-# 6. WikiText-2 test slice.
-if [ ! -f wiki.test.raw ]; then
-    echo "== building wikitext-2 slice =="
-    python3 - <<'PY' || echo "  provide wiki.test.raw manually"
+# 6. Dataset slice (default: WikiText-2 test; override with DATA_FILE).
+if [ ! -f "$DATA_FILE" ]; then
+  echo "== building default wikitext-2 test slice =="
+  python3 - <<'PY' || echo "  provide DATA_FILE manually"
 from datasets import load_dataset
 d = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
 open("wiki.test.raw","w").write("\n".join(x for x in d["text"] if x.strip())[:120000])
@@ -108,14 +112,18 @@ elif [ "$MODE" = "roundtrip" ]; then
     export SLHA_WEIGHTS_DIR="$WORK/weights"
 elif [ "$MODE" = "collect" ]; then
     export SLHA_KV_MODE=collect
-    export SLHA_WEIGHTS_DIR="$WORK/weights"
+    export SLHA_WEIGHTS_DIR="$CALIB_DIR"
 else
     unset SLHA_KV_MODE
 fi
 
-OUTPUT_FILE="$WORK/${MODE}_ppl.txt"
+if [ "$MODE" = "roundtrip" ]; then
+    OUTPUT_FILE="$WORK/${MODE}_${SLHA_CODEC:-mixed}_ppl.txt"
+else
+    OUTPUT_FILE="$WORK/${MODE}_ppl.txt"
+fi
 llama.cpp/build/bin/llama-perplexity \
-    -m "$MODEL_FILE" -f wiki.test.raw --chunks "$CHUNKS" -t "$THREADS" \
+    -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" \
     2>&1 | tee "$OUTPUT_FILE" | grep -E "Final estimate|PPL"
 
 echo
