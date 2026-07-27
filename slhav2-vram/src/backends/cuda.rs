@@ -2,8 +2,13 @@ use std::error::Error;
 use std::ffi::CString;
 use std::fmt;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::traits::{DeviceAllocation, DeviceEngine};
+
+// ── Global CUDA backing allocation counter ───────────────────────────────────
+
+static CUDA_BACKING_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 // ── Opaque CUDA handle types ──────────────────────────────────────────────
 
@@ -101,6 +106,7 @@ impl Drop for CudaAllocation {
             cuCtxSetCurrent(ctx);
             cuMemFree_v2(self.ptr);
         }
+        CUDA_BACKING_ALLOCATIONS.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -213,6 +219,130 @@ impl CudaEngine {
         })
     }
 
+    pub fn backing_allocation_count() -> usize {
+        CUDA_BACKING_ALLOCATIONS.load(Ordering::SeqCst)
+    }
+
+    pub fn copy_to_device_at(
+        &self,
+        src: &[u8],
+        dst: &mut CudaAllocation,
+        dst_offset_bytes: usize,
+    ) -> Result<(), CudaError> {
+        let end = dst_offset_bytes
+            .checked_add(src.len())
+            .ok_or_else(|| CudaError("copy_to_device_at: offset + length overflow".into()))?;
+        if end > dst.len {
+            return Err(CudaError(format!(
+                "copy_to_device_at: offset {} + size {} exceeds allocation size {}",
+                dst_offset_bytes,
+                src.len(),
+                dst.len
+            )));
+        }
+        unsafe {
+            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
+        }
+        unsafe {
+            cuda_check(
+                cuMemcpyHtoD_v2(
+                    dst.ptr + dst_offset_bytes as u64,
+                    src.as_ptr() as *const libc::c_void,
+                    src.len() as u64,
+                ),
+                "cuMemcpyHtoD_v2",
+            )
+        }
+    }
+
+    pub fn copy_to_host_at(
+        &self,
+        src: &CudaAllocation,
+        src_offset_bytes: usize,
+        dst: &mut [u8],
+    ) -> Result<(), CudaError> {
+        let end = src_offset_bytes
+            .checked_add(dst.len())
+            .ok_or_else(|| CudaError("copy_to_host_at: offset + length overflow".into()))?;
+        if end > src.len {
+            return Err(CudaError(format!(
+                "copy_to_host_at: offset {} + size {} exceeds allocation size {}",
+                src_offset_bytes,
+                dst.len(),
+                src.len
+            )));
+        }
+        unsafe {
+            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
+        }
+        unsafe {
+            cuda_check(
+                cuMemcpyDtoH_v2(
+                    dst.as_ptr() as *mut libc::c_void,
+                    src.ptr + src_offset_bytes as u64,
+                    dst.len() as u64,
+                ),
+                "cuMemcpyDtoH_v2",
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn score_tiles_at(
+        &self,
+        q_coarse_dev: &CudaAllocation,
+        q_coarse_offset: usize,
+        q_sign_dev: &CudaAllocation,
+        q_sign_offset: usize,
+        tiles_dev: &CudaAllocation,
+        tiles_offset: usize,
+        scores_dev: &CudaAllocation,
+        scores_offset: usize,
+        num_tiles: i32,
+        kernel: &CudaFunction,
+    ) -> Result<(), CudaError> {
+        if num_tiles <= 0 {
+            return Ok(());
+        }
+
+        let q_coarse_ptr = q_coarse_dev.ptr + q_coarse_offset as u64;
+        let q_sign_ptr = q_sign_dev.ptr + q_sign_offset as u64;
+        let tiles_ptr = tiles_dev.ptr + tiles_offset as u64;
+        let scores_ptr = scores_dev.ptr + scores_offset as u64;
+
+        let grid_dim = (num_tiles as usize).div_ceil(256) as u32;
+        let block_dim = 256u32;
+
+        let args: [*mut libc::c_void; 5] = [
+            &q_coarse_ptr as *const u64 as *mut libc::c_void,
+            &q_sign_ptr as *const u64 as *mut libc::c_void,
+            &tiles_ptr as *const u64 as *mut libc::c_void,
+            &scores_ptr as *const u64 as *mut libc::c_void,
+            &num_tiles as *const i32 as *mut libc::c_void,
+        ];
+
+        unsafe {
+            cuda_check(
+                cuLaunchKernel(
+                    kernel.func,
+                    grid_dim,
+                    1,
+                    1,
+                    block_dim,
+                    1,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    args.as_ptr(),
+                    std::ptr::null_mut(),
+                ),
+                "cuLaunchKernel",
+            )?;
+        }
+
+        Ok(())
+    }
+
     pub fn load_ptx(&self, ptx_bytes: &[u8]) -> Result<CudaModule, CudaError> {
         // cuModuleLoadData requires the PTX data to remain valid for the
         // duration of the call. Append a NUL terminator to be safe.
@@ -306,6 +436,8 @@ impl DeviceEngine for CudaEngine {
                 "cuMemAlloc_v2",
             )?;
         }
+
+        CUDA_BACKING_ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
 
         Ok(CudaAllocation {
             ptr,

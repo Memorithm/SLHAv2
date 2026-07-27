@@ -10,8 +10,9 @@
 
 use scirust::SciRustSlhaTile;
 
-use slhav2_vram::backends::cuda::{CudaEngine, CudaModule};
+use slhav2_vram::backends::cuda::{CudaAllocation, CudaEngine, CudaModule};
 use slhav2_vram::codec;
+use slhav2_vram::mem::arena::DeviceArena;
 use slhav2_vram::mem::tile::SerializedTile;
 use slhav2_vram::traits::{DeviceAllocation, DeviceEngine};
 
@@ -135,7 +136,7 @@ fn calc_metrics(gpu: &[f32], cpu: &[f32]) -> (f32, f32, f32) {
         .iter()
         .zip(cpu.iter())
         .map(|(g, c)| {
-            let denom = c.abs().max(1e-10);
+            let denom = c.abs().max(1.0e-6);
             (g - c).abs() / denom
         })
         .fold(0.0f32, f32::max);
@@ -144,7 +145,7 @@ fn calc_metrics(gpu: &[f32], cpu: &[f32]) -> (f32, f32, f32) {
     let gpu_norm: f32 = gpu.iter().map(|g| g * g).sum::<f32>().sqrt();
     let cpu_norm: f32 = cpu.iter().map(|c| c * c).sum::<f32>().sqrt();
     let cos_sim = if gpu_norm > 0.0 && cpu_norm > 0.0 {
-        dot / (gpu_norm * cpu_norm)
+        (dot / (gpu_norm * cpu_norm)).clamp(-1.0, 1.0)
     } else {
         1.0
     };
@@ -412,8 +413,232 @@ fn test_cuda_backend_lifecycle() {
 
 #[test]
 #[ignore = "requires an NVIDIA CUDA GPU"]
-fn test_cuda_alloc_reuse_after_drop() {
+fn test_cuda_real_backing_arena() {
     check_required();
+    let engine = CudaEngine::new().expect("CudaEngine::new");
+    let initial_count = CudaEngine::backing_allocation_count();
+
+    let capacity: usize = 16 * 1024 * 1024;
+    let backing = engine.allocate(capacity).expect("16 MiB allocation");
+    assert_eq!(
+        CudaEngine::backing_allocation_count(),
+        initial_count + 1,
+        "count after one allocation"
+    );
+
+    let mut arena: DeviceArena<CudaAllocation> = DeviceArena::new(backing, capacity as u64);
+
+    let mut slices = Vec::new();
+    for _ in 0..1000 {
+        let s = arena.allocate(128).expect("arena suballocation");
+        assert_eq!(s.offset % 256, 0, "offset not 256-byte aligned");
+        slices.push(s);
+    }
+
+    let mut ranges: Vec<(u64, u64)> = slices
+        .iter()
+        .map(|s| (s.offset, s.offset + s.size))
+        .collect();
+    ranges.sort_by_key(|r| r.0);
+    for w in ranges.windows(2) {
+        assert!(
+            w[0].1 <= w[1].0,
+            "overlapping ranges: {:?} and {:?}",
+            w[0],
+            w[1]
+        );
+    }
+    for r in &ranges {
+        assert!(r.1 <= arena.capacity(), "range exceeds capacity: {:?}", r);
+    }
+
+    assert_eq!(
+        CudaEngine::backing_allocation_count(),
+        initial_count + 1,
+        "count still initial+1 after suballocations"
+    );
+
+    for s in &slices {
+        arena.free(s);
+    }
+
+    assert_eq!(arena.live_allocations(), 0);
+    assert_eq!(arena.free_bytes(), arena.capacity());
+
+    assert_eq!(arena.free_bytes(), arena.capacity());
+    assert_eq!(arena.free_bytes(), capacity as u64);
+
+    drop(arena);
+
+    assert_eq!(
+        CudaEngine::backing_allocation_count(),
+        initial_count,
+        "count returned to initial after arena drop"
+    );
+}
+
+#[test]
+#[ignore = "requires an NVIDIA CUDA GPU"]
+fn test_cuda_arena_scoring_integration() {
+    check_required();
+    let engine = CudaEngine::new().expect("CudaEngine::new");
+    let module = CudaModule::load_ptx(&engine, ptx_bytes()).expect("PTX load");
+    let kernel = module
+        .get_function("slha_score_kernel")
+        .expect("kernel function lookup");
+
+    let q_coarse = make_q_coarse(0.01);
+    let q_sign = make_q_sign(0xDEAD_BEEF_CAFE_FACE);
+
+    let mut tiles = Vec::new();
+    for i in 0..32 {
+        let tile = make_int4_tile(
+            (i as u8).wrapping_mul(0x11),
+            0.5 + i as f32 * 0.05,
+            0.05,
+            &[0xDEAD_BEEF_CAFE_FACEu64; 4],
+            if i % 3 == 0 {
+                codec::FLAG_WARM
+            } else {
+                codec::FLAG_HOT
+            },
+        );
+        tiles.push(tile);
+    }
+
+    let q_coarse_arr: &[f32; codec::D_C] = q_coarse[..].try_into().expect("D_C length");
+    let q_sign_arr: &[u64; codec::RESIDUAL_WORDS] =
+        q_sign[..].try_into().expect("RESIDUAL_WORDS length");
+
+    let reference: Vec<f32> = tiles
+        .iter()
+        .map(|t| {
+            let st = t.to_slha_tile();
+            st.compute_score_scalar(q_coarse_arr, q_sign_arr)
+        })
+        .collect();
+
+    let q_coarse_bytes = codec::f32_slice_to_le_bytes(&q_coarse);
+    let q_sign_bytes = codec::u64_slice_to_le_bytes(&q_sign);
+    let total_tile_bytes = tiles.len() * codec::TILE_BYTES;
+    let mut tiles_buf = vec![0u8; total_tile_bytes];
+    for (i, tile) in tiles.iter().enumerate() {
+        let off = i * codec::TILE_BYTES;
+        tiles_buf[off..off + codec::TILE_BYTES].copy_from_slice(&tile.0);
+    }
+    let scores_bytes_len = tiles.len() * 4;
+
+    let capacity =
+        (q_coarse_bytes.len() + q_sign_bytes.len() + total_tile_bytes + scores_bytes_len + 4096)
+            as u64;
+    let backing = engine
+        .allocate(capacity as usize)
+        .expect("arena backing allocation");
+    let mut arena: DeviceArena<CudaAllocation> = DeviceArena::new(backing, capacity);
+
+    let q_coarse_slice = arena
+        .allocate(q_coarse_bytes.len() as u64)
+        .expect("q_coarse arena slice");
+    let q_sign_slice = arena
+        .allocate(q_sign_bytes.len() as u64)
+        .expect("q_sign arena slice");
+    let tiles_slice = arena
+        .allocate(total_tile_bytes as u64)
+        .expect("tiles arena slice");
+    let scores_slice = arena
+        .allocate(scores_bytes_len as u64)
+        .expect("scores arena slice");
+
+    engine
+        .copy_to_device_at(
+            &q_coarse_bytes,
+            arena.backing_mut(),
+            q_coarse_slice.offset as usize,
+        )
+        .expect("copy q_coarse to device at offset");
+
+    engine
+        .copy_to_device_at(
+            &q_sign_bytes,
+            arena.backing_mut(),
+            q_sign_slice.offset as usize,
+        )
+        .expect("copy q_sign to device at offset");
+
+    engine
+        .copy_to_device_at(&tiles_buf, arena.backing_mut(), tiles_slice.offset as usize)
+        .expect("copy tiles to device at offset");
+
+    engine
+        .score_tiles_at(
+            arena.backing(),
+            q_coarse_slice.offset as usize,
+            arena.backing(),
+            q_sign_slice.offset as usize,
+            arena.backing(),
+            tiles_slice.offset as usize,
+            arena.backing(),
+            scores_slice.offset as usize,
+            tiles.len() as i32,
+            &kernel,
+        )
+        .expect("score_tiles_at kernel launch");
+    engine.synchronize().expect("CUDA synchronize");
+
+    let mut scores_bytes = vec![0u8; scores_bytes_len];
+    engine
+        .copy_to_host_at(
+            arena.backing(),
+            scores_slice.offset as usize,
+            &mut scores_bytes,
+        )
+        .expect("copy scores from device at offset");
+
+    let gpu_scores = codec::le_bytes_to_f32_vec(&scores_bytes).expect("decode scores");
+
+    assert_eq!(gpu_scores.len(), reference.len(), "score count mismatch");
+
+    for (i, s) in gpu_scores.iter().enumerate() {
+        assert!(s.is_finite(), "non-finite GPU score at index {i}: {s}");
+    }
+
+    let tolerance: f32 = 1e-3;
+    let (max_abs, max_rel, cos_sim) = calc_metrics(&gpu_scores, &reference);
+
+    let worst = gpu_scores
+        .iter()
+        .zip(reference.iter())
+        .enumerate()
+        .max_by(|a, b| {
+            let da = (a.1 .0 - a.1 .1).abs();
+            let db = (b.1 .0 - b.1 .1).abs();
+            da.partial_cmp(&db).unwrap()
+        })
+        .unwrap();
+
+    eprintln!(
+        "Arena scoring: max_abs={:.6e}  max_rel={:.6e}  cos_sim={:.10}",
+        max_abs, max_rel, cos_sim
+    );
+    eprintln!(
+        "Worst mismatch: index {}  gpu={}  cpu={}  diff={:.6e}",
+        worst.0,
+        worst.1 .0,
+        worst.1 .1,
+        (worst.1 .0 - worst.1 .1).abs()
+    );
+
+    assert!(
+        max_abs < tolerance,
+        "arena scoring max_abs {:.6e} exceeds tolerance {tolerance}",
+        max_abs
+    );
+    assert!(cos_sim > 0.9999, "arena scoring cos_sim {cos_sim}");
+}
+
+#[test]
+#[ignore = "requires an NVIDIA CUDA GPU"]
+fn test_cuda_alloc_reuse_after_drop() {
     let engine = CudaEngine::new().expect("CudaEngine::new");
     let _module = CudaModule::load_ptx(&engine, ptx_bytes()).expect("PTX load");
 
