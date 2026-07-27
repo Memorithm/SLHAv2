@@ -1,4 +1,4 @@
-#![cfg(feature = "cuda")]
+#![cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 #![allow(
     clippy::needless_range_loop,
     dead_code,

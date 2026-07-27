@@ -1,3 +1,3 @@
 pub mod cpu;
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 pub mod cuda;

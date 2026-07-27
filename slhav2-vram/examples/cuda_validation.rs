@@ -2,12 +2,12 @@
 //!   cargo run --features cuda --example cuda_validation
 //!   compute-sanitizer --tool memcheck target/debug/examples/cuda_validation
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 use slhav2_vram::codec;
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 use slhav2_vram::mem::tile::SerializedTile;
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 fn make_test_tile(scale: f32, warm: bool) -> SerializedTile {
     let mut tile = SerializedTile::zeroed();
     tile.set_scale(scale);
@@ -33,7 +33,15 @@ fn main() {
     std::process::exit(0);
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(slhav2_cuda_ptx)))]
+fn main() {
+    eprintln!("CUDA validation unavailable: no real PTX was generated.");
+    eprintln!("Install nvcc, set SLHAV2_NVCC, or provide SLHAV2_PTX_PATH.");
+    eprintln!("Set SLHAV2_REQUIRE_NVCC=1 to make the build fail immediately.");
+    std::process::exit(1);
+}
+
+#[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 fn run_validation() -> Result<(), Box<dyn std::error::Error>> {
     use slhav2_vram::backends::cuda::{CudaEngine, CudaModule};
     use slhav2_vram::traits::DeviceEngine;
@@ -129,7 +137,7 @@ fn run_validation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 fn main() {
     match run_validation() {
         Ok(()) => {
