@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build llama.cpp with SLHA K-cache passthrough integration and run perplexity.
+# Build llama.cpp with SLHA K-cache integration and run perplexity.
 #
 # Usage: WORK=/path/to/scratch ./build_and_roundtrip.sh [mode]
 #
@@ -7,7 +7,8 @@
 set -euo pipefail
 
 WORK="${WORK:-/tmp/slha-llama}"
-LLAMA_TAG="${LLAMA_TAG:-b9860}"
+# Pinned llama.cpp commit for the SLHA integration patches.
+LLAMA_COMMIT="${LLAMA_COMMIT:-fdb1db877c526ec90f668eca1b858da5dba85560}"
 MODEL_REPO="${MODEL_REPO:-Qwen/Qwen2.5-1.5B-Instruct-GGUF}"
 MODEL_FILE="${MODEL_FILE:-qwen2.5-1.5b-instruct-q8_0.gguf}"
 CHUNKS="${CHUNKS:-12}"
@@ -25,7 +26,7 @@ cd "$WORK"
 echo "== SLHA K-cache integration build =="
 echo "  mode: $MODE"
 echo "  work: $WORK"
-echo "  llama.cpp tag: $LLAMA_TAG"
+echo "  llama.cpp commit: $LLAMA_COMMIT"
 
 # 1. Build slha-c (libslha) if needed.
 if [ "$MODE" != "baseline" ]; then
@@ -34,20 +35,60 @@ if [ "$MODE" != "baseline" ]; then
         echo "  (build slha-c from the SLHAv2 repo root: cargo build --release -p slha-c)"
 fi
 
-# 2. Clone + build llama.cpp.
+# 2. Clone + verify llama.cpp at the pinned commit.
 if [ ! -d llama.cpp ]; then
-    echo "== cloning llama.cpp @ $LLAMA_TAG =="
-    git clone --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp
+    echo "== cloning llama.cpp @ $LLAMA_COMMIT =="
+    git init llama.cpp
+    (
+        cd llama.cpp
+        git remote add origin https://github.com/ggml-org/llama.cpp
+        git fetch --depth=1 origin "$LLAMA_COMMIT"
+        git checkout "$LLAMA_COMMIT"
+    )
 fi
 
-# Verify the commit.
-LLAMA_COMMIT=$(cd llama.cpp && git rev-parse HEAD)
-echo "  llama.cpp commit: $LLAMA_COMMIT"
+# Verify the commit strictly.
+ACTUAL_COMMIT=$(cd llama.cpp && git rev-parse HEAD)
+if [ "$ACTUAL_COMMIT" != "$LLAMA_COMMIT" ]; then
+    echo "ERROR: llama.cpp commit mismatch"
+    echo "  expected: $LLAMA_COMMIT"
+    echo "  actual:   $ACTUAL_COMMIT"
+    echo "  remove $WORK/llama.cpp and re-run to clone the pinned commit"
+    exit 1
+fi
+echo "  llama.cpp commit verified: $ACTUAL_COMMIT"
 
 # 3. Apply patches if not baseline.
 if [ "$MODE" != "baseline" ]; then
     echo "== applying SLHA patches =="
-    
+
+    apply_patch_strict() {
+        local patch_file="$1"
+        local patch_name
+        patch_name="$(basename "$patch_file")"
+
+        echo "  checking $patch_name ..."
+        if git apply --check "$patch_file" 2>/dev/null; then
+            echo "  applying $patch_name ..."
+            if ! patch --fuzz=0 -p1 < "$patch_file"; then
+                echo "ERROR: $patch_name failed to apply"
+                exit 1
+            fi
+        elif git apply --check -R "$patch_file" 2>/dev/null; then
+            echo "  $patch_name already applied, skipping"
+        else
+            echo "ERROR: $patch_name does not apply cleanly to pinned llama.cpp commit"
+            echo "       expected commit: $LLAMA_COMMIT"
+            exit 1
+        fi
+
+        if find . -name "*.rej" -print -quit | grep -q .; then
+            echo "ERROR: reject files found after applying $patch_name"
+            find . -name "*.rej" -print
+            exit 1
+        fi
+    }
+
     # Apply each patch in order from patches/ directory.
     for PATCH_FILE in "$REPO_ROOT/integration/llama.cpp/patches/"*.patch; do
         PATCH_BASENAME="$(basename "$PATCH_FILE")"
@@ -55,12 +96,13 @@ if [ "$MODE" != "baseline" ]; then
             echo "  no patches found"
             break
         fi
-        echo "  applying $PATCH_BASENAME ..."
         cd llama.cpp
-        patch -p1 -N < "$PATCH_FILE" 2>/dev/null || echo "  (already applied or skipped)"
+        apply_patch_strict "$PATCH_FILE"
         cd ..
     done
-    
+
+    echo "  patch status: fuzz=0 offset=0 rejects=0"
+
     # Copy the shim files.
     echo "== copying SLHA shim =="
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_llama.hpp" llama.cpp/src/
@@ -131,4 +173,4 @@ llama.cpp/build/bin/llama-perplexity \
 echo
 echo "Results written to $OUTPUT_FILE"
 echo "Mode: $MODE"
-echo "llama.cpp commit: $LLAMA_COMMIT"
+echo "llama.cpp commit: $ACTUAL_COMMIT"

@@ -94,7 +94,7 @@ ggml_tensor * slha_build_score_diag(
     ggml_tensor * k,
     ggml_tensor * q,
     int il,
-    struct ggml_graph * gf
+    struct ggml_cgraph * gf
 );
 
 #endif

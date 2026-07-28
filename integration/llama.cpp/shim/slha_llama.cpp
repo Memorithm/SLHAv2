@@ -3,6 +3,7 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -243,7 +244,8 @@ void slha_k_transform(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth
         const size_t tile_sz = slha_tile_size();
         for (int64_t t = token_start; t < token_end; ++t) {
             const float * src_ptr = reinterpret_cast<const float *>(src_base + t * a->nb[1]);
-            size_t slot = static_cast<size_t>(token_start + t);
+            // The tile buffer is indexed by KV cache slot, i.e. the token index.
+            size_t slot = static_cast<size_t>(t);
             if (slot >= layer->tile_capacity) {
                 std::lock_guard<std::mutex> lock(*layer->collect_mutex);
                 layer->tile_capacity = slot + 1024;
@@ -316,7 +318,8 @@ void slha_score_diag_callback(
     ggml_tensor * dst, const ggml_tensor * a, const ggml_tensor * b,
     int ith, int nth, void * userdata)
 {
-    if (ith != 0) return; // only thread 0 does work
+    (void)nth; // only thread 0 performs the diagnostic work
+    if (ith != 0) return;
 
     auto * layer = static_cast<slha_layer_state *>(userdata);
     if (!layer || !layer->model_handle || ggml_nbytes(a) == 0) {
@@ -334,11 +337,6 @@ void slha_score_diag_callback(
     const int64_t n_embd_head_k = b->ne[0] > 0 ? b->ne[0] : 1;
     const int64_t n_head_q      = b->ne[2] > 0 ? b->ne[2] : 1;
     const int64_t n_tokens_q    = b->ne[1] > 0 ? b->ne[1] : 1;
-
-    // Strides for indexing into kq data
-    const int64_t kq_stride_t = n_kv;
-    const int64_t kq_stride_h = kq_stride_t * n_tokens_mul;
-    const int64_t kq_stride_s = kq_stride_h * n_head;
 
     // Strides for indexing into q data
     const int64_t q_stride_t = n_embd_head_k;
@@ -362,8 +360,18 @@ void slha_score_diag_callback(
     // Full query vector of dimension d = n_embd_gqa
     std::vector<float> full_q(d, 0.0f);
 
+    // Count every invocation so the execution gate is independent of whether
+    // this particular tensor shape produced comparable rows.
+    static std::atomic<int64_t> g_total_calls{0};
+    static std::atomic<int64_t> g_total_rows{0};
+    static std::atomic<int64_t> g_total_tiles{0};
+    static std::mutex log_mutex;
+    const int64_t call_no = g_total_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+
     double sum_cos = 0.0, sum_kl = 0.0;
     int64_t n_comparisons = 0;
+    int64_t n_rows = 0;
+    int64_t n_tiles_scored = 0;
 
     for (int64_t s = 0; s < n_stream; ++s) {
         for (int64_t h = 0; h < n_head; ++h) {
@@ -410,13 +418,6 @@ void slha_score_diag_callback(
                 // kq layout: [n_kv, n_tokens_mul, n_head, n_stream]
                 for (int64_t kv = 0; kv < n_kv; ++kv) {
                     true_scores[static_cast<size_t>(kv)] = kq_data[
-                        kv * kq_stride_t + t * kq_stride_t + h * kq_stride_h + s * kq_stride_s
-                        // Wait: access pattern:
-                        // kq_data[0]..kq_data[n_kv-1] = scores for all keys at (t=0, h=0, s=0)
-                        // Then stride is: element at (kv, t, h, s) = kq_data[kv + t*n_kv + h*n_kv*n_tokens_mul + s*n_kv*n_tokens_mul*n_head]
-                    ];
-                    // Correct indexing for row-major tensor with ne=[n_kv, n_tokens_mul, n_head, n_stream]:
-                    true_scores[static_cast<size_t>(kv)] = kq_data[
                         kv
                         + t * n_kv
                         + h * n_kv * n_tokens_mul
@@ -446,6 +447,8 @@ void slha_score_diag_callback(
                 sum_cos += cos_sim;
                 sum_kl += kl;
                 n_comparisons++;
+                n_rows++;
+                n_tiles_scored += static_cast<int64_t>(n_scored);
             }
         }
     }
@@ -453,26 +456,34 @@ void slha_score_diag_callback(
     if (n_comparisons > 0) {
         double avg_cos = sum_cos / n_comparisons;
         double avg_kl = sum_kl / n_comparisons;
-        static std::mutex log_mutex;
-        static int64_t total_calls = 0;
+
+        // Guard against non-finite metrics (should not happen, but keeps the
+        // gate explicit).
+        if (!std::isfinite(avg_cos)) avg_cos = 0.0;
+        if (!std::isfinite(avg_kl)) avg_kl = 0.0;
+
+        g_total_rows.fetch_add(n_rows, std::memory_order_relaxed);
+        g_total_tiles.fetch_add(n_tiles_scored, std::memory_order_relaxed);
+
         {
             std::lock_guard<std::mutex> lock(log_mutex);
-            total_calls++;
-            if (total_calls <= 10 || (total_calls % 100 == 0)) {
-                std::cout << "[SLHA] score_diag layer=" << layer->layer_id
-                          << " call=" << total_calls
-                          << " cos=" << avg_cos
-                          << " KL=" << avg_kl
-                          << " n_comparisons=" << n_comparisons
-                          << std::endl;
-            }
+            std::cout << "[SLHA] score_diag"
+                      << " layer=" << layer->layer_id
+                      << " call=" << call_no
+                      << " rows=" << n_rows
+                      << " tiles=" << n_tiles_scored
+                      << " cos=" << avg_cos
+                      << " KL=" << avg_kl
+                      << " n_comparisons=" << n_comparisons
+                      << " total_calls=" << call_no
+                      << std::endl;
         }
     }
 }
 
 ggml_tensor * slha_build_score_diag(
     ggml_context * ctx, ggml_tensor * kq, ggml_tensor * k, ggml_tensor * q,
-    int il, struct ggml_graph * gf)
+    int il, struct ggml_cgraph * gf)
 {
     (void)k; // unused — needed for graph dependency
     auto * layer = slha_get_layer_state(il);
