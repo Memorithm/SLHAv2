@@ -221,6 +221,55 @@ int32_t slha_decode_key(
 );
 
 /**
+ * Project a query vector through the learned model, producing the coarse
+ * representation (D_C floats) and the sign-LSH hash (RESIDUAL_WORDS u64s).
+ *
+ * The caller must provide writable storage for D_C floats at q_coarse_out
+ * and RESIDUAL_WORDS u64s at q_sign_out. Output is not modified on failure.
+ * Unaligned output storage is accepted.
+ *
+ * Returns SLHA_OK on success, or a negative error code (SLHA_ERR_NULL,
+ * SLHA_ERR_DIMENSION, SLHA_ERR_NONFINITE, SLHA_ERR_INVALID_HANDLE,
+ * SLHA_ERR_PANIC).
+ */
+int32_t slha_prepare_query(
+    const SlhaModel* model,
+    const float* query,
+    size_t d,
+    float* q_coarse_out,
+    uint64_t* q_sign_out
+);
+
+/**
+ * Score N tiles in batch against a single prepared query.
+ *
+ * Each tile is scored independently via the canonical fused score
+ * (eq. 2.3: coarse dot + λ·binary residual).  HOT and WARM are
+ * distinguished per tile by the tile's flags field — the function
+ * honours FLAG_WARM automatically.
+ *
+ * tiles must point to n_tiles readable SciRustSlhaTile values.
+ * q_coarse must point to D_C floats (as returned by slha_prepare_query).
+ * q_sign must point to RESIDUAL_WORDS u64s.
+ * scores_out must point to n_tiles writable floats.
+ *
+ * If any tile is invalid or produces a non-finite score the batch
+ * stops immediately and returns an error; previously written scores
+ * are left in scores_out but the results are incomplete.
+ *
+ * Returns SLHA_OK on success, or a negative error code on the first
+ * failure.  Unaligned tile, q_coarse, q_sign, and scores_out storage
+ * are accepted.
+ */
+int32_t slha_score_tiles(
+    const SciRustSlhaTile* tiles,
+    size_t n_tiles,
+    const float* q_coarse,
+    const uint64_t* q_sign,
+    float* scores_out
+);
+
+/**
  * Release a model and return an explicit status. NULL is a no-op.
  */
 int32_t slha_weights_release(SlhaModel* model);

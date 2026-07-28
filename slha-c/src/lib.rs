@@ -461,6 +461,118 @@ pub unsafe extern "C" fn slha_model_dim(model: *const SlhaModel) -> usize {
     }
 }
 
+/// Project a query vector through the learned model.
+///
+/// On success, `q_coarse_out` receives `D_C` floats and `q_sign_out` receives
+/// `RESIDUAL_WORDS` u64s representing the sign-LSH hash.  Output is not
+/// modified on failure.  Unaligned output storage is accepted.
+///
+/// # Safety
+/// `model` must be a live model handle. `query` points to `d` readable f32s.
+/// `q_coarse_out` points to writable storage for `D_C` f32s.
+/// `q_sign_out` points to writable storage for `RESIDUAL_WORDS` u64s.
+#[no_mangle]
+pub unsafe extern "C" fn slha_prepare_query(
+    model: *const SlhaModel,
+    query: *const f32,
+    d: usize,
+    q_coarse_out: *mut f32,
+    q_sign_out: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        if query.is_null() || q_coarse_out.is_null() || q_sign_out.is_null() {
+            return Err(ffi_error(
+                SLHA_ERR_NULL,
+                "slha_prepare_query received a NULL pointer",
+            ));
+        }
+
+        // SAFETY: the caller promises a live handle.
+        let model = unsafe { model_ref(model)? };
+
+        if d != model.inner.d {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                format!(
+                    "query dimension mismatch: received {d}, expected {}",
+                    model.inner.d
+                ),
+            ));
+        }
+
+        // SAFETY: dimension equality is checked before reading.
+        let query = unsafe { read_vec_unaligned(query, d) };
+        validate_finite(&query, "query")?;
+
+        let q_coarse = model.inner.query_coarse(&query);
+        let q_sign = model.inner.sign_bits(&query);
+
+        // SAFETY: the caller guarantees writable storage for D_C f32s and
+        // RESIDUAL_WORDS u64s.
+        unsafe {
+            write_slice_unaligned(q_coarse_out, &q_coarse);
+            write_slice_unaligned(q_sign_out, &q_sign);
+        }
+
+        Ok(())
+    })
+}
+
+/// Score `n_tiles` tiles in batch against a single prepared query.
+///
+/// Each tile is scored independently.  The tile's `flags` field determines
+/// HOT vs WARM mode automatically.  If any tile is invalid or produces a
+/// non-finite score the batch stops immediately.
+///
+/// # Safety
+/// `tiles` points to `n_tiles` readable SciRustSlhaTile values.
+/// `q_coarse` points to `D_C` readable f32s.
+/// `q_sign` points to `RESIDUAL_WORDS` readable u64s.
+/// `scores_out` points to `n_tiles` writable f32s.
+#[no_mangle]
+pub unsafe extern "C" fn slha_score_tiles(
+    tiles: *const SciRustSlhaTile,
+    n_tiles: usize,
+    q_coarse: *const f32,
+    q_sign: *const u64,
+    scores_out: *mut f32,
+) -> i32 {
+    ffi_status(|| {
+        if tiles.is_null() || q_coarse.is_null() || q_sign.is_null() || scores_out.is_null() {
+            return Err(ffi_error(
+                SLHA_ERR_NULL,
+                "slha_score_tiles received a NULL pointer",
+            ));
+        }
+
+        // SAFETY: the caller guarantees readable storage.
+        let q_coarse = unsafe { read_array_unaligned::<f32, D_C>(q_coarse) };
+        let q_sign = unsafe { read_array_unaligned::<u64, RESIDUAL_WORDS>(q_sign) };
+
+        validate_finite(&q_coarse, "q_coarse")?;
+
+        for i in 0..n_tiles {
+            // SAFETY: the caller guarantees readable storage for n_tiles tiles.
+            let tile = unsafe { tiles.add(i).read_unaligned() };
+            validate_tile(&tile)?;
+
+            let score = tile.compute_score(&q_coarse, &q_sign);
+
+            if !score.is_finite() {
+                return Err(ffi_error(
+                    SLHA_ERR_NONFINITE,
+                    format!("tile[{i}] scoring produced a non-finite result"),
+                ));
+            }
+
+            // SAFETY: the caller guarantees writable storage for n_tiles f32s.
+            unsafe { scores_out.add(i).write_unaligned(score) };
+        }
+
+        Ok(())
+    })
+}
+
 /// Encode a `d`-dimensional key vector into a 128-byte tile.
 ///
 /// `codec`: 0=int4-single, 1=int4-grouped, 2=nf4, 3=mixed, 4=tq3,
@@ -945,5 +1057,857 @@ mod tests {
             let error: f32 = a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum();
             10.0 * (signal / error.max(1e-12)).log10()
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  Milestone 1: offline C-ABI scoring parity
+    // ------------------------------------------------------------------
+
+    /// Shared helper: fit a model, save to temp file, load via C ABI, and
+    /// return `(handle, temp_path, model_ref)` for use in multiple tests.
+    fn setup_model_and_handle(
+        d: usize,
+        seed: u64,
+    ) -> (*mut SlhaModel, std::path::PathBuf, LearnedModel) {
+        let train = gen_keys(seed, 512, d, d / 2, 0.9, 0.02);
+        let model = LearnedModel::fit(&train, d, seed ^ 0xA5A5, false);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "slha_c_score_parity_{}_{}.slhw",
+            d,
+            std::process::id()
+        ));
+        weights::save(path.to_str().unwrap(), &model, seed ^ 0xA5A5, false).expect("save weights");
+        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+        let handle = unsafe { slha_weights_load(cpath.as_ptr()) };
+        assert!(!handle.is_null(), "load failed: {}", last_error());
+        (handle, path, model)
+    }
+
+    /// Score a single tile through the canonical Rust path for comparison.
+    fn canonical_score(model: &LearnedModel, tile: &SciRustSlhaTile, query: &[f32]) -> f32 {
+        let qc = model.query_coarse(query);
+        let qs = model.sign_bits(query);
+        tile.compute_score(&qc, &qs)
+    }
+
+    /// Allocate a buffer for `n` tiles at the correct alignment.
+    fn alloc_tiles(n: usize) -> (Vec<u8>, *mut SciRustSlhaTile) {
+        // Overallocate and align: 128-byte tile, up to 128-byte alignment.
+        const TILE_SIZE: usize = size_of::<SciRustSlhaTile>();
+        let mut buf = vec![0u8; n * TILE_SIZE + 128];
+        let base = buf.as_mut_ptr() as usize;
+        let aligned = (base + 127) & !127;
+        let offset = aligned - base;
+        let ptr = unsafe { buf.as_mut_ptr().add(offset) as *mut SciRustSlhaTile };
+        (buf, ptr)
+    }
+
+    #[test]
+    fn prepare_query_matches_canonical_rust_coarse_and_sign() {
+        let d = 256usize;
+        let (handle, path, model) = setup_model_and_handle(d, 0xCAFE);
+
+        let query = &gen_keys(0xB0BA, 1, d, d / 2, 0.9, 0.02)[0];
+
+        let mut q_coarse_out = [0.0f32; D_C];
+        let mut q_sign_out = [0u64; RESIDUAL_WORDS];
+
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse_out.as_mut_ptr(),
+                q_sign_out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK, "prepare_query failed: {}", last_error());
+
+        let expected_coarse = model.query_coarse(query);
+        let expected_sign = model.sign_bits(query);
+
+        assert_eq!(
+            q_coarse_out.as_slice(),
+            expected_coarse.as_slice(),
+            "q_coarse mismatch"
+        );
+        assert_eq!(
+            q_sign_out.as_slice(),
+            expected_sign.as_slice(),
+            "q_sign mismatch"
+        );
+
+        // Also verify through process_tile: score using C-prepared Q must
+        // match score using Rust-prepared Q.
+        let key = &gen_keys(0xBEAD, 1, d, d / 2, 0.9, 0.02)[0];
+        let mut tile_storage = vec![0u8; size_of::<SciRustSlhaTile>()];
+        let tile_ptr = tile_storage.as_mut_ptr() as *mut SciRustSlhaTile;
+        let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, 0, 3, tile_ptr) };
+        assert_eq!(rc, SLHA_OK);
+
+        let mut c_score = 123.0f32;
+        let rc = unsafe {
+            slha_process_tile(
+                tile_ptr,
+                q_coarse_out.as_ptr(),
+                q_sign_out.as_ptr(),
+                &mut c_score,
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let tile = unsafe { tile_ptr.read_unaligned() };
+        let canonical = canonical_score(&model, &tile, query);
+        assert!(
+            (c_score - canonical).abs() <= f32::EPSILON * 16.0,
+            "C ABI score {c_score} != canonical Rust {canonical}"
+        );
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn batch_score_matches_repeated_scalar() {
+        let d = 256usize;
+        let (handle, path, model) = setup_model_and_handle(d, 0xD0CE);
+
+        let keys = gen_keys(0xDEAD, 8, d, d / 2, 0.9, 0.02);
+        let query = &gen_keys(0xBEEF, 1, d, d / 2, 0.9, 0.02)[0];
+
+        // Encode all keys to tiles.
+        let (_tiles_buf, tiles_ptr) = alloc_tiles(8);
+        for (i, key) in keys.iter().enumerate() {
+            let tile_ptr = unsafe { tiles_ptr.add(i) };
+            let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, i as u32, 3, tile_ptr) };
+            assert_eq!(rc, SLHA_OK, "encode key {i} failed: {}", last_error());
+        }
+
+        // Prepare query.
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        // Batch score.
+        let mut batch_scores = vec![-1.0f32; 8];
+        let rc = unsafe {
+            slha_score_tiles(
+                tiles_ptr,
+                8,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                batch_scores.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        // Repeated scalar score.
+        for (i, _key) in keys.iter().enumerate() {
+            let tile = unsafe { &*tiles_ptr.add(i) };
+            let expected = canonical_score(&model, tile, query);
+            let actual = batch_scores[i];
+            assert!(
+                (actual - expected).abs() <= f32::EPSILON * 16.0,
+                "tile[{i}]: batch {actual} != canonical {expected}"
+            );
+        }
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mixed_codec_parity() {
+        let d = 256usize;
+        let (handle, path, model) = setup_model_and_handle(d, 0xCAFE);
+        let key = &gen_keys(0xBABE, 1, d, d / 2, 0.9, 0.02)[0];
+        let query = &gen_keys(0xFACE, 1, d, d / 2, 0.9, 0.02)[0];
+
+        let mut tile_storage = vec![0u8; size_of::<SciRustSlhaTile>()];
+        let tile_ptr = tile_storage.as_mut_ptr() as *mut SciRustSlhaTile;
+        // Codec 3 = mixed
+        let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, 0, 3, tile_ptr) };
+        assert_eq!(rc, SLHA_OK, "encode mixed failed: {}", last_error());
+
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let mut c_score = -2.0f32;
+        let rc = unsafe {
+            slha_process_tile(tile_ptr, q_coarse.as_ptr(), q_sign.as_ptr(), &mut c_score)
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let tile = unsafe { tile_ptr.read_unaligned() };
+        let canonical = canonical_score(&model, &tile, query);
+        assert!(
+            (c_score - canonical).abs() <= f32::EPSILON * 16.0,
+            "mixed: C {c_score} != Rust {canonical}"
+        );
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mix3_codec_parity() {
+        let d = 256usize;
+        let (handle, path, model) = setup_model_and_handle(d, 0xDEAD);
+        let key = &gen_keys(0xBEEF, 1, d, d / 2, 0.9, 0.02)[0];
+        let query = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
+
+        let mut tile_storage = vec![0u8; size_of::<SciRustSlhaTile>()];
+        let tile_ptr = tile_storage.as_mut_ptr() as *mut SciRustSlhaTile;
+        // Codec 5 = MIX3
+        let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, 0, 5, tile_ptr) };
+        assert_eq!(rc, SLHA_OK, "encode mix3 failed: {}", last_error());
+
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let mut c_score = -2.0f32;
+        let rc = unsafe {
+            slha_process_tile(tile_ptr, q_coarse.as_ptr(), q_sign.as_ptr(), &mut c_score)
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let tile = unsafe { tile_ptr.read_unaligned() };
+        let canonical = canonical_score(&model, &tile, query);
+        assert!(
+            (c_score - canonical).abs() <= f32::EPSILON * 16.0,
+            "mix3: C {c_score} != Rust {canonical}"
+        );
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hot_mode_parity() {
+        // HOT = residual enabled (FLAG_WARM not set). Encode with warm=false.
+        let d = 256usize;
+        let (handle, path, model) = setup_model_and_handle(d, 0xBEAD);
+        let key = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
+        let query = &gen_keys(0xD0CE, 1, d, d / 2, 0.9, 0.02)[0];
+
+        let mut tile_storage = vec![0u8; size_of::<SciRustSlhaTile>()];
+        let tile_ptr = tile_storage.as_mut_ptr() as *mut SciRustSlhaTile;
+        let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, 0, 3, tile_ptr) };
+        assert_eq!(rc, SLHA_OK);
+
+        // Verify HOT: FLAG_WARM is not set.
+        let tile = unsafe { tile_ptr.read_unaligned() };
+        assert_eq!(tile.flags & FLAG_WARM, 0, "expected HOT tile");
+
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let mut c_score = -2.0f32;
+        let rc = unsafe {
+            slha_process_tile(tile_ptr, q_coarse.as_ptr(), q_sign.as_ptr(), &mut c_score)
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let canonical = canonical_score(&model, &tile, query);
+        assert!(
+            (c_score - canonical).abs() <= f32::EPSILON * 16.0,
+            "HOT: C {c_score} != Rust {canonical}"
+        );
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn warm_mode_parity() {
+        // WARM = FLAG_WARM set, residual disabled.
+        let d = 256usize;
+        let (handle, path, model) = setup_model_and_handle(d, 0xDEAD);
+
+        // Use encode_with to produce a HOT tile, then manually set FLAG_WARM.
+        let key = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
+        let query = &gen_keys(0xBEEF, 1, d, d / 2, 0.9, 0.02)[0];
+
+        let mut tile_storage = vec![0u8; size_of::<SciRustSlhaTile>()];
+        let tile_ptr = tile_storage.as_mut_ptr() as *mut SciRustSlhaTile;
+        let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, 0, 3, tile_ptr) };
+        assert_eq!(rc, SLHA_OK);
+
+        // Set WARM flag.
+        {
+            let mut t = unsafe { tile_ptr.read_unaligned() };
+            t.flags |= FLAG_WARM;
+            unsafe { tile_ptr.write_unaligned(t) };
+        }
+
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let tile = unsafe { tile_ptr.read_unaligned() };
+        let mut c_score = -2.0f32;
+        let rc = unsafe {
+            slha_process_tile(tile_ptr, q_coarse.as_ptr(), q_sign.as_ptr(), &mut c_score)
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let canonical = canonical_score(&model, &tile, query);
+        assert!(
+            (c_score - canonical).abs() <= f32::EPSILON * 16.0,
+            "WARM: C {c_score} != Rust {canonical}"
+        );
+
+        // WARM score should equal the coarse term alone.
+        let qc = model.query_coarse(query);
+        let coarse_only: f32 = tile
+            .dequant_latent()
+            .iter()
+            .zip(qc.iter())
+            .map(|(k, q)| k * q)
+            .sum();
+        assert!(
+            (c_score - coarse_only).abs() <= f32::EPSILON * 16.0,
+            "WARM {c_score} != coarse-only {coarse_only}"
+        );
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prepare_query_rejects_invalid_dimensions() {
+        let d = 256usize;
+        let (handle, path, _model) = setup_model_and_handle(d, 0xABCD);
+
+        let query = &gen_keys(0xDCBA, 1, d + 8, d / 2, 0.9, 0.02)[0];
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+
+        // Wrong dimension should fail.
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d + 8,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_DIMENSION, "expected DIMENSION error");
+
+        // Output must be unchanged (coarse buffer still zero).
+        assert_eq!(q_coarse, [0.0f32; D_C]);
+        assert_eq!(q_sign, [0u64; RESIDUAL_WORDS]);
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prepare_query_rejects_null_pointers() {
+        let d = 256usize;
+        let (handle, path, _model) = setup_model_and_handle(d, 0xBEEF);
+
+        let query = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+
+        // NULL query
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                std::ptr::null(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NULL);
+
+        // NULL q_coarse_out
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                std::ptr::null_mut(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NULL);
+
+        // NULL q_sign_out
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NULL);
+
+        // NULL model handle
+        let rc = unsafe {
+            slha_prepare_query(
+                std::ptr::null(),
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NULL);
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn score_tiles_rejects_null_pointers() {
+        let d = 256usize;
+        let (handle, path, _model) = setup_model_and_handle(d, 0xDEAD);
+
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let query = &gen_keys(0xBEEF, 1, d, d / 2, 0.9, 0.02)[0];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        let mut output = -1.0f32;
+
+        // NULL tiles
+        let rc = unsafe {
+            slha_score_tiles(
+                std::ptr::null(),
+                1,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                &mut output,
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NULL);
+
+        // NULL q_coarse
+        let tile = zero_tile();
+        let rc =
+            unsafe { slha_score_tiles(&tile, 1, std::ptr::null(), q_sign.as_ptr(), &mut output) };
+        assert_eq!(rc, SLHA_ERR_NULL);
+
+        // NULL q_sign
+        let rc =
+            unsafe { slha_score_tiles(&tile, 1, q_coarse.as_ptr(), std::ptr::null(), &mut output) };
+        assert_eq!(rc, SLHA_ERR_NULL);
+
+        // NULL scores_out
+        let rc = unsafe {
+            slha_score_tiles(
+                &tile,
+                1,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NULL);
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prepare_query_rejects_non_finite_q() {
+        let d = 256usize;
+        let (handle, path, _model) = setup_model_and_handle(d, 0xFACE);
+
+        let mut non_finite = gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)
+            .into_iter()
+            .next()
+            .unwrap();
+        non_finite[7] = f32::NAN;
+
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                non_finite.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NONFINITE, "expected NONFINITE error");
+
+        // Output must be unchanged.
+        assert_eq!(q_coarse, [0.0f32; D_C]);
+
+        // Also test with Infinity.
+        let mut inf_query = gen_keys(0xDEAD, 1, d, d / 2, 0.9, 0.02)
+            .into_iter()
+            .next()
+            .unwrap();
+        inf_query[3] = f32::INFINITY;
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                inf_query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NONFINITE);
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn score_tiles_rejects_corrupted_tile() {
+        let d = 256usize;
+        let (handle, path, _model) = setup_model_and_handle(d, 0xABCD);
+
+        let key = &gen_keys(0xDCBA, 1, d, d / 2, 0.9, 0.02)[0];
+        let query = &gen_keys(0xBEEF, 1, d, d / 2, 0.9, 0.02)[0];
+
+        // Encode a valid tile.
+        let mut tile_storage = vec![0u8; size_of::<SciRustSlhaTile>()];
+        let tile_ptr = tile_storage.as_mut_ptr() as *mut SciRustSlhaTile;
+        let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, 0, 3, tile_ptr) };
+        assert_eq!(rc, SLHA_OK);
+
+        // Prepare query.
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        // Corrupt the tile: set two conflicting codec flags.
+        {
+            let mut t = unsafe { tile_ptr.read_unaligned() };
+            t.flags = FLAG_NF4 | FLAG_TQ3;
+            unsafe { tile_ptr.write_unaligned(t) };
+        }
+
+        let mut bad_score = 123.0f32;
+        let rc = unsafe {
+            slha_process_tile(tile_ptr, q_coarse.as_ptr(), q_sign.as_ptr(), &mut bad_score)
+        };
+        assert_eq!(rc, SLHA_ERR_INVALID_TILE);
+
+        // score_out must be unchanged.
+        assert_eq!(bad_score, 123.0);
+
+        // Same for batch scoring with a zeroed tile (scale=0 is valid but
+        // produces a score of 0; no error expected).
+        let batch_tile = zero_tile(); // valid (flags=0, scale=0)
+        let mut batch_scores = [-1.0f32];
+        let rc = unsafe {
+            slha_score_tiles(
+                &batch_tile,
+                1,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                batch_scores.as_mut_ptr(),
+            )
+        };
+        // Zeroed tile is valid (flags=0, scale >= 0) and produces score=0.
+        assert_eq!(rc, SLHA_OK);
+        assert_eq!(batch_scores[0], 0.0);
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn score_tiles_rejects_non_finite_score() {
+        // Create a tile that produces a non-finite score by using NaN in the
+        // scale field while keeping the flags clean.
+        let d = 256usize;
+        let (handle, path, _model) = setup_model_and_handle(d, 0xBEAD);
+
+        let query = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        // A tile whose scale is NaN is rejected by validate_tile.
+        let mut bad_tile = zero_tile();
+        bad_tile.scale = f32::NAN;
+        bad_tile.flags = 0; // HOT, uniform INT4
+
+        let mut bad_score = 456.0f32;
+        let rc = unsafe {
+            slha_process_tile(
+                &bad_tile,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                &mut bad_score,
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NONFINITE);
+        assert_eq!(bad_score, 456.0);
+
+        // Non-finite lambda also rejected.
+        let mut bad_tile2 = zero_tile();
+        bad_tile2.scale = 1.0;
+        bad_tile2.dynamic_lambda = f32::NAN;
+        bad_tile2.flags = 0;
+        let rc = unsafe {
+            slha_process_tile(
+                &bad_tile2,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                &mut bad_score,
+            )
+        };
+        assert_eq!(rc, SLHA_ERR_NONFINITE);
+        assert_eq!(bad_score, 456.0);
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn deterministic_repeated_execution() {
+        let d = 256usize;
+        let (handle, path, model) = setup_model_and_handle(d, 0xABCD);
+
+        let keys = gen_keys(0xDCBA, 4, d, d / 2, 0.9, 0.02);
+        let query = &gen_keys(0xFEED, 1, d, d / 2, 0.9, 0.02)[0];
+
+        // Encode all keys.
+        let (_tiles_buf, tiles_ptr) = alloc_tiles(4);
+        for (i, key) in keys.iter().enumerate() {
+            let tile_ptr = unsafe { tiles_ptr.add(i) };
+            let rc = unsafe { slha_encode_key(handle, key.as_ptr(), d, i as u32, 3, tile_ptr) };
+            assert_eq!(rc, SLHA_OK);
+        }
+
+        // Prepare query.
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        // Two batch calls must produce identical results.
+        let mut first = vec![-1.0f32; 4];
+        let mut second = vec![-2.0f32; 4];
+        let rc1 = unsafe {
+            slha_score_tiles(
+                tiles_ptr,
+                4,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                first.as_mut_ptr(),
+            )
+        };
+        let rc2 = unsafe {
+            slha_score_tiles(
+                tiles_ptr,
+                4,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                second.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc1, SLHA_OK);
+        assert_eq!(rc2, SLHA_OK);
+        assert_eq!(first, second, "non-deterministic batch scores");
+
+        // Per-tile scores must also match.
+        let tiles_slice = unsafe { std::slice::from_raw_parts(tiles_ptr, 4) };
+        for (i, tile) in tiles_slice.iter().enumerate() {
+            let expected = canonical_score(&model, tile, query);
+            let actual = first[i];
+            assert!(
+                (actual - expected).abs() <= f32::EPSILON * 16.0,
+                "tile[{i}]: deterministic {actual} != canonical {expected}"
+            );
+        }
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn batch_empty_tiles_array_succeeds() {
+        let d = 256usize;
+        let (handle, path, _model) = setup_model_and_handle(d, 0xDEAD);
+
+        let q_coarse = [0.0f32; D_C];
+        let q_sign = [0u64; RESIDUAL_WORDS];
+        // Empty batch (n_tiles = 0) should succeed trivially.
+        let dummy_tile = zero_tile();
+        let mut dummy_out = 999.0f32;
+        let rc = unsafe {
+            slha_score_tiles(
+                &dummy_tile,
+                0,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                &mut dummy_out,
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+        // Output is not written.
+        assert_eq!(dummy_out, 999.0);
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prepare_query_and_score_tiles_full_roundtrip_all_codecs() {
+        let codecs: [(i32, &str); 6] = [
+            (0, "int4-single"),
+            (1, "int4-grouped"),
+            (2, "nf4"),
+            (3, "mixed"),
+            (4, "tq3"),
+            (5, "mix3"),
+        ];
+        let d = 256usize;
+        let (handle, path, model) = setup_model_and_handle(d, 0xABCD);
+
+        let keys = gen_keys(0xDCBA, 4, d, d / 2, 0.9, 0.02);
+        let query = &gen_keys(0xFEED, 1, d, d / 2, 0.9, 0.02)[0];
+
+        let mut q_coarse = [0.0f32; D_C];
+        let mut q_sign = [0u64; RESIDUAL_WORDS];
+        let rc = unsafe {
+            slha_prepare_query(
+                handle,
+                query.as_ptr(),
+                d,
+                q_coarse.as_mut_ptr(),
+                q_sign.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+
+        for (codec_id, codec_name) in &codecs {
+            // Encode 4 keys with this codec.
+            let (_tiles_buf, tiles_ptr) = alloc_tiles(4);
+            for (i, _key) in keys.iter().enumerate() {
+                let tile_ptr = unsafe { tiles_ptr.add(i) };
+                let rc = unsafe {
+                    slha_encode_key(handle, keys[i].as_ptr(), d, i as u32, *codec_id, tile_ptr)
+                };
+                assert_eq!(rc, SLHA_OK, "encode {codec_name} key {i}: {}", last_error());
+            }
+
+            // Score via batch.
+            let mut batch_scores = [-1.0f32; 4];
+            let rc = unsafe {
+                slha_score_tiles(
+                    tiles_ptr,
+                    4,
+                    q_coarse.as_ptr(),
+                    q_sign.as_ptr(),
+                    batch_scores.as_mut_ptr(),
+                )
+            };
+            assert_eq!(rc, SLHA_OK, "batch score {codec_name}: {}", last_error());
+
+            // Verify each tile against canonical Rust.
+            let tiles_slice = unsafe { std::slice::from_raw_parts(tiles_ptr, 4) };
+            for (i, tile) in tiles_slice.iter().enumerate() {
+                let expected = canonical_score(&model, tile, query);
+                assert!(
+                    (batch_scores[i] - expected).abs() <= f32::EPSILON * 16.0,
+                    "{codec_name} tile[{i}]: batch {batch} != canonical {expected}",
+                    batch = batch_scores[i]
+                );
+            }
+        }
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        let _ = std::fs::remove_file(&path);
     }
 }
