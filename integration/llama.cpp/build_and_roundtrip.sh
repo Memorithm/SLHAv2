@@ -3,7 +3,7 @@
 #
 # Usage: WORK=/path/to/scratch ./build_and_roundtrip.sh [mode]
 #
-# Modes: baseline, passthrough, roundtrip, collect (default: passthrough)
+# Modes: baseline, passthrough, roundtrip, collect, scorediag (default: passthrough)
 set -euo pipefail
 
 WORK="${WORK:-/tmp/slha-llama}"
@@ -44,23 +44,22 @@ fi
 LLAMA_COMMIT=$(cd llama.cpp && git rev-parse HEAD)
 echo "  llama.cpp commit: $LLAMA_COMMIT"
 
-# 3. Apply the patch if not baseline.
+# 3. Apply patches if not baseline.
 if [ "$MODE" != "baseline" ]; then
-    echo "== applying SLHA patch =="
-    PATCH_FILE="$REPO_ROOT/integration/llama.cpp/patches/0001-slha-k-passthrough.patch"
-    if [ ! -f "$PATCH_FILE" ]; then
-        echo "ERROR: patch file not found: $PATCH_FILE"
-        exit 1
-    fi
+    echo "== applying SLHA patches =="
     
-    # Check if patch is already applied.
-    if ! grep -q "SLHA_INTEGRATION" llama.cpp/src/llama-kv-cache.cpp 2>/dev/null; then
+    # Apply each patch in order from patches/ directory.
+    for PATCH_FILE in "$REPO_ROOT/integration/llama.cpp/patches/"*.patch; do
+        PATCH_BASENAME="$(basename "$PATCH_FILE")"
+        if [ ! -f "$PATCH_FILE" ]; then
+            echo "  no patches found"
+            break
+        fi
+        echo "  applying $PATCH_BASENAME ..."
         cd llama.cpp
-        patch -p1 < "$PATCH_FILE"
+        patch -p1 -N < "$PATCH_FILE" 2>/dev/null || echo "  (already applied or skipped)"
         cd ..
-    else
-        echo "  patch already applied"
-    fi
+    done
     
     # Copy the shim files.
     echo "== copying SLHA shim =="
@@ -113,11 +112,14 @@ elif [ "$MODE" = "roundtrip" ]; then
 elif [ "$MODE" = "collect" ]; then
     export SLHA_KV_MODE=collect
     export SLHA_WEIGHTS_DIR="$CALIB_DIR"
+elif [ "$MODE" = "scorediag" ]; then
+    export SLHA_KV_MODE=scorediag
+    export SLHA_WEIGHTS_DIR="$WORK/weights"
 else
     unset SLHA_KV_MODE
 fi
 
-if [ "$MODE" = "roundtrip" ]; then
+if [ "$MODE" = "roundtrip" ] || [ "$MODE" = "scorediag" ]; then
     OUTPUT_FILE="$WORK/${MODE}_${SLHA_CODEC:-mixed}_ppl.txt"
 else
     OUTPUT_FILE="$WORK/${MODE}_ppl.txt"

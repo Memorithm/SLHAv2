@@ -1,0 +1,30 @@
+diff -ru llama.cpp/src/llama-graph.cpp llama.cpp.modified/src/llama-graph.cpp
+--- llama.cpp/src/llama-graph.cpp	2026-07-27 16:36:07.277487000 +0200
++++ llama.cpp.modified/src/llama-graph.cpp	2026-07-28 12:00:00.000000000 +0200
+@@ -5,6 +5,10 @@
+ #include "llama-kv-cache.h"
+ #include "llama-kv-cache-dsa.h"
+
++#if defined(SLHA_INTEGRATION)
++#include "slha_llama.hpp"
++#endif
++
+ #include <cassert>
+ #include <cmath>
+ #include <cstring>
+@@ -2438,7 +2442,14 @@
+     } else {
+         ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+         cb(kq, "kq", il);
+-
++
++#if defined(SLHA_INTEGRATION)
++        // SLHA compressed-score diagnostic: compare QK^T scores with
++        // SLHA scores computed from encoded tiles. This is a side-branch
++        // that does not affect the attention output.
++        kq = slha_build_score_diag(ctx0, kq, k, q, il, gf);
++#endif
++
+         // note: this op tends to require high floating point range
+         //       while for some models F16 is enough, for others it is not, so we default to F32 here
+         ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
