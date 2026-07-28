@@ -792,6 +792,13 @@ pub unsafe extern "C" fn slha_weights_free(model: *mut SlhaModel) {
 mod tests {
     use super::*;
     use scirust::learned::gen_keys;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Process-wide counter combined with a `tempfile::TempDir` guarantees a
+    /// unique, non-colliding path for every `TempModel`, even when tests run in
+    /// parallel under the default multi-threaded `cargo test` harness.
+    static TEMP_MODEL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn last_error() -> String {
         // SAFETY: slha_last_error_message returns a valid NUL-terminated pointer
@@ -903,24 +910,8 @@ mod tests {
     #[test]
     fn encode_decode_round_trip_through_c_abi() {
         let d = 256usize;
-        let train = gen_keys(1, 512, d, 64, 0.9, 0.02);
-        let model = LearnedModel::fit(&train, d, 0xC0FFEE, false);
-        let mut path = std::env::temp_dir();
-        path.push(format!("slha_c_roundtrip_{}.slhw", std::process::id()));
-        weights::save(
-            path.to_str().expect("temporary path must be UTF-8"),
-            &model,
-            0xC0FFEE,
-            false,
-        )
-        .expect("save weights");
-
-        let cpath = CString::new(path.to_str().expect("temporary path must be valid UTF-8"))
-            .expect("temporary path cannot contain NUL");
-
-        // SAFETY: valid path; handle released at the end.
-        let handle = unsafe { slha_weights_load(cpath.as_ptr()) };
-        assert!(!handle.is_null(), "load failed: {}", last_error());
+        let temp = TempModel::new(d, 0xC0FFEE);
+        let handle = temp.handle();
         assert_eq!(unsafe { slha_model_dim(handle) }, d);
 
         let key = &gen_keys(2, 1, d, 64, 0.9, 0.02)[0];
@@ -1007,21 +998,14 @@ mod tests {
             SLHA_ERR_NONFINITE
         );
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn decode_key_reconstructs_residual_beyond_latent_only() {
         let d = 256usize;
-        let train = gen_keys(1, 512, d, 64, 0.9, 0.02);
-        let model = LearnedModel::fit(&train, d, 0xB0BA, false);
-        let mut path = std::env::temp_dir();
-        path.push(format!("slha_c_decode_key_{}.slhw", std::process::id()));
-        weights::save(path.to_str().unwrap(), &model, 0xB0BA, false).expect("save weights");
-
-        let cpath = CString::new(path.to_str().unwrap()).unwrap();
-        let handle = unsafe { slha_weights_load(cpath.as_ptr()) };
+        let temp = TempModel::new(d, 0xB0BA);
+        let handle = temp.handle();
         assert!(!handle.is_null());
 
         let key = &gen_keys(2, 1, d, 64, 0.9, 0.02)[0];
@@ -1049,8 +1033,7 @@ mod tests {
             "full reconstruction ({snr_full} dB) should beat latent-only ({snr_latent} dB)"
         );
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
 
         fn snr(a: &[f32], b: &[f32]) -> f32 {
             let signal: f32 = a.iter().map(|x| x * x).sum();
@@ -1063,25 +1046,77 @@ mod tests {
     //  Milestone 1: offline C-ABI scoring parity
     // ------------------------------------------------------------------
 
-    /// Shared helper: fit a model, save to temp file, load via C ABI, and
-    /// return `(handle, temp_path, model_ref)` for use in multiple tests.
-    fn setup_model_and_handle(
-        d: usize,
-        seed: u64,
-    ) -> (*mut SlhaModel, std::path::PathBuf, LearnedModel) {
-        let train = gen_keys(seed, 512, d, d / 2, 0.9, 0.02);
-        let model = LearnedModel::fit(&train, d, seed ^ 0xA5A5, false);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "slha_c_score_parity_{}_{}.slhw",
-            d,
-            std::process::id()
-        ));
-        weights::save(path.to_str().unwrap(), &model, seed ^ 0xA5A5, false).expect("save weights");
-        let cpath = CString::new(path.to_str().unwrap()).unwrap();
-        let handle = unsafe { slha_weights_load(cpath.as_ptr()) };
-        assert!(!handle.is_null(), "load failed: {}", last_error());
-        (handle, path, model)
+    /// RAII guard for one unique `.slhw` model file.
+    ///
+    /// Every instance creates its own `tempfile::TempDir` and a unique file
+    /// inside it, so parallel tests cannot collide on the same path.  Drop
+    /// releases the C handle *before* the temp directory is removed, so the
+    /// file is never deleted while the loaded model is still live.
+    struct TempModel {
+        handle: *mut SlhaModel,
+        model: LearnedModel,
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+
+    impl TempModel {
+        fn new(d: usize, seed: u64) -> Self {
+            let counter = TEMP_MODEL_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("slha_c_{counter}_"))
+                .tempdir()
+                .expect("create temp dir for model");
+            let path = dir.path().join("model.slhw");
+
+            let train = gen_keys(seed, 512, d, d / 2, 0.9, 0.02);
+            let model = LearnedModel::fit(&train, d, seed ^ 0xA5A5, false);
+            weights::save(path.to_str().unwrap(), &model, seed ^ 0xA5A5, false)
+                .expect("save weights");
+
+            let cpath = CString::new(path.to_str().unwrap()).unwrap();
+            let handle = unsafe { slha_weights_load(cpath.as_ptr()) };
+            assert!(!handle.is_null(), "load failed: {}", last_error());
+
+            Self {
+                handle,
+                model,
+                _dir: dir,
+                path,
+            }
+        }
+
+        fn handle(&self) -> *mut SlhaModel {
+            self.handle
+        }
+
+        fn model(&self) -> &LearnedModel {
+            &self.model
+        }
+
+        #[allow(dead_code)]
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempModel {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                // SAFETY: handle was returned by slha_weights_load and is
+                // released exactly once here.
+                unsafe {
+                    let _ = slha_weights_release(self.handle);
+                }
+                self.handle = std::ptr::null_mut();
+            }
+            // `_dir` is dropped after this, removing the unique directory.
+        }
+    }
+
+    /// Shared helper: fit a model, save to a unique temp file, load via C ABI,
+    /// and return an RAII guard for use in multiple tests.
+    fn setup_model_and_handle(d: usize, seed: u64) -> TempModel {
+        TempModel::new(d, seed)
     }
 
     /// Score a single tile through the canonical Rust path for comparison.
@@ -1106,7 +1141,9 @@ mod tests {
     #[test]
     fn prepare_query_matches_canonical_rust_coarse_and_sign() {
         let d = 256usize;
-        let (handle, path, model) = setup_model_and_handle(d, 0xCAFE);
+        let temp = setup_model_and_handle(d, 0xCAFE);
+        let handle = temp.handle();
+        let model = temp.model();
 
         let query = &gen_keys(0xB0BA, 1, d, d / 2, 0.9, 0.02)[0];
 
@@ -1158,20 +1195,21 @@ mod tests {
         assert_eq!(rc, SLHA_OK);
 
         let tile = unsafe { tile_ptr.read_unaligned() };
-        let canonical = canonical_score(&model, &tile, query);
+        let canonical = canonical_score(model, &tile, query);
         assert!(
             (c_score - canonical).abs() <= f32::EPSILON * 16.0,
             "C ABI score {c_score} != canonical Rust {canonical}"
         );
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn batch_score_matches_repeated_scalar() {
         let d = 256usize;
-        let (handle, path, model) = setup_model_and_handle(d, 0xD0CE);
+        let temp = setup_model_and_handle(d, 0xD0CE);
+        let handle = temp.handle();
+        let model = temp.model();
 
         let keys = gen_keys(0xDEAD, 8, d, d / 2, 0.9, 0.02);
         let query = &gen_keys(0xBEEF, 1, d, d / 2, 0.9, 0.02)[0];
@@ -1214,7 +1252,7 @@ mod tests {
         // Repeated scalar score.
         for (i, _key) in keys.iter().enumerate() {
             let tile = unsafe { &*tiles_ptr.add(i) };
-            let expected = canonical_score(&model, tile, query);
+            let expected = canonical_score(model, tile, query);
             let actual = batch_scores[i];
             assert!(
                 (actual - expected).abs() <= f32::EPSILON * 16.0,
@@ -1222,14 +1260,15 @@ mod tests {
             );
         }
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn mixed_codec_parity() {
         let d = 256usize;
-        let (handle, path, model) = setup_model_and_handle(d, 0xCAFE);
+        let temp = setup_model_and_handle(d, 0xCAFE);
+        let handle = temp.handle();
+        let model = temp.model();
         let key = &gen_keys(0xBABE, 1, d, d / 2, 0.9, 0.02)[0];
         let query = &gen_keys(0xFACE, 1, d, d / 2, 0.9, 0.02)[0];
 
@@ -1259,20 +1298,21 @@ mod tests {
         assert_eq!(rc, SLHA_OK);
 
         let tile = unsafe { tile_ptr.read_unaligned() };
-        let canonical = canonical_score(&model, &tile, query);
+        let canonical = canonical_score(model, &tile, query);
         assert!(
             (c_score - canonical).abs() <= f32::EPSILON * 16.0,
             "mixed: C {c_score} != Rust {canonical}"
         );
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn mix3_codec_parity() {
         let d = 256usize;
-        let (handle, path, model) = setup_model_and_handle(d, 0xDEAD);
+        let temp = setup_model_and_handle(d, 0xDEAD);
+        let handle = temp.handle();
+        let model = temp.model();
         let key = &gen_keys(0xBEEF, 1, d, d / 2, 0.9, 0.02)[0];
         let query = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
 
@@ -1302,21 +1342,22 @@ mod tests {
         assert_eq!(rc, SLHA_OK);
 
         let tile = unsafe { tile_ptr.read_unaligned() };
-        let canonical = canonical_score(&model, &tile, query);
+        let canonical = canonical_score(model, &tile, query);
         assert!(
             (c_score - canonical).abs() <= f32::EPSILON * 16.0,
             "mix3: C {c_score} != Rust {canonical}"
         );
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn hot_mode_parity() {
         // HOT = residual enabled (FLAG_WARM not set). Encode with warm=false.
         let d = 256usize;
-        let (handle, path, model) = setup_model_and_handle(d, 0xBEAD);
+        let temp = setup_model_and_handle(d, 0xBEAD);
+        let handle = temp.handle();
+        let model = temp.model();
         let key = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
         let query = &gen_keys(0xD0CE, 1, d, d / 2, 0.9, 0.02)[0];
 
@@ -1348,21 +1389,22 @@ mod tests {
         };
         assert_eq!(rc, SLHA_OK);
 
-        let canonical = canonical_score(&model, &tile, query);
+        let canonical = canonical_score(model, &tile, query);
         assert!(
             (c_score - canonical).abs() <= f32::EPSILON * 16.0,
             "HOT: C {c_score} != Rust {canonical}"
         );
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn warm_mode_parity() {
         // WARM = FLAG_WARM set, residual disabled.
         let d = 256usize;
-        let (handle, path, model) = setup_model_and_handle(d, 0xDEAD);
+        let temp = setup_model_and_handle(d, 0xDEAD);
+        let handle = temp.handle();
+        let model = temp.model();
 
         // Use encode_with to produce a HOT tile, then manually set FLAG_WARM.
         let key = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
@@ -1400,7 +1442,7 @@ mod tests {
         };
         assert_eq!(rc, SLHA_OK);
 
-        let canonical = canonical_score(&model, &tile, query);
+        let canonical = canonical_score(model, &tile, query);
         assert!(
             (c_score - canonical).abs() <= f32::EPSILON * 16.0,
             "WARM: C {c_score} != Rust {canonical}"
@@ -1419,14 +1461,14 @@ mod tests {
             "WARM {c_score} != coarse-only {coarse_only}"
         );
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn prepare_query_rejects_invalid_dimensions() {
         let d = 256usize;
-        let (handle, path, _model) = setup_model_and_handle(d, 0xABCD);
+        let temp = setup_model_and_handle(d, 0xABCD);
+        let handle = temp.handle();
 
         let query = &gen_keys(0xDCBA, 1, d + 8, d / 2, 0.9, 0.02)[0];
         let mut q_coarse = [0.0f32; D_C];
@@ -1448,14 +1490,14 @@ mod tests {
         assert_eq!(q_coarse, [0.0f32; D_C]);
         assert_eq!(q_sign, [0u64; RESIDUAL_WORDS]);
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn prepare_query_rejects_null_pointers() {
         let d = 256usize;
-        let (handle, path, _model) = setup_model_and_handle(d, 0xBEEF);
+        let temp = setup_model_and_handle(d, 0xBEEF);
+        let handle = temp.handle();
 
         let query = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
         let mut q_coarse = [0.0f32; D_C];
@@ -1509,14 +1551,14 @@ mod tests {
         };
         assert_eq!(rc, SLHA_ERR_NULL);
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn score_tiles_rejects_null_pointers() {
         let d = 256usize;
-        let (handle, path, _model) = setup_model_and_handle(d, 0xDEAD);
+        let temp = setup_model_and_handle(d, 0xDEAD);
+        let handle = temp.handle();
 
         let mut q_coarse = [0.0f32; D_C];
         let mut q_sign = [0u64; RESIDUAL_WORDS];
@@ -1569,14 +1611,14 @@ mod tests {
         };
         assert_eq!(rc, SLHA_ERR_NULL);
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn prepare_query_rejects_non_finite_q() {
         let d = 256usize;
-        let (handle, path, _model) = setup_model_and_handle(d, 0xFACE);
+        let temp = setup_model_and_handle(d, 0xFACE);
+        let handle = temp.handle();
 
         let mut non_finite = gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)
             .into_iter()
@@ -1618,14 +1660,14 @@ mod tests {
         };
         assert_eq!(rc, SLHA_ERR_NONFINITE);
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn score_tiles_rejects_corrupted_tile() {
         let d = 256usize;
-        let (handle, path, _model) = setup_model_and_handle(d, 0xABCD);
+        let temp = setup_model_and_handle(d, 0xABCD);
+        let handle = temp.handle();
 
         let key = &gen_keys(0xDCBA, 1, d, d / 2, 0.9, 0.02)[0];
         let query = &gen_keys(0xBEEF, 1, d, d / 2, 0.9, 0.02)[0];
@@ -1683,8 +1725,7 @@ mod tests {
         assert_eq!(rc, SLHA_OK);
         assert_eq!(batch_scores[0], 0.0);
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
@@ -1692,7 +1733,8 @@ mod tests {
         // Create a tile that produces a non-finite score by using NaN in the
         // scale field while keeping the flags clean.
         let d = 256usize;
-        let (handle, path, _model) = setup_model_and_handle(d, 0xBEAD);
+        let temp = setup_model_and_handle(d, 0xBEAD);
+        let handle = temp.handle();
 
         let query = &gen_keys(0xCAFE, 1, d, d / 2, 0.9, 0.02)[0];
         let mut q_coarse = [0.0f32; D_C];
@@ -1741,14 +1783,15 @@ mod tests {
         assert_eq!(rc, SLHA_ERR_NONFINITE);
         assert_eq!(bad_score, 456.0);
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn deterministic_repeated_execution() {
         let d = 256usize;
-        let (handle, path, model) = setup_model_and_handle(d, 0xABCD);
+        let temp = setup_model_and_handle(d, 0xABCD);
+        let handle = temp.handle();
+        let model = temp.model();
 
         let keys = gen_keys(0xDCBA, 4, d, d / 2, 0.9, 0.02);
         let query = &gen_keys(0xFEED, 1, d, d / 2, 0.9, 0.02)[0];
@@ -1803,7 +1846,7 @@ mod tests {
         // Per-tile scores must also match.
         let tiles_slice = unsafe { std::slice::from_raw_parts(tiles_ptr, 4) };
         for (i, tile) in tiles_slice.iter().enumerate() {
-            let expected = canonical_score(&model, tile, query);
+            let expected = canonical_score(model, tile, query);
             let actual = first[i];
             assert!(
                 (actual - expected).abs() <= f32::EPSILON * 16.0,
@@ -1811,14 +1854,14 @@ mod tests {
             );
         }
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
     fn batch_empty_tiles_array_succeeds() {
         let d = 256usize;
-        let (handle, path, _model) = setup_model_and_handle(d, 0xDEAD);
+        let temp = setup_model_and_handle(d, 0xDEAD);
+        let _handle = temp.handle();
 
         let q_coarse = [0.0f32; D_C];
         let q_sign = [0u64; RESIDUAL_WORDS];
@@ -1838,8 +1881,7 @@ mod tests {
         // Output is not written.
         assert_eq!(dummy_out, 999.0);
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
     }
 
     #[test]
@@ -1853,7 +1895,9 @@ mod tests {
             (5, "mix3"),
         ];
         let d = 256usize;
-        let (handle, path, model) = setup_model_and_handle(d, 0xABCD);
+        let temp = setup_model_and_handle(d, 0xABCD);
+        let handle = temp.handle();
+        let model = temp.model();
 
         let keys = gen_keys(0xDCBA, 4, d, d / 2, 0.9, 0.02);
         let query = &gen_keys(0xFEED, 1, d, d / 2, 0.9, 0.02)[0];
@@ -1898,7 +1942,7 @@ mod tests {
             // Verify each tile against canonical Rust.
             let tiles_slice = unsafe { std::slice::from_raw_parts(tiles_ptr, 4) };
             for (i, tile) in tiles_slice.iter().enumerate() {
-                let expected = canonical_score(&model, tile, query);
+                let expected = canonical_score(model, tile, query);
                 assert!(
                     (batch_scores[i] - expected).abs() <= f32::EPSILON * 16.0,
                     "{codec_name} tile[{i}]: batch {batch} != canonical {expected}",
@@ -1907,7 +1951,40 @@ mod tests {
             }
         }
 
-        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
-        let _ = std::fs::remove_file(&path);
+        // Model and temp directory are released by the `TempModel` RAII guard.
+    }
+
+    #[test]
+    fn parallel_temp_models_do_not_collide() {
+        // Regression test: multiple threads must each create, load, and use a
+        // temporary `.slhw` model without path collisions or use-after-delete.
+        let d = 256usize;
+        let threads: Vec<_> = (0..8)
+            .map(|index| {
+                std::thread::spawn(move || {
+                    let temp = TempModel::new(d, 0x1000 + index as u64);
+                    assert_eq!(unsafe { slha_model_dim(temp.handle()) }, d);
+
+                    let key = &gen_keys(0x2000 + index as u64, 1, d, d / 2, 0.9, 0.02)[0];
+                    let mut tile = zero_tile();
+                    let rc = unsafe {
+                        slha_encode_key(temp.handle(), key.as_ptr(), d, index as u32, 3, &mut tile)
+                    };
+                    assert_eq!(rc, SLHA_OK, "thread {index} encode: {}", last_error());
+
+                    let qc = temp.model().query_coarse(key);
+                    let qs = temp.model().sign_bits(key);
+                    let mut score = 0.0f32;
+                    let rc =
+                        unsafe { slha_score_tiles(&tile, 1, qc.as_ptr(), qs.as_ptr(), &mut score) };
+                    assert_eq!(rc, SLHA_OK, "thread {index} score: {}", last_error());
+                    assert!(score.is_finite(), "thread {index} score is non-finite");
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().expect("parallel temp model thread panicked");
+        }
     }
 }
