@@ -131,6 +131,152 @@ int main() {
       acc.add(3.0, 1.0); acc.add(5.0, 1.0);   // |b-s| = 2, 4 -> mae 3
       CHECK(std::fabs(acc.mae_before() - 3.0) < 1e-12); } DONE();
 
+    // 11. SSE identity: sum_sq_err == sse_after(1.0) == sum_b2 - 2*sum_bs + sum_s2
+    TEST("sse sufficient-statistic identity");
+    { LayerAcc acc; uint64_t st = 606;
+      for (int i = 0; i < 4000; ++i) { double s = prand(st) * 3.0; double b = 1.4 * s + 0.2 * prand(st); acc.add(b, s); }
+      const double direct = acc.sse_before();
+      const double viastats = acc.sse_after(1.0);
+      CHECK(std::fabs(direct - viastats) / std::max(1.0, direct) < 1e-9);
+      // and SSE is minimized exactly at the OLS scale
+      const double a = acc.ols_scale();
+      CHECK(acc.sse_after(a) <= acc.sse_after(1.0) + 1e-9); } DONE();
+
+    // 12. near-zero denominators are excluded from the ROBUST estimator only
+    TEST("near-zero pairs excluded from robust estimator");
+    { LayerAcc acc;
+      // 100 clean pairs with ratio 2.0
+      for (int i = 0; i < 100; ++i) acc.add(2.0, 1.0);
+      const uint64_t used_clean = acc.hist_n;
+      CHECK(used_clean == 100);
+      CHECK(acc.n_robust_excluded == 0);
+      // pairs at/below kRobustEps must not enter the ratio histogram
+      acc.add(1e-9, 1e-9); acc.add(0.0, 0.0); acc.add(5.0, 1e-12);
+      CHECK(acc.hist_n == used_clean);          // histogram unchanged
+      CHECK(acc.n_robust_excluded == 3);
+      CHECK(acc.n == 103.0);                    // but OLS still counted them
+      CHECK(std::fabs(acc.robust_scale() - 2.0) < 0.05); } DONE();
+
+    // 13. non-finite pairs counted separately and excluded everywhere
+    TEST("non-finite pairs counted");
+    { LayerAcc acc;
+      const double inf = std::numeric_limits<double>::infinity();
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      acc.add(1.0, 1.0);
+      acc.add(inf, 1.0); acc.add(1.0, nan); acc.add(nan, inf);
+      CHECK(acc.n == 1.0);
+      CHECK(acc.n_nonfinite == 3);
+      CHECK(std::isfinite(acc.ols_scale())); } DONE();
+
+    // 14. per-head statistics are isolated and recover per-head scales
+    TEST("per-head scales isolated");
+    { LayerAcc acc; uint64_t st = 71;
+      // head 0 has scale 2.0, head 3 has scale 0.5
+      for (int i = 0; i < 500; ++i) { double s = prand(st) + 2.0; acc.add(2.0 * s, s, 0, 0.5); }
+      for (int i = 0; i < 500; ++i) { double s = prand(st) + 2.0; acc.add(0.5 * s, s, 3, 0.5); }
+      CHECK(std::fabs(acc.head_scale(0) - 2.0) < 1e-9);
+      CHECK(std::fabs(acc.head_scale(3) - 0.5) < 1e-9);
+      CHECK(acc.head_scale(1) == 1.0);          // unobserved head -> neutral
+      CHECK(acc.head_scale(-1) == 1.0);         // out-of-range is safe
+      CHECK(acc.head_scale(9999) == 1.0);
+      CHECK(acc.head_n[0] == 500 && acc.head_n[3] == 500); } DONE();
+
+    // 15. position buckets are bounded and out-of-range t_frac cannot escape
+    TEST("position buckets bounded");
+    { LayerAcc acc;
+      acc.add(1.0, 1.0, 0, 0.0);      // first bucket
+      acc.add(1.0, 1.0, 0, 0.999);    // last bucket
+      acc.add(1.0, 1.0, 0, -5.0);     // negative == "no position" sentinel -> excluded
+      acc.add(1.0, 1.0, 0, 5.0);      // out of range high -> clamped into last bucket
+      uint64_t tot = 0;
+      for (int p = 0; p < slha_scale_fit::kPosBuckets; ++p) tot += acc.pos_n[p];
+      CHECK(tot == 3);                // the sentinel contributed no bucket sample
+      CHECK(acc.pos_n[0] == 1);
+      CHECK(acc.pos_n[slha_scale_fit::kPosBuckets - 1] == 2);
+      // every accumulated pair still counts toward the aggregate statistics
+      CHECK(acc.n == 4.0); } DONE();
+
+    // 16. magnitude histogram carries the OLS denominator weight
+    TEST("magnitude weight distribution");
+    { LayerAcc acc;
+      for (int i = 0; i < 1000; ++i) acc.add(1e-4, 1e-4);   // tiny scores
+      for (int i = 0; i < 10; ++i)   acc.add(1e2, 1e2);     // large scores
+      double tot_n = 0, tot_w = 0, big_w = 0;
+      for (int m = 0; m < slha_scale_fit::kMagBins; ++m) { tot_n += acc.mag_n[m]; tot_w += acc.mag_s2[m]; }
+      // the 10 large samples must dominate the s^2 weight despite being 1% of count
+      for (int m = 0; m < slha_scale_fit::kMagBins; ++m) {
+          double lo = -5.0 + 0.1 * m;
+          if (lo >= 1.0) big_w += acc.mag_s2[m];
+      }
+      CHECK(tot_n == 1010);
+      CHECK(std::fabs(tot_w - acc.sum_s2) / acc.sum_s2 < 1e-9);
+      CHECK(big_w / tot_w > 0.99); } DONE();
+
+    // 17. merge carries every new diagnostic array
+    TEST("merge carries diagnostics");
+    { LayerAcc h1, h2;
+      h1.add(2.0, 1.0, 0, 0.1); h1.n_vectors = 3; h1.n_callbacks = 1;
+      h2.add(2.0, 1.0, 1, 0.9); h2.n_vectors = 5; h2.n_callbacks = 1;
+      h2.add(std::numeric_limits<double>::quiet_NaN(), 1.0);
+      LayerAcc m; m.merge(h1); m.merge(h2);
+      CHECK(m.n == 2.0);
+      CHECK(m.n_vectors == 8 && m.n_callbacks == 2);
+      CHECK(m.n_nonfinite == 1);
+      CHECK(m.head_n[0] == 1 && m.head_n[1] == 1);
+      CHECK(m.pos_n[0] == 1 && m.pos_n[slha_scale_fit::kPosBuckets - 1] == 1);
+      CHECK(m.hist_n == h1.hist_n + h2.hist_n); } DONE();
+
+    // 18. positive scaling preserves argmax / top-k / cosine (the central claim)
+    TEST("positive scaling preserves ranking and cosine");
+    { uint64_t st = 1234;
+      for (int trial = 0; trial < 200; ++trial) {
+          const int N = 64;
+          std::vector<double> s(N), b(N);
+          for (int i = 0; i < N; ++i) { s[i] = prand(st) * 100.0; b[i] = prand(st) * 100.0; }
+          for (double a : {0.4, 0.9, 1.0, 1.3, 2.0}) {
+              std::vector<double> sa(N);
+              for (int i = 0; i < N; ++i) sa[i] = static_cast<float>(a * s[i]);  // f32 round-trip
+              // argmax preserved
+              int am = 0, ama = 0;
+              for (int i = 1; i < N; ++i) { if (s[i] > s[am]) am = i; if (sa[i] > sa[ama]) ama = i; }
+              CHECK(am == ama);
+              // cosine with a fixed reference preserved
+              auto cos = [&](const std::vector<double>& x){
+                  double d=0,nx=0,nb=0; for(int i=0;i<N;++i){d+=x[i]*b[i];nx+=x[i]*x[i];nb+=b[i]*b[i];}
+                  return d/std::sqrt(nx*nb); };
+              CHECK(std::fabs(cos(s) - cos(sa)) < 1e-6);
+          }
+      } } DONE();
+
+    // 19. exact SSE-reduction identity: SSE(1)-SSE(a*) == sum_s2*(1-a*)^2
+    TEST("exact sse reduction identity");
+    { LayerAcc acc; uint64_t st = 2027;
+      for (int i = 0; i < 8000; ++i) { double s = prand(st) * 5.0 + 6.0; double b = 1.02 * s + 0.3 * prand(st); acc.add(b, s); }
+      const double a = acc.ols_scale();
+      const double diff = acc.sse_before() - acc.sse_after(a);
+      const double exact = acc.sse_reduction_at_ols();
+      CHECK(std::fabs(diff - exact) / std::max(1.0, exact) < 1e-6);
+      CHECK(exact >= 0.0);
+      // near-identity fit: reduction must be tiny relative to total SSE
+      LayerAcc id; uint64_t st2 = 11;
+      for (int i = 0; i < 8000; ++i) { double s = prand(st2) * 5.0; id.add(s + 0.5 * prand(st2), s); }
+      CHECK(id.sse_reduction_at_ols() / id.sse_before() < 0.05); } DONE();
+
+    // 20. near-zero exclusions are split and head overflow is visible
+    TEST("exclusion counters split");
+    { LayerAcc acc;
+      acc.add(2.0, 1.0, 0, 0.5);
+      acc.add(1e-9, 1e-9, 0, 0.5);          // near-zero -> near_zero + excluded
+      acc.add(1.0, 1.0, 999, 0.5);          // head beyond kMaxHeads -> overflow
+      CHECK(acc.n_robust_near_zero == 1);
+      CHECK(acc.n_robust_excluded == 1);
+      CHECK(acc.n_head_overflow == 1);
+      // negative t_frac is the "no position" sentinel: excluded, not bucket 0
+      LayerAcc q; q.add(1.0, 1.0);
+      uint64_t tot = 0;
+      for (int p2 = 0; p2 < slha_scale_fit::kPosBuckets; ++p2) tot += q.pos_n[p2];
+      CHECK(tot == 0); } DONE();
+
     std::printf("=== scale-fit math tests complete: %s ===\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
     return g_failures == 0 ? 0 : 1;
 }
