@@ -1,5 +1,6 @@
 #include "slha_llama.hpp"
 #include "slha_replace_counters.hpp"
+#include "slha_layer_mask.hpp"
 
 #include "slha.h"
 
@@ -21,6 +22,65 @@
 
 slha_tile_store g_slha_tile_store;
 std::atomic<size_t> g_slha_tiles_written[SLHA_MAX_LAYERS];
+
+// --------------------------------------------------------------------------
+// Score-replacement layer mask (SLHA_SCORE_LAYERS). Selected layers replace
+// their attention logits with SLHA scores; unselected layers pass baseline
+// Q*K through unchanged. Resolution is deferred to the first op execution,
+// once the model's layer count is known (observed during graph build).
+// --------------------------------------------------------------------------
+static slha_mask::ParsedMask g_score_mask;      // syntactic parse at init
+static bool g_score_mask_syntax_ok = true;      // false on a malformed spec
+static bool g_score_mask_resolved = false;      // resolved against layer count
+static bool g_score_mask_error = false;         // fail-closed flag
+static std::mutex g_score_mask_mutex;
+static std::atomic<int32_t> g_observed_num_layers{0};
+
+// Unselected pass-through accounting (kept separate from the strict replace
+// counters so selected-layer coverage is reported on its own).
+static std::atomic<size_t> g_unselected_callbacks{0};
+static std::atomic<size_t> g_unselected_vectors{0};
+static std::atomic<size_t> g_unselected_logits{0};
+
+static void slha_score_mask_reset() {
+    std::lock_guard<std::mutex> lock(g_score_mask_mutex);
+    g_score_mask_resolved = false;
+    g_score_mask_error = !g_score_mask_syntax_ok;
+    g_unselected_callbacks.store(0, std::memory_order_relaxed);
+    g_unselected_vectors.store(0, std::memory_order_relaxed);
+    g_unselected_logits.store(0, std::memory_order_relaxed);
+}
+
+// Resolve the mask against the observed model layer count, once. Sets the
+// fail-closed error flag on any invalid specification.
+static void slha_resolve_score_mask_once() {
+    std::lock_guard<std::mutex> lock(g_score_mask_mutex);
+    if (g_score_mask_resolved) return;
+    g_score_mask_resolved = true;
+    const int n = g_observed_num_layers.load(std::memory_order_acquire);
+    if (!g_score_mask_syntax_ok) {
+        g_score_mask_error = true;
+    } else if (n > 0) {
+        slha_mask::ParsedMask resolved;
+        if (!slha_mask::parse_layer_mask(g_score_mask.spec, n, resolved)) {
+            g_score_mask_error = true;
+            std::cerr << "[SLHA] score layer mask invalid against " << n
+                      << " layers: " << resolved.error << "\n";
+        } else {
+            g_score_mask = resolved;
+        }
+    }
+    if (g_score_mask_error) {
+        // Fail closed: mark the strict replace run invalid.
+        g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+    }
+}
+
+// Whether a given layer participates in direct score replacement.
+static bool slha_layer_selected(int32_t layer_id) {
+    if (g_score_mask_error) return false;
+    return g_score_mask.contains(layer_id);
+}
 
 namespace {
 
@@ -44,6 +104,48 @@ GlobalState & get_global_state() {
 void slha_print_replace_summary() {
     g_slha_replace_counters.print_summary();
     g_slha_replace_counters.reset();
+}
+
+void slha_print_score_mask_summary() {
+    const int n = g_observed_num_layers.load(std::memory_order_acquire);
+
+    // Requested mask (verbatim spec), resolved id set, and the ids where
+    // replacement actually executed (per-layer replaced-vector count > 0).
+    std::vector<int32_t> executed;
+    for (int32_t id = 0; id < n && id < SLHA_MAX_LAYERS; ++id) {
+        if (slha_replace_get_layer_success(id) > 0) executed.push_back(id);
+    }
+    std::vector<int32_t> resolved = g_score_mask_error
+        ? std::vector<int32_t>{}
+        : g_score_mask.resolved_ids(n);
+
+    auto join = [](const std::vector<int32_t> & v) {
+        std::string s;
+        for (size_t i = 0; i < v.size(); ++i) { if (i) s += ","; s += std::to_string(v[i]); }
+        return s.empty() ? std::string("(none)") : s;
+    };
+
+    const bool mask_valid = !g_score_mask_error && (executed == resolved);
+
+    std::cout << "\nSLHA_SCORE_MASK_SUMMARY\n";
+    std::cout << "requested_spec=" << (g_score_mask.spec.empty() ? "(empty)" : g_score_mask.spec) << "\n";
+    std::cout << "observed_num_layers=" << n << "\n";
+    std::cout << "resolved_layers=" << join(resolved) << "\n";
+    std::cout << "resolved_count=" << resolved.size() << "\n";
+    std::cout << "executed_layers=" << join(executed) << "\n";
+    std::cout << "executed_count=" << executed.size() << "\n";
+    std::cout << "unselected_callbacks=" << g_unselected_callbacks.load() << "\n";
+    std::cout << "unselected_vectors=" << g_unselected_vectors.load() << "\n";
+    std::cout << "unselected_logits=" << g_unselected_logits.load() << "\n";
+    std::cout << "mask_error=" << (g_score_mask_error ? "true" : "false") << "\n";
+    std::cout << "mask_valid=" << (mask_valid ? "true" : "false") << "\n";
+    // Per-executed-layer replaced-vector coverage.
+    for (int32_t id : executed) {
+        std::cout << "layer_" << id << "_replaced_vectors=" << slha_replace_get_layer_success(id)
+                  << " layer_" << id << "_failed_vectors=" << slha_replace_get_layer_fail(id) << "\n";
+    }
+    std::cout << "END_SLHA_SCORE_MASK_SUMMARY\n";
+    std::cout.flush();
 }
 
 slha_kv_mode slha_kv_mode_from_env() {
@@ -91,11 +193,25 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
         if (state.score_mode == SLHA_SCORE_REPLACE) {
             g_slha_replace_counters.reset();
         }
+        slha_score_mask_reset();
         return 0;
     }
 
     state.kv_mode = mode;
     state.score_mode = slha_score_mode_from_env();
+
+    // Parse the score-replacement layer mask (default "all"). Syntax errors are
+    // caught now; range validation is deferred until the layer count is known.
+    {
+        const char * lm = std::getenv("SLHA_SCORE_LAYERS");
+        const std::string spec = lm ? std::string(lm) : std::string("all");
+        g_score_mask_syntax_ok = slha_mask::parse_layer_mask(spec, 0, g_score_mask);
+        if (!g_score_mask_syntax_ok && state.score_mode == SLHA_SCORE_REPLACE) {
+            std::cerr << "[SLHA] invalid SLHA_SCORE_LAYERS='" << spec
+                      << "': " << g_score_mask.error << " (run will be marked invalid)\n";
+        }
+        slha_score_mask_reset();
+    }
 
     state.weights_dir = weights_dir ? weights_dir : "";
 
@@ -409,6 +525,9 @@ void slha_global_shutdown() {
     slha_print_shadow_metrics_unlocked();
 
     if (state.score_mode == SLHA_SCORE_REPLACE) {
+        // Mask summary first: it reads per-layer counters that the replace
+        // summary clears on reset.
+        slha_print_score_mask_summary();
         slha_print_replace_summary();
     }
 
@@ -438,6 +557,14 @@ slha_layer_state * slha_get_layer_state(int32_t il) {
     auto & state = get_global_state();
     if (il < 0 || il >= static_cast<int32_t>(state.layers.size())) {
         return nullptr;
+    }
+    // Track the model's true layer count from graph-build calls (which all
+    // precede op execution) so the score mask can validate ranges.
+    int32_t prev = g_observed_num_layers.load(std::memory_order_relaxed);
+    while (il + 1 > prev &&
+           !g_observed_num_layers.compare_exchange_weak(prev, il + 1,
+                                                         std::memory_order_release,
+                                                         std::memory_order_relaxed)) {
     }
     return &state.layers[il];
 }
@@ -608,6 +735,35 @@ void slha_shadow_score(
         return;
     }
     const int64_t gqa_factor = n_head / n_kv_head;
+
+    // ==================================================================
+    // LAYER MASK (REPLACE mode) — unselected layers pass baseline through
+    // ==================================================================
+    if (layer->score_mode == SLHA_SCORE_REPLACE) {
+        // Resolve the mask against the now-known layer count (once, first op).
+        if (!g_score_mask_resolved) {
+            slha_resolve_score_mask_once();
+        }
+        if (!slha_layer_selected(layer->layer_id)) {
+            // Pass-through: copy baseline logits unchanged; count separately so
+            // active coverage reflects only selected layers.
+            const int64_t n = ggml_nelements(dst);
+            const int64_t i0 = (n * ith) / nth;
+            const int64_t i1 = (n * (ith + 1)) / nth;
+            const float * src = static_cast<const float *>(kq->data);
+            float * out = static_cast<float *>(dst->data);
+            for (int64_t i = i0; i < i1; ++i) out[i] = src[i];
+            if (ith == 0) {
+                g_unselected_callbacks.fetch_add(1, std::memory_order_relaxed);
+                g_unselected_vectors.fetch_add(
+                    static_cast<size_t>(n_stream * n_token * n_head), std::memory_order_relaxed);
+                g_unselected_logits.fetch_add(
+                    static_cast<size_t>(n_stream * n_token * n_head) * static_cast<size_t>(n_kv),
+                    std::memory_order_relaxed);
+            }
+            return;
+        }
+    }
 
     // ==================================================================
     // SHADOW MODE

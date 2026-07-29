@@ -68,6 +68,8 @@ if [ "$MODE" != "baseline" ]; then
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_llama.cpp" llama.cpp/src/
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_replace_counters.hpp" llama.cpp/src/
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_replace_counters.cpp" llama.cpp/src/
+    cp "$REPO_ROOT/integration/llama.cpp/shim/slha_layer_mask.hpp" llama.cpp/src/
+    cp "$REPO_ROOT/integration/llama.cpp/shim/slha_layer_mask.cpp" llama.cpp/src/
 fi
 
 # 4. Build llama.cpp.
