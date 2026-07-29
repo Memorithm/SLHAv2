@@ -157,6 +157,67 @@ echo "Results written to $OUTPUT_FILE"
 echo "Mode: $MODE"
 echo "llama.cpp commit: $LLAMA_COMMIT"
 
+# Collect-mode validation: emit a provenance manifest and enforce the
+# non-finite policy on the freshly collected calibration dumps. Default policy
+# is 'reject', so a collection that captured any non-finite (NaN / +/-Inf) row
+# fails here with a non-zero status instead of silently poisoning training.
+if [ "$MODE" = "collect" ]; then
+    echo "== validating collected calibration (policy=${SLHA_CALIBRATION_NONFINITE_POLICY:-reject}) =="
+    SHIM_DIR="$REPO_ROOT/integration/llama.cpp/shim"
+    CAL_TMP="$(mktemp -d)"
+    CALIBRATE_BIN="$CAL_TMP/slha_calibrate"
+    if "${CXX:-g++}" -O2 -std=c++17 -I"$SHIM_DIR" \
+            "$SHIM_DIR/slha_calibrate_cli.cpp" "$SHIM_DIR/slha_calibration.cpp" \
+            -o "$CALIBRATE_BIN"; then
+        REF_DIM="$(python3 - "$CALIB_DIR" <<'PY'
+import sys, glob, struct, re, os
+files = sorted(glob.glob(os.path.join(sys.argv[1], "layer-*-k.bin")),
+               key=lambda p: int(re.search(r"layer-(\d+)-k", p).group(1)))
+print(struct.unpack("<III", open(files[0], "rb").read(12))[2] if files else 0)
+PY
+)"
+        N_LAYERS="$(python3 - "$CALIB_DIR" <<'PY'
+import sys, glob, os
+print(len(glob.glob(os.path.join(sys.argv[1], "layer-*-k.bin"))))
+PY
+)"
+        MODEL_SHA="$(sha256sum "$MODEL_FILE" 2>/dev/null | cut -d' ' -f1)"
+        DATA_SHA="$(sha256sum "$DATA_FILE" 2>/dev/null | cut -d' ' -f1)"
+        TS_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        IMPL_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+        set +e
+        "$CALIBRATE_BIN" "$CALIB_DIR" \
+            --policy "${SLHA_CALIBRATION_NONFINITE_POLICY:-reject}" \
+            --expect-dim "$REF_DIM" \
+            --expect-layers "$N_LAYERS" \
+            --min-rows "${SLHA_CALIBRATION_MIN_ROWS:-1}" \
+            --manifest "$CALIB_DIR/calibration_manifest.json" \
+            --impl-commit "$IMPL_COMMIT" \
+            --llama-commit "$LLAMA_COMMIT" \
+            --model-id "$MODEL_REPO/$MODEL_FILE" \
+            --model-sha "$MODEL_SHA" \
+            --dataset-sha "$DATA_SHA" \
+            --timestamp "$TS_UTC" \
+            --command "build_and_roundtrip.sh collect"
+        CAL_RC=$?
+        set -e
+        rm -rf "$CAL_TMP"
+        echo "  manifest: $CALIB_DIR/calibration_manifest.json"
+        if [ "$CAL_RC" -ne 0 ]; then
+            echo "ERROR: calibration validation FAILED (rc=$CAL_RC). The collected dumps"
+            echo "  contain non-finite rows or a structural defect under the current policy."
+            echo "  Fix the source, re-collect, or (research only) re-run with"
+            echo "  SLHA_CALIBRATION_NONFINITE_POLICY=drop-row."
+            exit 1
+        fi
+        echo "  calibration validation PASSED"
+    else
+        echo "ERROR: failed to build slha_calibrate validator"
+        rm -rf "$CAL_TMP"
+        exit 1
+    fi
+fi
+
 # Replace-mode validation: parse SLHA_REPLACE_SUMMARY and reject unless valid.
 if [ "$MODE" = "replace" ]; then
     echo "== validating strict replace coverage =="
