@@ -1,6 +1,8 @@
 #include "slha_llama.hpp"
 #include "slha_replace_counters.hpp"
 #include "slha_layer_mask.hpp"
+#include "slha_score_scale.hpp"
+#include "slha_scale_fit.hpp"
 
 #include "slha.h"
 
@@ -15,6 +17,7 @@
 #include <thread>
 #include <vector>
 #include <string>
+#include <sstream>
 #include <iostream>
 #include <fstream>
 
@@ -42,6 +45,30 @@ static std::atomic<size_t> g_unselected_callbacks{0};
 static std::atomic<size_t> g_unselected_vectors{0};
 static std::atomic<size_t> g_unselected_logits{0};
 
+// --------------------------------------------------------------------------
+// Experimental per-layer score scaling (SLHA_SCORE_SCALE / _FILE). A positive
+// scalar a_layer multiplies each SLHA score at the raw-Q*K replacement seam,
+// which is exactly a per-layer softmax-temperature correction. Default 1.0
+// (unchanged production behaviour). Fail-closed: an invalid spec marks the
+// replace run invalid. See slha_score_scale.hpp. Kept separate from the strict
+// replace counters (like the layer mask) so those guarantees are not perturbed.
+// --------------------------------------------------------------------------
+static slha_scale::ScaleMap g_score_scale;    // resolved scale map (default global 1.0)
+static bool g_score_scale_active = false;     // an explicit scale spec was provided
+static bool g_score_scale_resolved = false;   // resolved against the selected set
+static std::string g_score_scale_env_spec;    // raw SLHA_SCORE_SCALE (re-parsed at resolve)
+static std::string g_score_scale_file_json;   // raw SLHA_SCORE_SCALE_FILE contents
+static std::atomic<size_t> g_scaled_vectors{0};   // vectors where a != 1.0 was applied
+static std::atomic<size_t> g_scaled_logits{0};    // logits multiplied by a != 1.0
+static std::atomic<size_t> g_scale_invalid{0};    // vectors that went non-finite after scaling
+
+static void slha_score_scale_reset() {
+    g_score_scale_resolved = false;
+    g_scaled_vectors.store(0, std::memory_order_relaxed);
+    g_scaled_logits.store(0, std::memory_order_relaxed);
+    g_scale_invalid.store(0, std::memory_order_relaxed);
+}
+
 static void slha_score_mask_reset() {
     std::lock_guard<std::mutex> lock(g_score_mask_mutex);
     g_score_mask_resolved = false;
@@ -49,6 +76,7 @@ static void slha_score_mask_reset() {
     g_unselected_callbacks.store(0, std::memory_order_relaxed);
     g_unselected_vectors.store(0, std::memory_order_relaxed);
     g_unselected_logits.store(0, std::memory_order_relaxed);
+    slha_score_scale_reset();
 }
 
 // Resolve the mask against the observed model layer count, once. Sets the
@@ -70,6 +98,29 @@ static void slha_resolve_score_mask_once() {
             g_score_mask = resolved;
         }
     }
+    // Resolve the experimental score scale: re-parse against the now-known layer
+    // count (catches out-of-range layer ids) and require that a PerLayer scale
+    // covers every selected layer (no silent 1.0 fallback).
+    if (!g_score_scale_resolved) {
+        g_score_scale_resolved = true;
+        if (g_score_scale_active && !g_score_mask_error && n > 0) {
+            bool ok = slha_scale::parse_score_scale(
+                g_score_scale_env_spec, g_score_scale_file_json, n, g_score_scale);
+            if (ok) {
+                const std::vector<int32_t> selected = g_score_mask.resolved_ids(n);
+                ok = slha_scale::resolve_against_selected(g_score_scale, selected);
+            }
+            if (!ok) {
+                std::cerr << "[SLHA] score scale invalid against " << n
+                          << " layers / selected set: " << g_score_scale.error
+                          << " (run will be marked invalid)\n";
+                g_score_mask_error = true;  // reuse the fail-closed path
+            }
+        } else if (g_score_scale_active && !g_score_scale.valid) {
+            g_score_mask_error = true;      // unparseable spec -> fail closed
+        }
+    }
+
     if (g_score_mask_error) {
         // Fail closed: mark the strict replace run invalid.
         g_slha_replace_counters.error_code.store(1, std::memory_order_release);
@@ -148,6 +199,39 @@ void slha_print_score_mask_summary() {
     std::cout.flush();
 }
 
+void slha_print_score_scale_summary() {
+    if (!g_score_scale_active) {
+        return;  // default 1.0 everywhere: nothing to report
+    }
+    const int n = g_observed_num_layers.load(std::memory_order_acquire);
+    // scale_manifest_valid: the scale parsed/resolved cleanly and the run was
+    // not otherwise failed closed.
+    const bool scale_valid = g_score_scale.valid && !g_score_mask_error;
+
+    std::cout << "\nSLHA_SCORE_SCALE_SUMMARY\n";
+    std::cout << "active=true\n";
+    std::cout << "source=" << (g_score_scale.source.empty() ? "(none)" : g_score_scale.source) << "\n";
+    std::cout << "mode=" << (g_score_scale.mode == slha_scale::Mode::Global ? "global" : "per_layer") << "\n";
+    std::cout << "requested_spec=" << (g_score_scale.spec.empty() ? "(empty)" : g_score_scale.spec) << "\n";
+    std::cout << "canonical=" << g_score_scale.canonical() << "\n";
+    std::cout << "manifest_sha256=" << g_score_scale.manifest_sha256 << "\n";
+    if (g_score_scale.mode == slha_scale::Mode::Global) {
+        std::cout << "global_scale=" << g_score_scale.global << "\n";
+    }
+    // Resolved scale on the layers where replacement actually executed.
+    for (int32_t id = 0; id < n && id < SLHA_MAX_LAYERS; ++id) {
+        if (slha_replace_get_layer_success(id) > 0) {
+            std::cout << "layer_" << id << "_scale=" << g_score_scale.get(id) << "\n";
+        }
+    }
+    std::cout << "scaled_vectors=" << g_scaled_vectors.load() << "\n";
+    std::cout << "scaled_logits=" << g_scaled_logits.load() << "\n";
+    std::cout << "invalid_scale=" << g_scale_invalid.load() << "\n";
+    std::cout << "scale_manifest_valid=" << (scale_valid ? "true" : "false") << "\n";
+    std::cout << "END_SLHA_SCORE_SCALE_SUMMARY\n";
+    std::cout.flush();
+}
+
 slha_kv_mode slha_kv_mode_from_env() {
     const char * env = std::getenv("SLHA_KV_MODE");
     if (!env) {
@@ -211,6 +295,59 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
                       << "': " << g_score_mask.error << " (run will be marked invalid)\n";
         }
         slha_score_mask_reset();
+    }
+
+    // Parse the experimental per-layer score scale (default global 1.0). A file
+    // spec (SLHA_SCORE_SCALE_FILE) takes precedence over the inline env spec
+    // (SLHA_SCORE_SCALE). Syntax/positivity is validated now; layer-id range and
+    // selected-set coverage are (re)validated once the layer count is known.
+    {
+        g_score_scale_env_spec.clear();
+        g_score_scale_file_json.clear();
+        const char * sc = std::getenv("SLHA_SCORE_SCALE");
+        const char * scf = std::getenv("SLHA_SCORE_SCALE_FILE");
+        if (scf && scf[0]) {
+            std::ifstream f(scf);
+            if (!f) {
+                std::cerr << "[SLHA] cannot open SLHA_SCORE_SCALE_FILE='" << scf << "'\n";
+                g_score_scale_active = true;              // fail closed: active but unparseable
+                g_score_scale.valid = false;
+                g_score_scale.error = "cannot open scale file";
+                g_score_scale.source = "file";
+            } else {
+                std::stringstream ss;
+                ss << f.rdbuf();
+                g_score_scale_file_json = ss.str();
+                g_score_scale_active = true;
+            }
+        } else if (sc && sc[0]) {
+            g_score_scale_env_spec = sc;
+            g_score_scale_active = true;
+        }
+
+        if (g_score_scale_active && (!g_score_scale_file_json.empty() || !g_score_scale_env_spec.empty())) {
+            // Early syntactic parse (num_layers=0 defers the id-range check).
+            slha_scale::parse_score_scale(g_score_scale_env_spec, g_score_scale_file_json,
+                                          0, g_score_scale);
+        }
+        if (g_score_scale_active && !g_score_scale.valid && state.score_mode == SLHA_SCORE_REPLACE) {
+            std::cerr << "[SLHA] invalid score scale: " << g_score_scale.error
+                      << " (run will be marked invalid)\n";
+        }
+        slha_score_scale_reset();
+    }
+
+    // Offline per-layer score-scale fitting (shadow diagnostic). Active only when
+    // SLHA_SCALE_FIT_JSON names an output path; the JSON is written at shutdown.
+    {
+        const char * fit = std::getenv("SLHA_SCALE_FIT_JSON");
+        if (fit && fit[0]) {
+            slha_scale_fit::reset();
+            slha_scale_fit::enable(true);
+            std::cout << "[SLHA] score-scale fit enabled -> " << fit << "\n";
+        } else {
+            slha_scale_fit::enable(false);
+        }
     }
 
     state.weights_dir = weights_dir ? weights_dir : "";
@@ -526,9 +663,25 @@ void slha_global_shutdown() {
 
     if (state.score_mode == SLHA_SCORE_REPLACE) {
         // Mask summary first: it reads per-layer counters that the replace
-        // summary clears on reset.
+        // summary clears on reset. The scale summary reads the same per-layer
+        // success counts, so it must also print before the replace summary.
         slha_print_score_mask_summary();
+        slha_print_score_scale_summary();
         slha_print_replace_summary();
+    }
+
+    // Write the offline score-scale fit (shadow diagnostic) if requested.
+    if (slha_scale_fit::enabled()) {
+        const char * fit = std::getenv("SLHA_SCALE_FIT_JSON");
+        if (fit && fit[0]) {
+            std::ofstream out(fit);
+            if (out) {
+                out << slha_scale_fit::dump_json();
+                std::cout << "[SLHA] wrote score-scale fit to " << fit << "\n";
+            } else {
+                std::cerr << "[SLHA] failed to write SLHA_SCALE_FIT_JSON='" << fit << "'\n";
+            }
+        }
     }
 
     for (auto & layer : state.layers) {
@@ -823,6 +976,12 @@ void slha_shadow_score(
         const int64_t start = ith * per_thread;
         const int64_t end = std::min(start + per_thread, total);
 
+        // Offline score-scale fit (SLHA_SCALE_FIT_JSON). Accumulate this thread's
+        // (baseline, slha) pairs over causally-unmasked positions into one local
+        // accumulator, merged into the per-layer registry after the loop.
+        const bool do_scale_fit = slha_scale_fit::enabled();
+        slha_scale_fit::LayerAcc fit_acc;
+
         for (int64_t idx = start; idx < end; ++idx) {
             const int64_t s = idx / (n_token * n_head);
             const int64_t r = idx % (n_token * n_head);
@@ -881,6 +1040,17 @@ void slha_shadow_score(
             }
             layer->shadow_metrics->add_vector(baseline_vec, slha_vec);
 
+            // Score-scale fit: accumulate (baseline, slha) over the causal region
+            // only. Query token t (fresh-context chunk, position t) attends keys
+            // 0..t; using k <= t is a strict subset of the truly-unmasked keys,
+            // so no softmax-masked position ever enters the magnitude fit.
+            if (do_scale_fit) {
+                const int64_t kmax = std::min<int64_t>(t + 1, n_kv);
+                for (int64_t k = 0; k < kmax; ++k) {
+                    fit_acc.add(baseline_vec[k], slha_vec[k]);
+                }
+            }
+
             // Padding baseline audit: measure baseline values at positions
             // k >= n_written where no tile data exists.
             const size_t n_written_shadow = g_slha_tiles_written[layer->layer_id].load(std::memory_order_acquire);
@@ -905,6 +1075,9 @@ void slha_shadow_score(
                               << " nonfinite=" << n_nonfinite << "\n";
                 }
             }
+        }
+        if (do_scale_fit && fit_acc.n > 0.0) {
+            slha_scale_fit::merge_layer(layer->layer_id, fit_acc);
         }
         return;
     }
@@ -1119,6 +1292,31 @@ void slha_shadow_score(
                 g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
                 g_slha_replace_counters.error_code.store(1, std::memory_order_release);
                 continue;
+            }
+
+            // Experimental temperature correction: multiply the raw SLHA scores
+            // by the per-layer scale a BEFORE llama.cpp applies the fixed
+            // 1/sqrt(head_dim) softmax scale. a == 1.0 is a no-op (default). Any
+            // non-finite result fails closed (no partial write).
+            if (g_score_scale_active) {
+                const double a = g_score_scale.get(layer->layer_id);
+                if (a != 1.0) {
+                    bool scaled_finite = true;
+                    for (size_t k = 0; k < n_check; ++k) {
+                        const double v = static_cast<double>(temp_scores[k]) * a;
+                        if (!std::isfinite(v)) { scaled_finite = false; break; }
+                        temp_scores[k] = static_cast<float>(v);
+                    }
+                    if (!scaled_finite) {
+                        g_scale_invalid.fetch_add(1, std::memory_order_relaxed);
+                        g_slha_replace_counters.n_nonfinite_score.fetch_add(1, std::memory_order_relaxed);
+                        g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
+                        g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                        continue;
+                    }
+                    g_scaled_vectors.fetch_add(1, std::memory_order_relaxed);
+                    g_scaled_logits.fetch_add(n_check, std::memory_order_relaxed);
+                }
             }
 
             // Write validated scores to dst (first n_check positions)
