@@ -1,2 +1,4 @@
 replace_strict_tests
+calibration_tests
+calib_test_tmp
 *.o
