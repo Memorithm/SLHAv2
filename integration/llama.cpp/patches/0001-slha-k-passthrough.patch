@@ -7,7 +7,7 @@ index 320784c3a..63a33c0e7 100644
              )
  
 +if (SLHA_INTEGRATION)
-+    target_sources(llama PRIVATE slha_llama.cpp slha_replace_counters.cpp slha_layer_mask.cpp)
++    target_sources(llama PRIVATE slha_llama.cpp slha_replace_counters.cpp slha_layer_mask.cpp slha_score_scale.cpp slha_scale_fit.cpp)
 +    target_compile_definitions(llama PRIVATE SLHA_INTEGRATION)
 +    target_include_directories(llama PRIVATE ${SLHA_INCLUDE_DIR})
 +    target_link_libraries(llama PRIVATE ${SLHA_LIB})

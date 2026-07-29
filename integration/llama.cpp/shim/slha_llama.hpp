@@ -161,6 +161,12 @@ void slha_print_replace_summary();
  *  fail-closed mask_valid flag. Called after the replace summary. */
 void slha_print_score_mask_summary();
 
+/** Print the experimental score-scale summary: active flag, source, mode,
+ *  requested/canonical spec, manifest hash, per-executed-layer resolved scale,
+ *  scaled_vectors/logits, invalid_scale, and the scale_manifest_valid flag.
+ *  Only prints when a scale spec was provided (SLHA_SCORE_SCALE / _FILE). */
+void slha_print_score_scale_summary();
+
 void slha_flush_collected_activations(const char * output_dir);
 void slha_print_shadow_metrics();
 void slha_print_shadow_metrics_unlocked();
