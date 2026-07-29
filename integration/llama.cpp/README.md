@@ -441,6 +441,118 @@ so the baseline logits are materialised and the tile-store positions stay
 contiguous within a single sequence. Replace mode additionally pins
 `--batch-size 512`.
 
+## Research: layerwise SLHA score-quality diagnosis
+
+This section diagnoses **which layers** the direct compressed-score replacement
+path degrades and **which score distortion** predicts that degradation. It is a
+diagnostic milestone — the production score mathematics are unchanged.
+
+Provenance: SLHAv2 `23e27c0`, llama.cpp `fdb1db877c526ec90f668eca1b858da5dba85560`,
+Qwen2.5-1.5B-Instruct Q8_0, WikiText-2 test, mixed codec, weights from the
+corrected PR #59 pipeline. Full data + hashes:
+[`results/layerwise_score_gap.json`](results/layerwise_score_gap.json).
+
+### Experimental layer-mask interface
+
+`SLHA_SCORE_LAYERS` selects which layers use direct SLHA score replacement;
+unselected layers pass baseline Q·K through unchanged.
+
+| Spec | Meaning | | Spec | Meaning |
+| --- | --- | --- | --- | --- |
+| `all` | every layer (default) | | `0-6` | inclusive range |
+| `none` | no layer (only valid empty) | | `0-3,7,12-14` | combined |
+| `7` / `3,7,12` | single / list | | (invalid) | fails closed → `valid=false` |
+
+Parsing is strict: negatives, out-of-range ids (checked against the model layer
+count), malformed ranges, and an empty spec are rejected; duplicates are
+de-duplicated deterministically. `SLHA_SCORE_MASK_SUMMARY` reports the requested,
+resolved, and executed masks plus per-selected-layer coverage.
+
+### Method
+
+Screening ran at **4 chunks** (reduced from 12 — this session's host was
+materially slower); the pass-through control used the same 4 chunks, so every
+delta is consistent. Deltas are versus the **pass-through custom-op control**
+(B). One run per configuration (screening).
+
+### Controls and headline
+
+| Control | mean PPL (4 chunks) | Δ vs B |
+| --- | ---: | ---: |
+| A unpatched baseline | 9.3852 | — |
+| B pass-through custom op | 9.3852 | 0.0000 |
+| C all-layer replacement | 13.5421 | **+4.1569 (+44.3%)** |
+
+The custom op is inert (A = B); all-layer replacement reproduces PR #58's ~+42 %
+gap at the reduced chunk count.
+
+**The degradation is distributed and super-additive.** The five most-damaging
+single layers are 5 (+0.577), 0 (+0.253), 12 (+0.150), 8 (+0.122), 24 (+0.121);
+the five least are 21 (+0.020), 27 (+0.007), 18 (+0.006), 25 (−0.057), 3
+(−0.065) — two layers *improve* PPL alone. No single layer dominates: the largest
+is 0.58 of the 4.16 total. The **sum of the 28 single-layer deltas is 2.245**,
+but all-layer replacement is **4.157** — a **1.85× super-additive** amplification:
+errors compound through the residual stream.
+
+Cumulative prefixes confirm progressive, mid-network-weighted accumulation:
+
+| Prefix | ΔPPL | | Prefix | ΔPPL |
+| --- | ---: | --- | --- | ---: |
+| `0` | +0.253 | | `0-13` | +2.853 |
+| `0-3` | +0.393 | | `0-20` | +3.773 |
+| `0-6` | +1.546 | | `0-27` | +4.157 |
+
+The largest increments fall in the middle of the stack (layers ~4–20).
+Cumulative **suffixes** (from the top of the stack) confirm the front-loading:
+`14-27` (last 14 layers) is only +0.579 while `0-13` (first 14) is +2.853 — the
+**first half causes ~5× the damage of the second half**. The four quartiles
+`0-6 / 7-13 / 14-20 / 21-27` contribute **+1.55 / +0.49 / +0.45 / +0.15**: damage
+is concentrated in the **first quartile** and tapers toward the output.
+
+### Best predictor of PPL damage (exploratory, 28 layers)
+
+Correlating single-layer PPL damage against per-layer raw-score shadow metrics:
+
+| Metric | Pearson | Spearman |
+| --- | ---: | ---: |
+| **top-1 attention agreement** | **−0.42** | **−0.51** |
+| top-5 overlap | −0.42 | −0.40 |
+| MAE | +0.37 | +0.50 |
+| cosine | +0.01 | −0.34 |
+| relative-L2 | −0.01 | +0.17 |
+
+**Top-1 agreement is the best predictor** (Spearman −0.51): damage tracks how
+often SLHA's *argmax* key differs from baseline's, not the overall score
+correlation. Raw-score cosine (~0.99 everywhere) does **not** predict damage.
+With only 28 layers these are exploratory (moderate |ρ|).
+
+### Score-path semantics (audit)
+
+The op replaces logits after the raw `kq = Q·K` and **before** `soft_max_ext`, so
+for both paths the `1/sqrt(head_dim)` scale, causal mask, RoPE positional
+information, GQA head mapping, and (absent) softcap are **identical**. Qwen2.5 has
+no attention logit softcap; there is no additive positional bias; baseline and
+SLHA use identical active KV lengths (padded positions are exactly zero and
+masked). **Only two things differ:** the score approximation itself, and that the
+*same fixed* `1/sqrt(head_dim)` scale is applied to SLHA scores whose magnitude
+is not calibrated to Q·K. If `E[|slha|] ≠ E[|Q·K|]` the effective softmax
+temperature differs — the leading mechanism hypothesis for the damage, consistent
+with top-1 (argmax) agreement being the best damage predictor.
+
+### Limitations
+
+Single-run screening at a reduced chunk count (not a formal noise floor);
+28-layer correlations are exploratory. The finer post-softmax / affine /
+per-head / position diagnostics were left to out-of-tree instrumentation
+(archived + hashed in the results JSON); that instrumentation segfaulted on this
+host and did not emit metrics, so the post-softmax analysis rests on the
+committed raw-score shadow metrics (top-1 agreement being the argmax/attention
+selection signal) and the score-path audit rather than on measured softmax
+divergences. Absolute PPLs are not comparable to the 12-chunk PR #58 numbers, but
+within-experiment deltas are. The root cause is not proven: the
+temperature-mismatch hypothesis needs an end-to-end scale experiment, and
+super-additivity means single-layer screening understates joint damage.
+
 ## Earlier round-trip results
 
 Recorded under the earlier protocol; see git history and

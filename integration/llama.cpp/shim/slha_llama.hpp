@@ -156,6 +156,11 @@ extern std::atomic<size_t> g_slha_tiles_written[SLHA_MAX_LAYERS];
 
 void slha_print_replace_summary();
 
+/** Print the score-replacement layer-mask summary: requested spec, resolved
+ *  layer ids, executed layer ids, unselected pass-through counts, and the
+ *  fail-closed mask_valid flag. Called after the replace summary. */
+void slha_print_score_mask_summary();
+
 void slha_flush_collected_activations(const char * output_dir);
 void slha_print_shadow_metrics();
 void slha_print_shadow_metrics_unlocked();
