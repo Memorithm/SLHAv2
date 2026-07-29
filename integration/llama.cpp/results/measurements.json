@@ -1,94 +1,1047 @@
 {
-  "meta": {
-    "experiment": "SLHA v2 K-cache quality round-trip",
-    "llama_cpp_tag": "b9860",
+  "experiment": {
+    "name": "SLHA v2 direct compressed-score replacement quality gate",
+    "milestone": "score quality only; no KV-cache memory reduction and no fused attention kernel",
+    "date_utc": "2026-07-29",
+    "experiment_root_local": "/tmp/slha-score-quality-6361dfd",
+    "note": "Paths under experiment_root_local are experiment-local artifact locations on the measurement host, not portable reproduction commands. Reproduction commands below are repository-relative."
+  },
+  "provenance": {
+    "slha_repo_commit": "6361dfdbcd30660bf2d623fe19029938dd209cd7",
+    "slha_repo_commit_subject": "Feat/llama compressed score quality gate (#57)",
     "llama_cpp_commit": "fdb1db877c526ec90f668eca1b858da5dba85560",
-    "slha_repo_commit": "97f4d6bf4db51672973f9f368429fc6ea495700f",
-    "model_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+    "llama_cpp_tag": "b9860",
+    "measurement_branch": "claude/compressed-score-quality-gate-qiqbm5",
+    "working_tree_clean_before_measurement": true,
+    "history_note": "The original feature-branch commits (canonical compressed-score C API, shadow score gate, richer shadow metrics, strict fail-closed replacement) were squash-merged through PR #57 into implementation commit 6361dfdbcd30660bf2d623fe19029938dd209cd7. The strict replacement implementation was therefore measured from 6361dfd. The pre-merge SHAs no longer exist in this repository.",
+    "documentation_commit_is_later_than_measured_implementation_commit": true
+  },
+  "environment": {
+    "host_architecture": "x86_64",
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+    "cpu_cores_available": 4,
+    "ram_gb": 15,
+    "gpu": "none (CPU-only build)",
+    "os": "Ubuntu 24.04.4 LTS",
+    "kernel": "6.18.5",
+    "cc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "cxx": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "cmake": "3.28.3",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)",
+    "cmake_flags_common": "-DGGML_NATIVE=ON -DLLAMA_CURL=OFF",
+    "cmake_flags_slha": "-DSLHA_INTEGRATION=ON -DSLHA_INCLUDE_DIR=<repo>/slha-c/include -DSLHA_LIB=<repo>/target/release/libslha.a"
+  },
+  "evaluation_protocol": {
+    "chunks": 12,
+    "context_length": 512,
+    "batch_size": 512,
+    "parallel_sequences": 1,
+    "threads": 4,
+    "flash_attention": "off",
+    "identical_across_all_rungs": true,
+    "verified_from_runtime_output": true,
+    "perplexity_arguments": "--chunks 12 -t 4 --flash-attn off --parallel 1 --batch-size 512",
+    "strict_mode_requirement": "batch size 512, parallel sequences 1, flash attention off"
+  },
+  "inputs": {
     "model_file": "qwen2.5-1.5b-instruct-q8_0.gguf",
     "model_sha256": "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8",
-    "dataset_test": "WikiText-2-raw-v1 split=test",
-    "dataset_test_file": "wiki.test.raw",
-    "dataset_test_sha256": "136677b69515d194d28d42728ac1ba29850b67cd30715bbb7a4a023815ab01d5",
-    "dataset_calib": "WikiText-2-raw-v1 split=train",
-    "dataset_calib_file": "wiki.train.raw",
-    "dataset_calib_sha256": "981baada725bd8d768ceadc500e52ec4d8571f5a2904c62fbe5ad03cf6bd1293",
-    "weights_manifest_sha256": "485031d795546a16a8a7106ac2baec7a3c4d34c8512f61e612b3ffc38e77eecb",
-    "chunks": 12,
-    "n_ctx": 512,
-    "threads": 4,
-    "calibration_max_chars": 120000,
-    "total_eval_tokens": 6144,
-    "insertion_point": "llama_kv_cache::cpy_k after ggml_view_2d"
+    "eval_dataset_file": "wiki.test.raw",
+    "eval_dataset_sha256": "136677b69515d194d28d42728ac1ba29850b67cd30715bbb7a4a023815ab01d5",
+    "calib_dataset_file": "wiki.train.raw",
+    "calib_dataset_sha256": "981baada725bd8d768ceadc500e52ec4d8571f5a2904c62fbe5ad03cf6bd1293",
+    "integration_patch_sha256": "576eca5002ed3ba5deee45ff047d7227d05083837463a3a8d32a4f21292e6202",
+    "slha_llama_cpp_sha256": "d77ee380a25caf61c151920c5abf5a538bca936583a6566aa2fed787ffc37aed",
+    "slha_replace_counters_cpp_sha256": "4fbe4858a8d896dc849a53ece11b5c05f5be7f4741ba649d560fb0401a7d69fc"
   },
-  "modes": {
-    "baseline": {
-      "slha_kv_mode": "off",
-      "codec": null,
-      "ppl": 11.8753,
-      "ppl_std": 0.58762,
-      "seconds_per_pass": 45.85,
-      "total_seconds": 137.559,
-      "tokens_per_second": 44.66,
-      "notes": "original llama.cpp build"
+  "environment_variables": {
+    "strict_replace": {
+      "SLHA_CODEC": "mixed",
+      "SLHA_KV_MODE": "tilestore",
+      "SLHA_SCORE_MODE": "replace",
+      "SLHA_WEIGHTS_DIR": "<experiment>/weights"
     },
-    "passthrough": {
-      "slha_kv_mode": "passthrough",
-      "codec": null,
-      "ppl": 11.8753,
-      "ppl_std": 0.58762,
-      "seconds_per_pass": 45.71,
-      "total_seconds": 137.101,
-      "tokens_per_second": 44.81,
-      "delta_ppl_absolute": 0.0,
-      "delta_ppl_relative": 0.0,
-      "notes": "custom GGML op copies K unchanged; confirms hook inertness"
+    "tilestore_only": {
+      "SLHA_KV_MODE": "tilestore",
+      "SLHA_CODEC": "mixed"
     },
-    "roundtrip_mixed": {
-      "slha_kv_mode": "roundtrip",
-      "codec": "mixed",
-      "ppl": 16.5976,
-      "ppl_std": 0.85361,
-      "seconds_per_pass": 48.67,
-      "total_seconds": 145.339,
-      "tokens_per_second": 42.28,
-      "delta_ppl_absolute": 4.7223,
-      "delta_ppl_relative": 0.3977,
-      "notes": "SLHA encode/decode through 128-byte tile with latent+residual reconstruction"
+    "patched_off": {
+      "SLHA_KV_MODE": "off"
     },
-    "roundtrip_mix3": {
-      "slha_kv_mode": "roundtrip",
-      "codec": "mix3",
-      "ppl": 16.6460,
-      "ppl_std": 0.85697,
-      "seconds_per_pass": 48.25,
-      "total_seconds": 145.525,
-      "tokens_per_second": 42.22,
-      "delta_ppl_absolute": 4.7707,
-      "delta_ppl_relative": 0.4017,
-      "notes": "MIX3 codec (mixed 8-bit head + TQ3 separable body)"
-    },
-    "shadow_mixed": {
-      "slha_kv_mode": "tilestore",
-      "slha_score_mode": "shadow",
-      "codec": "mixed",
-      "ppl": 11.8699,
-      "ppl_std": 0.58692,
-      "seconds_per_pass": 91.26,
-      "total_seconds": 273.79,
-      "tokens_per_second": 22.44,
-      "delta_ppl_absolute": -0.0054,
-      "delta_ppl_relative": -0.0005,
-      "notes": "shadow score quality gate; attention output unchanged, prints per-layer SLHA-vs-baseline metrics (MAE, max_abs_err, rel_l2, cosine, top-1/top-5 overlap)"
+    "padaudit_padzero": {
+      "SLHA_KV_MODE": "tilestore",
+      "SLHA_SCORE_MODE": "paddiag",
+      "SLHA_CODEC": "mixed"
     }
   },
   "commands": {
-    "baseline": "WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh baseline",
-    "passthrough": "WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh passthrough",
-    "collect_calib": "CALIB_DIR=/tmp/slha-llama/calibration DATA_FILE=/tmp/slha-llama/wiki.train.raw WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh collect",
-    "train_weights": "WORK=/tmp/slha-llama CALIB_DIR=/tmp/slha-llama/calibration WEIGHTS_DIR=/tmp/slha-llama/weights integration/llama.cpp/scripts/train_layer_weights.sh mixed",
-    "roundtrip_mixed": "SLHA_CODEC=mixed WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip",
-    "roundtrip_mix3": "SLHA_CODEC=mix3 WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip",
-    "shadow_mixed": "SLHA_CODEC=mixed WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh shadow"
-  }
+    "note": "Repository-relative. WORK must point at a clean experiment directory.",
+    "build_c_bridge": "cargo build --release -p slha-c",
+    "collect_calibration": "CALIB_DIR=$WORK/calibration DATA_FILE=$WORK/wiki.train.raw WORK=$WORK integration/llama.cpp/build_and_roundtrip.sh collect",
+    "sanitize_calibration": "python3 sanitize_calibration.py $WORK/calibration $WORK/calibration-clean $WORK/calibration_sanitization_report.json   # out-of-tree, see limitations",
+    "train_weights": "MODEL_REPO=Qwen/Qwen2.5-1.5B-Instruct-GGUF MODEL_FILE=qwen2.5-1.5b-instruct-q8_0.gguf WORK=$WORK CALIB_DIR=$WORK/calibration-clean WEIGHTS_DIR=$WORK/weights integration/llama.cpp/scripts/train_layer_weights.sh mixed",
+    "strict_replace": "SLHA_CODEC=mixed WORK=$WORK integration/llama.cpp/build_and_roundtrip.sh replace",
+    "baseline": "llama-perplexity -m <model> -f <wiki.test.raw> --chunks 12 -t 4 --flash-attn off --parallel 1 --batch-size 512   # unpatched build"
+  },
+  "calibration_preprocessing": {
+    "applied": true,
+    "reason": "graph-warmup-like rows containing non-finite K activations",
+    "method": "remove complete rows containing any non-finite value",
+    "rule_is_deterministic": true,
+    "finite_values_modified": false,
+    "imputation_or_clamping_applied": false,
+    "script": "sanitize_calibration.py",
+    "script_sha256": "4f0d7e3f0bbd557afd99085ca899d45bc4916bd0a9e4d014e26f7775b9ba32a4",
+    "total_rows_removed": 27,
+    "layers_affected": 27,
+    "observed": {
+      "one_non_finite_row_in_layers": "1-27",
+      "layer_0_unchanged": true,
+      "removed_row_indices_observed": [
+        0,
+        1
+      ],
+      "rows_per_affected_layer": "6146 raw -> 6145 clean",
+      "all_removed_rows_contained_nan": true,
+      "removed_rows_containing_infinity": 0
+    },
+    "inference": "The position and pattern are consistent with a warmup-like callback, but the exact origin was not instrumentally proven.",
+    "raw_aggregate_sha256": "0f894a2447e3d55960ca293e01149f563be8bfc821206dd0e09e41388312303c",
+    "clean_aggregate_sha256": "cc45f3e239267c5ef4cfa646434156318aa37b5a1b4e3b83f853250b07757369",
+    "per_layer": [
+      {
+        "layer": 0,
+        "raw_rows": 6146,
+        "clean_rows": 6146,
+        "removed_rows": 0,
+        "rows_with_nan": 0,
+        "rows_with_inf": 0,
+        "removed_row_indices": [],
+        "raw_sha256": "67c4b3a06171f8ca80ae2b8f94783ebc58a604e8b39259ac81879e0a7b1c5ff0",
+        "clean_sha256": "67c4b3a06171f8ca80ae2b8f94783ebc58a604e8b39259ac81879e0a7b1c5ff0"
+      },
+      {
+        "layer": 1,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "9d14556312a4831da08d7e974c9cf04f4b2b77d554d58b2a11c18391ee6b3f85",
+        "clean_sha256": "8a8744e84ec31b46b54bbd7f9ae9731aadcbe1571f805a7f0d510c59f3aaca53"
+      },
+      {
+        "layer": 2,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "84ccc3192c69676a69517cf8834fa1e9c31a1b0a14790b2bdae66d4cecfad3e9",
+        "clean_sha256": "5227d66fc5c2831c03f22973040326ba22e5661ccf36f64842b7bb24789b1e45"
+      },
+      {
+        "layer": 3,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "683283237b63605352d7266a7cee2b832e9b3f7059fbe38c57a3e45188ad0c8d",
+        "clean_sha256": "051d5b20b32c69bb788f5adc2318af4077b74ecff52f44c44603d9f6dd7341ef"
+      },
+      {
+        "layer": 4,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "66f54e71759243813c3c643af2f07433dbafd461148bbace418dbfe750b1b550",
+        "clean_sha256": "43e13309baed34555896584ba829289c4b5f4d993b0b238ae8e8e26a563867c8"
+      },
+      {
+        "layer": 5,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "f98a511515e98888006c82e6d838050bf642e9f57ef32128dfdee2d6a391a696",
+        "clean_sha256": "4938fef8e920eb63f892955dd7d848e5c09feeadb06bf633191dd7bd41b6573f"
+      },
+      {
+        "layer": 6,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "d0f1bdda174df80a859508088ac5293accc45d4bdaca7fcb5eb5d09b62a753a1",
+        "clean_sha256": "529fb251070288dfd361d69fb748224e127b7965138832b1b45822111c809df4"
+      },
+      {
+        "layer": 7,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "d1da54d9ecfd8860f6ce14472861c66f0805f70b10b07805d30c2ab9b854cd4a",
+        "clean_sha256": "cf38f07e6d2d6ebcbbc5aaaefa2850cb4e4a3923a36f8266cdc24c79f89e3dca"
+      },
+      {
+        "layer": 8,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "584a1705aea815b25e412cc11bece07ec49bff86b4c8cf778382626958bb6ebc",
+        "clean_sha256": "3f8c444d076053fa84d2d081a344c479ed7db33618a1f6f5ca952a23a2e22474"
+      },
+      {
+        "layer": 9,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "0a05f5cb546f38aca09006079536d86a0847aa4f13db4886ca9edbbc416c4f6e",
+        "clean_sha256": "cc2b40c20bb44517a7f7a2ffcf2731212a2c6b8ac3c72679b29633e403c5cc0e"
+      },
+      {
+        "layer": 10,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "9e414e6525f38ba52dca2bf5b68f8db2031ce402859ca990ee2af12e349a69ab",
+        "clean_sha256": "99cfe8d9767b1f51f536a220271b96a52a3a5a2f6f355c1b9e86b57b86a301bb"
+      },
+      {
+        "layer": 11,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "a880791f9154f03e30be3b444deeb0f7c10a6f96927147ef66ad8d02c89bc7af",
+        "clean_sha256": "ef2fa67095c8b955cd6306967d24e26da3d0c2d6d9fce2e66695d6abf1565c5f"
+      },
+      {
+        "layer": 12,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "23c12d97ce9bfc00b4c509605bc077a42916d18b40cc0395aa00ffadef933bfb",
+        "clean_sha256": "226de4345aab66431749a2008344d4afece9895bfa657742cf2b7b87475411a4"
+      },
+      {
+        "layer": 13,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "203c1134c5f77a434db4d79031940587236f771f82a2b4aa09eec54e86038827",
+        "clean_sha256": "4df21d0f4ad4b168df525eaee8ec03c42c4b01295700ceb494b69a4b50bfe96d"
+      },
+      {
+        "layer": 14,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "73eaf8bbd7d999a2f674a0745776afca7fee9902806ced3131b88dc5df92e824",
+        "clean_sha256": "8006283af861b9908722c2c435864627e576d1d87e5e27e0a42f6adf26fab5ff"
+      },
+      {
+        "layer": 15,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "a1f5e8146d7cbd845df6ffa34df870c36191f86f66dcb265b1526f0c68b081cb",
+        "clean_sha256": "654462dac525ffa4ddf1eb48532d839ba71ec529c2276be1485af1342d19e8ad"
+      },
+      {
+        "layer": 16,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "5d6f67cc8cabccdf5d8e121a6d6f28c4283bd23de12ee2fef618c052a38b6495",
+        "clean_sha256": "fbda9e083631530f8a38cae3809b1b7b3e07ef5459dfbbf4e0679f9e805f78b3"
+      },
+      {
+        "layer": 17,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "8332b4cf16a6e74818a7649cedfa856f578322770e1608232323af45a1f19e1b",
+        "clean_sha256": "bb20f2b7e3ef11ae82714a442e629827abb18955fce98bdb76bfa18cca51a300"
+      },
+      {
+        "layer": 18,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "1f823b7137f304f7822380f386f18eceb322e5de5247b311e115cfb7b09c0931",
+        "clean_sha256": "ad342aa9f4d2b2be002c6b5a0be1d7eb1a19d4febfc41532c8877b43a0a237f9"
+      },
+      {
+        "layer": 19,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "b2a66d69f37a33e802f1b0c3e47af43fc2b67aaeea23856e3758508ae2feb21d",
+        "clean_sha256": "65a85170631e1d9beb2696828c5218c1dac9efd8c1068f570962f6b7fa2df20e"
+      },
+      {
+        "layer": 20,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "d245e56f5e8752a7312cbbea0d59fcfc03f713bc93ad11989845f1cd1a14ca89",
+        "clean_sha256": "f9ed9ef9b3cd415a035babac40eb3bce4486105a88ef3be0d80e091b9a561d4b"
+      },
+      {
+        "layer": 21,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "c78e1cd6bbb17b01f040ba3dddfc7fec015b7668f0cda320f1cacbb7fd388dbe",
+        "clean_sha256": "9a8c87bbc4db938524daf201d08db843515fca56a57f9d1fd82d1c626889ec9a"
+      },
+      {
+        "layer": 22,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "b9eae8c2359bacbcc9dbc8dbaababd671be5d0e75fd088c433402521b9722c4e",
+        "clean_sha256": "c89ba6f44be6b66cb1679de2fdfbe1f1b43bcba5df029e97c0182df472b78994"
+      },
+      {
+        "layer": 23,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "e21833eee7b223cb95df51772c2d829547f03d6a249f28a6c4b0b1fd6b1d0fe7",
+        "clean_sha256": "6450eb99ba06dc259f78ca415f6ed300839cfdb93a98536e2f5863b964d3b47d"
+      },
+      {
+        "layer": 24,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "19f53df221da78d9fc8bafc7b1b1735732f0ed96d4e83cee962cfb6723b46208",
+        "clean_sha256": "412718dd401a2f79b22ecc5b81dc0f6248780c4db94a64e1b7d4192b1b43d5bd"
+      },
+      {
+        "layer": 25,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "24d58d1f85980e23acb99d916d7178ff499ed7ed62a64519d15e8f3868080092",
+        "clean_sha256": "93c8c7292101bee6e3c5aae75d1de5d51f2c61e1adeaeab6987f656eac9b746a"
+      },
+      {
+        "layer": 26,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          1
+        ],
+        "raw_sha256": "16745e0f994180e968893c0b35f3410b8bd703e5c9fa6f1d39ba349ad045f4a6",
+        "clean_sha256": "cb1ec93722e22fbae6dd3c36bd6288a30f8d117147fdd4df4483e749cb8e2781"
+      },
+      {
+        "layer": 27,
+        "raw_rows": 6146,
+        "clean_rows": 6145,
+        "removed_rows": 1,
+        "rows_with_nan": 1,
+        "rows_with_inf": 0,
+        "removed_row_indices": [
+          0
+        ],
+        "raw_sha256": "83914abdffb31bff8130e95e1185acf02ff554564cf3171ecde944d3f8f87d46",
+        "clean_sha256": "0da3cd01d58cc00ef3446b441f7f24f987fbbc4322fb96037e1c36b43e162d28"
+      }
+    ]
+  },
+  "weights": {
+    "collection_implementation_commit": "6361dfdbcd30660bf2d623fe19029938dd209cd7",
+    "training_implementation_commit": "6361dfdbcd30660bf2d623fe19029938dd209cd7",
+    "generated_after_squash_merge": true,
+    "codec": "mixed",
+    "num_weight_files": 28,
+    "model_identifier": "Qwen/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q8_0.gguf",
+    "manifest_sha256": "1d5c67e40b6de0cbab51cc339b71a8fe318ea4403166dd521ba25b0442ba2a3c",
+    "weights_aggregate_sha256": "8136564ef1213e1b8c4cd8bf3bee3f65d98d919f4231102bac586aee1ede0db7",
+    "per_file_sha256": {
+      "layer-000.slhw": "b14ffe5c2a82a44ceff4e23bc4505c535e55480b4a8359d2e127aa1b5edc6453",
+      "layer-001.slhw": "e59cb6f324cbd676c1fec8dcc2d6b6b967ac2a490c1c51cf0566b5739328489f",
+      "layer-002.slhw": "78883d0f5b547c911af2d557ba057fb7fcece0496532985da8e7cff061405eca",
+      "layer-003.slhw": "692a16090717799b31d7508426eae9bc74e476fa4a7c4c3ddc91a8b0347cd835",
+      "layer-004.slhw": "400a82be0f1c7b8bcfbc76438c2b31358671b1a67482c0e6f3b3a3d681e4ff63",
+      "layer-005.slhw": "5432b3f54e27bdafa90c596f4543dceaaadfd9bb2ab7ef30d584d1ef77c8d704",
+      "layer-006.slhw": "b4d2c19f4efb2a6c001e8576f9373f7abe831ba7755b0ab0981e1513d6e1b849",
+      "layer-007.slhw": "c26b8baae449783da33a0dd3de25ac6b2723d14ee9700597c6e6ea236dea5cdf",
+      "layer-008.slhw": "3afc4c290f6a9cc3a19706592ae6d4ec21541cc49876fe8b74494c24df9d356e",
+      "layer-009.slhw": "c05bf48c154dface4c63c3b9edc37d96c8c572b4313afe0bf061dd57c26ded95",
+      "layer-010.slhw": "c54d8c27d0b610366101c37a643ac229d7a9a37a961d5fb1d83b171eae3c3631",
+      "layer-011.slhw": "9a7c9254d75766729d65584ab4615e413b2da8dc7a532f1162ce2d56a6037210",
+      "layer-012.slhw": "84d705162485837016462823841c4587293d804db629cc75861bf4ddfad86e86",
+      "layer-013.slhw": "6ea258af706654962b646acf5e5dc2bce3071eb1e584482a1eed2c455c0c32de",
+      "layer-014.slhw": "50694a7a9bf2313f276f4ae6921eb020667301262669a3563c2624092e3528ce",
+      "layer-015.slhw": "79185da3fdcc9db0ca9333b83f35cfbd9a0f51f3c945e90a9a985415abef2d98",
+      "layer-016.slhw": "e4ec815d5801638feea219aa4fdd88e13a37636f613a0c6e17e44b6cb909011a",
+      "layer-017.slhw": "6a0f715eeda02d12c2a009ef62c983fb2117aad95fa8bb5fe8da1e9b2f498ee0",
+      "layer-018.slhw": "a364ee207a7e241e86b8c63ac82c3d8682ebb7501eab93e352db6c838e6023a8",
+      "layer-019.slhw": "b99ff68457fbd113b562792f53ab88280dfa83e2991583011d16a26753a438b5",
+      "layer-020.slhw": "b01e9a8fe92fa89d8bdde48f76f07a7ecad8259e1b4a8bc1db353505ca5767b6",
+      "layer-021.slhw": "e88ef44cef67a2ef56b9c89aa18fc058309bd30eb8df2f18e090677b597e2524",
+      "layer-022.slhw": "03f8d06ca72130ee221327871885385f0931bc4844cb455cbfa2597267692416",
+      "layer-023.slhw": "c17df467527c99ba3c4449432a1f6c9a3eacfc0b005fbeeb09fa3c046603e08e",
+      "layer-024.slhw": "700ec51cf827d270db3efc311979de91c5437ac83aadc29e05e043db89174815",
+      "layer-025.slhw": "0cf7b1ab81367b871b0b430cfc4c643b522fa0d9b8060fe6ba5b9aa094f905b0",
+      "layer-026.slhw": "6b5942326c6c9330c15615ed724d6f588acb0ded9aaaa60ec5fb99a24384992e",
+      "layer-027.slhw": "504d6aaeb14ff6dba90d1e5ede31c0eb2c7b12d8609d52c0a0a9e70c28193c09"
+    },
+    "training_command": "MODEL_REPO=Qwen/Qwen2.5-1.5B-Instruct-GGUF MODEL_FILE=qwen2.5-1.5b-instruct-q8_0.gguf WORK=$WORK CALIB_DIR=$WORK/calibration-clean WEIGHTS_DIR=$WORK/weights integration/llama.cpp/scripts/train_layer_weights.sh mixed",
+    "statement": "The weights were generated after the squash merge from implementation commit 6361dfdbcd30660bf2d623fe19029938dd209cd7 using an out-of-tree deterministic non-finite-row removal step."
+  },
+  "diagnostic_instrumentation": {
+    "committed_to_repository": false,
+    "location": "separate temporary llama.cpp checkouts only",
+    "padaudit_checkout": "pinned llama.cpp commit + integration patch + pristine shim from 6361dfd plus diagnostic patch only",
+    "padzero_checkout": "same as padaudit plus the padded-logit zeroing change only",
+    "padaudit_to_padzero_diff_contains_only_zeroing": true,
+    "padaudit_to_padzero_diff_sha256": "7253501f93a942f19f6447b4ad3c39963a300218a244c7046c68a740325b2f3b",
+    "shim_cpp_diagnostic_patch_sha256": "9ab07ec3b2a7a5d2ab5bedfe15d146bd1a188049d4afaec4321b0d593c6e4edd",
+    "shim_hpp_diagnostic_patch_sha256": "67ff6c4910c7847c65bacf17f9efe8b16206164593d9044e4dc43dfea42e5ce3"
+  },
+  "binaries": {
+    "strict_replace": {
+      "libllama_so_sha256": "03751558a36302995d23c90b76e3ba20581813254cc13ad182ef521053c90ce8",
+      "cmake_home_directory": "/tmp/slha-score-quality-6361dfd/llama.cpp"
+    },
+    "padaudit": {
+      "libllama_so_sha256": "b69e0c5f58fca0cd1ee99e26772cc97b4bec03dc8c7ca83333cd6fcc06a40a25",
+      "cmake_home_directory": "/tmp/slha-score-quality-6361dfd/llama.cpp-padaudit"
+    },
+    "padzero": {
+      "libllama_so_sha256": "f2ea7ef54f42118e55ff451604b9904bd8d38243192bb98b90a9efe668ecc4fd",
+      "cmake_home_directory": "/tmp/slha-score-quality-6361dfd/llama.cpp-padzero"
+    },
+    "unpatched_baseline": {
+      "libllama_so_sha256": "8db9b92871d32a1e232f760845dcbf1249ca0ea49b446c6656bcb5c93e348468",
+      "cmake_home_directory": "/tmp/slha-score-quality-6361dfd/llama.cpp-baseline"
+    }
+  },
+  "control_ladder": {
+    "design": "six rungs, three complete runs each, identical evaluation protocol",
+    "observed_unpatched_baseline_run_to_run_spread_ppl": 0.01,
+    "spread_note": "This is the observed unpatched-baseline run-to-run spread across three runs. It is an observed variability figure, not a formally characterised numerical noise floor.",
+    "rungs": {
+      "A_unpatched_baseline": {
+        "description": "unpatched llama.cpp at the pinned commit; no SLHA code compiled in",
+        "shim_used": "no SLHA score replacement",
+        "build_tree": "llama.cpp-baseline",
+        "libllama_so_sha256": "8db9b92871d32a1e232f760845dcbf1249ca0ea49b446c6656bcb5c93e348468",
+        "runs_ppl": [
+          11.8837,
+          11.8737,
+          11.8764
+        ],
+        "mean_ppl": 11.877933,
+        "sample_stddev": 0.005173,
+        "min_ppl": 11.8737,
+        "max_ppl": 11.8837,
+        "spread": 0.01,
+        "coefficient_of_variation": 0.0004355411747665417,
+        "standard_error_of_mean": 0.0029868229125795667,
+        "mean_seconds_per_pass": 2.4033,
+        "mean_tokens_per_second": 213.037,
+        "protocol": {
+          "chunks": 12,
+          "n_ctx": 512,
+          "batch_size": 512,
+          "n_seq": 1
+        },
+        "protocol_identical_across_runs": true,
+        "log_sha256": [
+          "d6c7e7a8f5e14a95e63ccbaa57817f821796b6f7e597ae54118ebcc6e68160ab",
+          "7919c904c9dcb4758b2656e63ff47ea5e5bf7ead684e9be1e0d941da4a824554",
+          "0a06569e08f4ddbc8acb24aa96909b71a52d7d5431b7a2ff2d6da6e8585816cc"
+        ],
+        "all_exit_status_zero": true
+      },
+      "B_patched_slha_off": {
+        "description": "SLHA patch + shim compiled in, SLHA_KV_MODE=off, no score op inserted",
+        "shim_used": "pristine shim from implementation commit 6361dfd",
+        "build_tree": "llama.cpp",
+        "libllama_so_sha256": "03751558a36302995d23c90b76e3ba20581813254cc13ad182ef521053c90ce8",
+        "runs_ppl": [
+          11.877,
+          11.8766,
+          11.8873
+        ],
+        "mean_ppl": 11.8803,
+        "sample_stddev": 0.006065,
+        "min_ppl": 11.8766,
+        "max_ppl": 11.8873,
+        "spread": 0.0107,
+        "coefficient_of_variation": 0.00051054906640809,
+        "standard_error_of_mean": 0.0035019042438839253,
+        "mean_seconds_per_pass": 2.21,
+        "mean_tokens_per_second": 231.674,
+        "protocol": {
+          "chunks": 12,
+          "n_ctx": 512,
+          "batch_size": 512,
+          "n_seq": 1
+        },
+        "protocol_identical_across_runs": true,
+        "log_sha256": [
+          "c58849ba4b5ef06f1893c54a63a63e26765c9a143c16fd74f3ac5b849258bc17",
+          "ffdb576aa1357d1750ef798b89b83e5e1f344ab8d79ca01214d46d7f12527374",
+          "76fb8742156cd159aad13dceaefa3a8186ea73c752b7e3adc07cc33b51b61256"
+        ],
+        "all_exit_status_zero": true
+      },
+      "C_tilestore_only": {
+        "description": "tilestore K-write hook active, score mode off",
+        "shim_used": "pristine shim from implementation commit 6361dfd",
+        "build_tree": "llama.cpp",
+        "libllama_so_sha256": "03751558a36302995d23c90b76e3ba20581813254cc13ad182ef521053c90ce8",
+        "runs_ppl": [
+          11.8785,
+          11.8829,
+          11.8787
+        ],
+        "mean_ppl": 11.880033,
+        "sample_stddev": 0.002485,
+        "min_ppl": 11.8785,
+        "max_ppl": 11.8829,
+        "spread": 0.0044,
+        "coefficient_of_variation": 0.0002091424564305849,
+        "standard_error_of_mean": 0.0014344956527562827,
+        "mean_seconds_per_pass": 2.7867,
+        "mean_tokens_per_second": 183.732,
+        "protocol": {
+          "chunks": 12,
+          "n_ctx": 512,
+          "batch_size": 512,
+          "n_seq": 1
+        },
+        "protocol_identical_across_runs": true,
+        "log_sha256": [
+          "97cdf2cc538bd8b9a1349fa75a693ca0542f8ab999c56ac71c8dab11901aff33",
+          "843e35b12e4e3144de7de499a4e0a8c1bc23404432454b4628739d0d087d6c71",
+          "61b389856c441322c4d30604be15640fb91ae566729c275b86d756f9a4800c24"
+        ],
+        "all_exit_status_zero": true
+      },
+      "D_padaudit": {
+        "description": "pass-through custom score op; copies baseline logits unchanged and audits the padded region",
+        "shim_used": "out-of-tree diagnostic shim derived from 6361dfd",
+        "build_tree": "llama.cpp-padaudit",
+        "libllama_so_sha256": "b69e0c5f58fca0cd1ee99e26772cc97b4bec03dc8c7ca83333cd6fcc06a40a25",
+        "runs_ppl": [
+          11.8775,
+          11.8768,
+          11.8949
+        ],
+        "mean_ppl": 11.883067,
+        "sample_stddev": 0.010254,
+        "min_ppl": 11.8768,
+        "max_ppl": 11.8949,
+        "spread": 0.0181,
+        "coefficient_of_variation": 0.0008629037115519517,
+        "standard_error_of_mean": 0.005920116365222839,
+        "mean_seconds_per_pass": 3.02,
+        "mean_tokens_per_second": 169.536,
+        "protocol": {
+          "chunks": 12,
+          "n_ctx": 512,
+          "batch_size": 512,
+          "n_seq": 1
+        },
+        "protocol_identical_across_runs": true,
+        "log_sha256": [
+          "16e546160abe1ae5d5241e77997b5969fe4aad903b9b815e11d5a9c140df2cdc",
+          "e0b4fb6ff34a3f96d8ba80d652b1461c0cd6181740d1c782d3e703fef20f05c8",
+          "70d7ceadd0b34cef307d4e2f003b86cb55bd3f7d9b185a881ff735c1be2508f7"
+        ],
+        "all_exit_status_zero": true
+      },
+      "E_padzero": {
+        "description": "as padaudit plus writing 0.0f over padded logits; sole control for padding zeroing",
+        "shim_used": "out-of-tree control shim derived from 6361dfd",
+        "build_tree": "llama.cpp-padzero",
+        "libllama_so_sha256": "f2ea7ef54f42118e55ff451604b9904bd8d38243192bb98b90a9efe668ecc4fd",
+        "runs_ppl": [
+          11.8811,
+          11.8872,
+          11.8762
+        ],
+        "mean_ppl": 11.8815,
+        "sample_stddev": 0.005511,
+        "min_ppl": 11.8762,
+        "max_ppl": 11.8872,
+        "spread": 0.011,
+        "coefficient_of_variation": 0.00046382176437163424,
+        "standard_error_of_mean": 0.0031817186131605003,
+        "mean_seconds_per_pass": 2.6333,
+        "mean_tokens_per_second": 194.43,
+        "protocol": {
+          "chunks": 12,
+          "n_ctx": 512,
+          "batch_size": 512,
+          "n_seq": 1
+        },
+        "protocol_identical_across_runs": true,
+        "log_sha256": [
+          "235283e1f6aa7898d6d8815b9f9d3733d5cefc9bb7417b9d709f826d44083d02",
+          "239227f8fcfee07052a286b56e2620024066411d7a13d6a4ab741961990cc428",
+          "ee1592be0da19ea950d4711edfee9d0f84fe868d945307734416938e2b55aa12"
+        ],
+        "all_exit_status_zero": true
+      },
+      "F_strict_replace": {
+        "description": "direct compressed-score replacement; SLHA scores overwrite baseline logits",
+        "shim_used": "pristine shim from implementation commit 6361dfd",
+        "build_tree": "llama.cpp",
+        "libllama_so_sha256": "03751558a36302995d23c90b76e3ba20581813254cc13ad182ef521053c90ce8",
+        "runs_ppl": [
+          16.8573,
+          16.9396,
+          16.9549
+        ],
+        "mean_ppl": 16.917267,
+        "sample_stddev": 0.052493,
+        "min_ppl": 16.8573,
+        "max_ppl": 16.9549,
+        "spread": 0.0976,
+        "coefficient_of_variation": 0.0031029290926947155,
+        "standard_error_of_mean": 0.030306893238630995,
+        "mean_seconds_per_pass": 9.4,
+        "mean_tokens_per_second": 54.468,
+        "protocol": {
+          "chunks": 12,
+          "n_ctx": 512,
+          "batch_size": 512,
+          "n_seq": 1
+        },
+        "protocol_identical_across_runs": true,
+        "log_sha256": [
+          "cd3752e6fb7c901a297655cfce8cab79e9daa863168cf52e232debf04cfb84ce",
+          "666b3e8160cb372d624c048cab9f8158b39ba5315496bee20b96962b2b539c1f",
+          "493d329b1fa90ae8f54656f3cfce3782c6603c88b88c2754be18b3dd6c32f91f"
+        ],
+        "all_exit_status_zero": true
+      }
+    }
+  },
+  "contrasts": {
+    "method": "difference of means with propagated standard error; approximate exploratory intervals based on three independent runs per group (t=2.776, df=4)",
+    "statistical_power": "limited; three runs per group. The four small integration contrasts are reported as not resolved at this sample size, which is not a claim of equivalence or of proven absence of an effect.",
+    "results": {
+      "B_minus_A_patch_build_effect": {
+        "pair": "B - A",
+        "label": "patch/build effect",
+        "delta_ppl": 0.002367,
+        "percent": 0.01992,
+        "propagated_standard_error": 0.004603,
+        "approximate_95pct_ci": [
+          -0.01041,
+          0.015144
+        ],
+        "effect_size_vs_observed_baseline_spread": 0.237,
+        "interpretation": "not resolved at this sample size"
+      },
+      "C_minus_B_tilestore_hook_effect": {
+        "pair": "C - B",
+        "label": "tilestore K-write hook effect",
+        "delta_ppl": -0.000267,
+        "percent": -0.00224,
+        "propagated_standard_error": 0.003784,
+        "approximate_95pct_ci": [
+          -0.010772,
+          0.010239
+        ],
+        "effect_size_vs_observed_baseline_spread": 0.027,
+        "interpretation": "not resolved at this sample size"
+      },
+      "D_minus_C_custom_op_insertion": {
+        "pair": "D - C",
+        "label": "pass-through custom operation insertion",
+        "delta_ppl": 0.003033,
+        "percent": 0.02553,
+        "propagated_standard_error": 0.006091,
+        "approximate_95pct_ci": [
+          -0.013876,
+          0.019943
+        ],
+        "effect_size_vs_observed_baseline_spread": 0.303,
+        "interpretation": "not resolved at this sample size"
+      },
+      "E_minus_D_padding_zeroing": {
+        "pair": "E - D",
+        "label": "padding zeroing",
+        "delta_ppl": -0.001567,
+        "percent": -0.01318,
+        "propagated_standard_error": 0.006721,
+        "approximate_95pct_ci": [
+          -0.020224,
+          0.017091
+        ],
+        "effect_size_vs_observed_baseline_spread": 0.157,
+        "interpretation": "not resolved at this sample size"
+      },
+      "F_minus_D_score_substitution_PRIMARY": {
+        "pair": "F - D",
+        "label": "direct compressed-score substitution (PRIMARY)",
+        "delta_ppl": 5.0342,
+        "percent": 42.36449,
+        "propagated_standard_error": 0.03088,
+        "approximate_95pct_ci": [
+          4.948478,
+          5.119922
+        ],
+        "effect_size_vs_observed_baseline_spread": 503.42,
+        "interpretation": "large resolved effect"
+      },
+      "F_minus_A_vs_unpatched_SECONDARY": {
+        "pair": "F - A",
+        "label": "strict replace vs unpatched baseline (SECONDARY)",
+        "delta_ppl": 5.039333,
+        "percent": 42.42601,
+        "propagated_standard_error": 0.030454,
+        "approximate_95pct_ci": [
+          4.954794,
+          5.123873
+        ],
+        "effect_size_vs_observed_baseline_spread": 503.933,
+        "interpretation": "large resolved effect"
+      }
+    },
+    "headline": "The direct compressed-score replacement path produced a large observed PPL degradation relative to the pass-through integration control. The effect was far larger than the run-to-run variability observed in the control ladder. Its precise cause has not yet been isolated."
+  },
+  "strict_replacement_counters": {
+    "identical_across_all_three_runs": true,
+    "counter_keys_compared": 21,
+    "counters": {
+      "callbacks": "1456",
+      "active_expected_vectors": "2065056",
+      "active_replaced_vectors": "2065056",
+      "active_expected_logits": "1056965952",
+      "active_replaced_logits": "1056965952",
+      "padding_vectors": "672",
+      "padding_logits": "170688",
+      "inactive_stream_vectors": "0",
+      "inactive_stream_logits": "0",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "missing_tile": "0",
+      "query_prep_fail": "0",
+      "score_fail": "0",
+      "nonfinite_score": "0",
+      "unsupported_shape": "0",
+      "unsupported_stride": "0",
+      "error_code": "0",
+      "n_stream": "1",
+      "active_coverage": "1",
+      "valid": "true"
+    },
+    "per_run": {
+      "run_1": {
+        "ppl": "16.8573",
+        "ppl_std": "0.87008",
+        "seconds_per_pass": "8.97",
+        "log_sha256": "cd3752e6fb7c901a297655cfce8cab79e9daa863168cf52e232debf04cfb84ce",
+        "counters": {
+          "callbacks": "1456",
+          "active_expected_vectors": "2065056",
+          "active_replaced_vectors": "2065056",
+          "active_expected_logits": "1056965952",
+          "active_replaced_logits": "1056965952",
+          "padding_vectors": "672",
+          "padding_logits": "170688",
+          "inactive_stream_vectors": "0",
+          "inactive_stream_logits": "0",
+          "failed_vectors": "0",
+          "fallback_vectors": "0",
+          "missing_tile": "0",
+          "query_prep_fail": "0",
+          "score_fail": "0",
+          "nonfinite_score": "0",
+          "unsupported_shape": "0",
+          "unsupported_stride": "0",
+          "error_code": "0",
+          "n_stream": "1",
+          "active_coverage": "1",
+          "valid": "true"
+        }
+      },
+      "run_2": {
+        "ppl": "16.9396",
+        "ppl_std": "0.87516",
+        "seconds_per_pass": "10.30",
+        "log_sha256": "666b3e8160cb372d624c048cab9f8158b39ba5315496bee20b96962b2b539c1f",
+        "counters": {
+          "callbacks": "1456",
+          "active_expected_vectors": "2065056",
+          "active_replaced_vectors": "2065056",
+          "active_expected_logits": "1056965952",
+          "active_replaced_logits": "1056965952",
+          "padding_vectors": "672",
+          "padding_logits": "170688",
+          "inactive_stream_vectors": "0",
+          "inactive_stream_logits": "0",
+          "failed_vectors": "0",
+          "fallback_vectors": "0",
+          "missing_tile": "0",
+          "query_prep_fail": "0",
+          "score_fail": "0",
+          "nonfinite_score": "0",
+          "unsupported_shape": "0",
+          "unsupported_stride": "0",
+          "error_code": "0",
+          "n_stream": "1",
+          "active_coverage": "1",
+          "valid": "true"
+        }
+      },
+      "run_3": {
+        "ppl": "16.9549",
+        "ppl_std": "0.87543",
+        "seconds_per_pass": "8.93",
+        "log_sha256": "493d329b1fa90ae8f54656f3cfce3782c6603c88b88c2754be18b3dd6c32f91f",
+        "counters": {
+          "callbacks": "1456",
+          "active_expected_vectors": "2065056",
+          "active_replaced_vectors": "2065056",
+          "active_expected_logits": "1056965952",
+          "active_replaced_logits": "1056965952",
+          "padding_vectors": "672",
+          "padding_logits": "170688",
+          "inactive_stream_vectors": "0",
+          "inactive_stream_logits": "0",
+          "failed_vectors": "0",
+          "fallback_vectors": "0",
+          "missing_tile": "0",
+          "query_prep_fail": "0",
+          "score_fail": "0",
+          "nonfinite_score": "0",
+          "unsupported_shape": "0",
+          "unsupported_stride": "0",
+          "error_code": "0",
+          "n_stream": "1",
+          "active_coverage": "1",
+          "valid": "true"
+        }
+      }
+    },
+    "acceptance": {
+      "callbacks_gt_0": true,
+      "active_expected_vectors_gt_0": true,
+      "active_expected_logits_gt_0": true,
+      "active_replaced_vectors_eq_expected": true,
+      "active_replaced_logits_eq_expected": true,
+      "all_failure_counters_zero": true,
+      "n_stream_eq_1": true,
+      "active_coverage_eq_1": true,
+      "valid_true": true
+    },
+    "accounting_note": "Padding and inactive-stream positions are counted separately and are excluded from the number of logits directly computed by SLHA."
+  },
+  "padding_audit": {
+    "audited_padded_vectors": 672,
+    "audited_padded_logits": 170688,
+    "max_abs_padded_baseline_logit": 0.0,
+    "nonzero_padded_baseline_logits": 0,
+    "nonfinite_padded_baseline_logits": 0,
+    "identical_across_all_six_paddiag_runs": true,
+    "cross_check": "audited_padded_logits equals the strict-replacement padding_logits counter (170688).",
+    "conclusion": "For this pinned model and protocol, all audited padded baseline Q-dot-K logits were exactly zero. Writing 0.0f to those positions is therefore an arithmetic no-op.",
+    "supporting_evidence": "The empirical padzero - padaudit comparison (-0.0016 PPL, approximate 95% CI [-0.0202, +0.0171], not resolved at this sample size) is supporting evidence, not the primary proof.",
+    "generalisation_warning": "This exact-zero result is specific to this pinned model, llama.cpp commit and KV-cache implementation. It must not be generalised to other models, llama.cpp versions or cache implementations."
+  },
+  "throughput": {
+    "padaudit_mean_seconds_per_pass": 3.02,
+    "padaudit_mean_tokens_per_second": 169.536,
+    "strict_replace_mean_seconds_per_pass": 9.4,
+    "strict_replace_mean_tokens_per_second": 54.468,
+    "slowdown_factor_seconds_per_pass": 3.1126,
+    "note": "This is a quality-gate implementation using a custom CPU operation, not a fused kernel and not an optimised performance benchmark."
+  },
+  "discarded_runs": {
+    "note": "None of these results are included in any aggregate. Log hashes are retained for audit only.",
+    "entries": [
+      {
+        "run": "stage2 strict replace run 1 (killed)",
+        "reason": "training aborted at layer 1 on NaN rows; only 1 of 28 weight files and no manifest existed",
+        "excluded_from_aggregates": true
+      },
+      {
+        "run": "stage4 padaudit/padzero builds and 1 completed run",
+        "reason": "build directory copied with cp -a retained CMAKE_HOME_DIRECTORY of llama.cpp-audit, so cmake --build recompiled the audit tree; both variant binaries hashed identically (321f6b4ba40a2d8acc9ba364b5e3f11ac1dc1028ec2069045f2b825e7969b467) and slha_llama was never recompiled",
+        "excluded_from_aggregates": true
+      },
+      {
+        "run": "stage4 padaudit run 1 (PPL 11.8779)",
+        "reason": "binary lacked the paddiag mode; log shows \"unknown SLHA_SCORE_MODE='paddiag', falling back to off\", so it measured score-mode-off rather than padaudit",
+        "excluded_from_aggregates": true
+      },
+      {
+        "run": "combined-build padaudit/padzero (PPL 11.8771 / 11.8793)",
+        "reason": "single binary selecting both modes by env var; superseded by dedicated per-variant builds with distinct binary hashes. Retained for reference, not used in aggregates",
+        "excluded_from_aggregates": true
+      }
+    ]
+  },
+  "accepted_run_logs_sha256": {
+    "baseline_run1.txt": "d6c7e7a8f5e14a95e63ccbaa57817f821796b6f7e597ae54118ebcc6e68160ab",
+    "baseline_run2.txt": "7919c904c9dcb4758b2656e63ff47ea5e5bf7ead684e9be1e0d941da4a824554",
+    "baseline_run3.txt": "0a06569e08f4ddbc8acb24aa96909b71a52d7d5431b7a2ff2d6da6e8585816cc",
+    "padaudit_run1.txt": "16e546160abe1ae5d5241e77997b5969fe4aad903b9b815e11d5a9c140df2cdc",
+    "padaudit_run2.txt": "e0b4fb6ff34a3f96d8ba80d652b1461c0cd6181740d1c782d3e703fef20f05c8",
+    "padaudit_run3.txt": "70d7ceadd0b34cef307d4e2f003b86cb55bd3f7d9b185a881ff735c1be2508f7",
+    "padzero_run1.txt": "235283e1f6aa7898d6d8815b9f9d3733d5cefc9bb7417b9d709f826d44083d02",
+    "padzero_run2.txt": "239227f8fcfee07052a286b56e2620024066411d7a13d6a4ab741961990cc428",
+    "padzero_run3.txt": "ee1592be0da19ea950d4711edfee9d0f84fe868d945307734416938e2b55aa12",
+    "patched_off_run1.txt": "c58849ba4b5ef06f1893c54a63a63e26765c9a143c16fd74f3ac5b849258bc17",
+    "patched_off_run2.txt": "ffdb576aa1357d1750ef798b89b83e5e1f344ab8d79ca01214d46d7f12527374",
+    "patched_off_run3.txt": "76fb8742156cd159aad13dceaefa3a8186ea73c752b7e3adc07cc33b51b61256",
+    "replace_run1_ppl.txt": "cd3752e6fb7c901a297655cfce8cab79e9daa863168cf52e232debf04cfb84ce",
+    "replace_run2_ppl.txt": "666b3e8160cb372d624c048cab9f8158b39ba5315496bee20b96962b2b539c1f",
+    "replace_run3_ppl.txt": "493d329b1fa90ae8f54656f3cfce3782c6603c88b88c2754be18b3dd6c32f91f",
+    "tilestore_only_run1.txt": "97cdf2cc538bd8b9a1349fa75a693ca0542f8ab999c56ac71c8dab11901aff33",
+    "tilestore_only_run2.txt": "843e35b12e4e3144de7de499a4e0a8c1bc23404432454b4628739d0d087d6c71",
+    "tilestore_only_run3.txt": "61b389856c441322c4d30604be15640fb91ae566729c275b86d756f9a4800c24"
+  },
+  "limitations": [
+    "This milestone evaluates score quality only. No physical K-cache memory reduction is claimed.",
+    "Baseline Q-dot-K is still materialised by llama.cpp; the custom operation replaces logits after the baseline matrix multiplication. No fused attention kernel is implemented.",
+    "Strict replace mode currently supports only one parallel sequence (n_stream == 1).",
+    "Numerical PPL results show run-to-run variation even in unpatched llama.cpp (observed spread 0.0100 PPL over three runs). Production counters were fully deterministic; the numerical variation was not instrumentally isolated.",
+    "Statistical power is limited: three runs per group. Confidence intervals are approximate exploratory intervals.",
+    "The committed collector emits non-finite calibration rows in this experiment, and the committed trainer does not reject or filter them. A production fix is still required.",
+    "The observed quality gap applies to the current model, mixed codec, projection weights, score implementation and evaluation protocol. Its precise cause has not yet been isolated.",
+    "The experiment does not determine whether the gap originates from codec quantization, projection training, score scaling, query preparation, attention temperature, layer-specific error accumulation, padding behaviour, tile representation or another integration effect.",
+    "CPU-only; GPU paths are out of scope."
+  ],
+  "unresolved_risks": [
+    "Root cause of the +42% replacement quality gap is not isolated.",
+    "Source of run-to-run PPL nondeterminism is not instrumentally isolated.",
+    "Origin of the non-finite calibration rows is inferred, not proven.",
+    "Multi-sequence (n_stream > 1) strict replacement is unimplemented and untested."
+  ]
 }
