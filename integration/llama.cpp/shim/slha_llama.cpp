@@ -1,12 +1,17 @@
 #include "slha_llama.hpp"
+#include "slha_replace_counters.hpp"
 
 #include "slha.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <limits>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <string>
 #include <iostream>
@@ -14,10 +19,14 @@
 
 #include "ggml.h"
 
+slha_tile_store g_slha_tile_store;
+std::atomic<size_t> g_slha_tiles_written[SLHA_MAX_LAYERS];
+
 namespace {
 
 struct GlobalState {
-    slha_kv_mode mode = SLHA_KV_OFF;
+    slha_kv_mode kv_mode = SLHA_KV_OFF;
+    slha_score_mode score_mode = SLHA_SCORE_OFF;
     std::string weights_dir;
     std::vector<slha_layer_state> layers;
     std::mutex mutex;
@@ -30,6 +39,11 @@ GlobalState & get_global_state() {
     return state;
 }
 
+} // namespace
+
+void slha_print_replace_summary() {
+    g_slha_replace_counters.print_summary();
+    g_slha_replace_counters.reset();
 }
 
 slha_kv_mode slha_kv_mode_from_env() {
@@ -42,9 +56,24 @@ slha_kv_mode slha_kv_mode_from_env() {
     if (mode_str == "passthrough") return SLHA_KV_PASSTHROUGH;
     if (mode_str == "roundtrip") return SLHA_KV_ROUNDTRIP;
     if (mode_str == "collect") return SLHA_KV_COLLECT;
+    if (mode_str == "tilestore") return SLHA_KV_TILESTORE;
     std::cerr << "[SLHA] unknown SLHA_KV_MODE='" << mode_str
               << "', falling back to off\n";
     return SLHA_KV_OFF;
+}
+
+slha_score_mode slha_score_mode_from_env() {
+    const char * env = std::getenv("SLHA_SCORE_MODE");
+    if (!env) {
+        return SLHA_SCORE_OFF;
+    }
+    std::string mode_str(env);
+    if (mode_str == "off") return SLHA_SCORE_OFF;
+    if (mode_str == "shadow") return SLHA_SCORE_SHADOW;
+    if (mode_str == "replace") return SLHA_SCORE_REPLACE;
+    std::cerr << "[SLHA] unknown SLHA_SCORE_MODE='" << mode_str
+              << "', falling back to off\n";
+    return SLHA_SCORE_OFF;
 }
 
 int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
@@ -52,15 +81,25 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
     std::lock_guard<std::mutex> lock(state.mutex);
 
     if (state.initialized) {
-        std::cerr << "[SLHA] already initialized\n";
-        return -1;
+        // Re-initializing with a new context: reset tile store and counters
+        for (size_t i = 0; i < SLHA_MAX_LAYERS; ++i) {
+            g_slha_tiles_written[i].store(0, std::memory_order_relaxed);
+        }
+        if (g_slha_tile_store.n_layers > 0) {
+            g_slha_tile_store.reset();
+        }
+        if (state.score_mode == SLHA_SCORE_REPLACE) {
+            g_slha_replace_counters.reset();
+        }
+        return 0;
     }
 
-    state.mode = mode;
+    state.kv_mode = mode;
+    state.score_mode = slha_score_mode_from_env();
 
     state.weights_dir = weights_dir ? weights_dir : "";
 
-    if (mode == SLHA_KV_OFF) {
+    if (mode == SLHA_KV_OFF && state.score_mode == SLHA_SCORE_OFF) {
         state.initialized = true;
         return 0;
     }
@@ -72,9 +111,9 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
         return 0;
     }
 
-    if (mode == SLHA_KV_ROUNDTRIP || mode == SLHA_KV_COLLECT) {
+    if (mode == SLHA_KV_ROUNDTRIP || mode == SLHA_KV_COLLECT || mode == SLHA_KV_TILESTORE) {
         if (state.weights_dir.empty()) {
-            std::cerr << "[SLHA] roundtrip/collect mode requires weights_dir\n";
+            std::cerr << "[SLHA] roundtrip/collect/tilestore mode requires weights_dir\n";
             return -1;
         }
 
@@ -84,13 +123,42 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
         for (int32_t i = 0; i < state.num_layers; ++i) {
             state.layers[i].layer_id = i;
             state.layers[i].n_embd_gqa = 0;
-            state.layers[i].mode = mode;
+            state.layers[i].kv_mode = mode;
+            state.layers[i].score_mode = state.score_mode;
             state.layers[i].model_handle = nullptr;
             state.layers[i].scratch = nullptr;
         }
 
-        std::cout << "[SLHA] " << (mode == SLHA_KV_ROUNDTRIP ? "roundtrip" : "collect")
-                  << " mode enabled, weights_dir=" << state.weights_dir << "\n";
+        const char * label = "tilestore";
+        if (mode == SLHA_KV_ROUNDTRIP) label = "roundtrip";
+        else if (mode == SLHA_KV_COLLECT) label = "collect";
+        std::cout << "[SLHA] " << label
+                  << " mode enabled, weights_dir=" << state.weights_dir;
+        if (state.score_mode == SLHA_SCORE_SHADOW) {
+            std::cout << ", score_mode=shadow";
+        } else if (state.score_mode == SLHA_SCORE_REPLACE) {
+            std::cout << ", score_mode=replace";
+        }
+        std::cout << "\n";
+
+        // Reset replace counters and tile-write tracking
+        if (state.score_mode == SLHA_SCORE_REPLACE) {
+            g_slha_replace_counters.reset();
+        }
+        for (size_t i = 0; i < SLHA_MAX_LAYERS; ++i) {
+            g_slha_tiles_written[i].store(0, std::memory_order_relaxed);
+        }
+
+        // Initialize the compressed K side store.
+        if (mode == SLHA_KV_TILESTORE || state.score_mode != SLHA_SCORE_OFF) {
+            const size_t n_layers = 128;
+            const size_t capacity = 16384; // max positions per layer (handles 12×512 chunks + margin)
+            if (!g_slha_tile_store.init(n_layers, capacity, slha_tile_size())) {
+                std::cerr << "[SLHA] failed to initialize tile store\n";
+                return -1;
+            }
+        }
+
         state.initialized = true;
         std::atexit(slha_global_shutdown);
         return 0;
@@ -99,18 +167,249 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
     return 0;
 }
 
+bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes_) {
+    std::lock_guard<std::mutex> lock(mutex);
+    n_layers = n_layers_;
+    capacity = capacity_;
+    tile_bytes = tile_bytes_;
+    if (tile_bytes == 0) {
+        return false;
+    }
+    tiles.assign(n_layers * capacity * tile_bytes, std::byte{0});
+    valid.assign(n_layers * capacity, 0);
+    return true;
+}
+
+void slha_tile_store::reset() {
+    std::lock_guard<std::mutex> lock(mutex);
+    tiles.assign(tiles.size(), std::byte{0});
+    std::fill(valid.begin(), valid.end(), 0);
+}
+
+void slha_tile_store::clear_layer(int32_t layer_id) {
+    if (layer_id < 0) return;
+    const size_t layer = static_cast<size_t>(layer_id);
+    std::lock_guard<std::mutex> lock(mutex);
+    if (layer >= n_layers || capacity == 0 || tile_bytes == 0) return;
+    const size_t valid_base = layer * capacity;
+    std::memset(&valid[valid_base], 0, capacity);
+    const size_t tile_byte_offset = layer * capacity * tile_bytes;
+    std::memset(&tiles[tile_byte_offset], 0, capacity * tile_bytes);
+}
+
+bool slha_tile_store::write(int32_t layer_id, size_t position, const void * tile) {
+    if (!tile || layer_id < 0) return false;
+    const size_t layer = static_cast<size_t>(layer_id);
+    std::lock_guard<std::mutex> lock(mutex);
+    if (layer >= n_layers || position >= capacity || tile_bytes == 0) {
+        return false;
+    }
+    const size_t idx = (layer * capacity + position) * tile_bytes;
+    std::memcpy(tiles.data() + idx, tile, tile_bytes);
+    valid[layer * capacity + position] = 1;
+    return true;
+}
+
+const void * slha_tile_store::read(int32_t layer_id, size_t position) const {
+    if (layer_id < 0) return nullptr;
+    const size_t layer = static_cast<size_t>(layer_id);
+    std::lock_guard<std::mutex> lock(mutex);
+    if (layer >= n_layers || position >= capacity || tile_bytes == 0) {
+        return nullptr;
+    }
+    if (!valid[layer * capacity + position]) {
+        return nullptr;
+    }
+    return tiles.data() + (layer * capacity + position) * tile_bytes;
+}
+
+bool slha_tile_store::check_capacity(int32_t layer_id, size_t position) const {
+    if (layer_id < 0) return false;
+    const size_t layer = static_cast<size_t>(layer_id);
+    std::lock_guard<std::mutex> lock(mutex);
+    return layer < n_layers && position < capacity;
+}
+
+void slha_shadow_metrics::add_sample(double baseline, double slha) {
+    if (!std::isfinite(baseline) || !std::isfinite(slha)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    ++n_samples;
+    const double err = baseline - slha;
+    const double abs_err = std::abs(err);
+    max_abs_error = std::max(max_abs_error, abs_err);
+    sum_abs_error += abs_err;
+    const double denom = std::max(std::abs(baseline), 1e-12);
+    sum_rel_l2 += (abs_err / denom);
+    if (baseline != 0.0 && std::abs(slha - baseline) > 1e-3 * denom) {
+        ++n_mismatch;
+    }
+}
+
+void slha_shadow_metrics::add_vector(const std::vector<double> & baseline, const std::vector<double> & slha) {
+    const size_t n = baseline.size();
+    if (n == 0 || n != slha.size()) {
+        return;
+    }
+
+    double dot = 0.0;
+    double norm_b = 0.0;
+    double norm_s = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(baseline[i]) || !std::isfinite(slha[i])) {
+            return;
+        }
+        dot += baseline[i] * slha[i];
+        norm_b += baseline[i] * baseline[i];
+        norm_s += slha[i] * slha[i];
+    }
+    const double denom = std::sqrt(norm_b * norm_s);
+    const double cosine = denom > 1e-18 ? dot / denom : 0.0;
+
+    std::vector<size_t> idx_b(n), idx_s(n);
+    for (size_t i = 0; i < n; ++i) {
+        idx_b[i] = i;
+        idx_s[i] = i;
+    }
+    std::sort(idx_b.begin(), idx_b.end(), [&](size_t a, size_t b) { return baseline[a] > baseline[b]; });
+    std::sort(idx_s.begin(), idx_s.end(), [&](size_t a, size_t b) { return slha[a] > slha[b]; });
+
+    const auto top_k_overlap = [&](size_t k) -> double {
+        k = std::min(k, n);
+        size_t overlap = 0;
+        for (size_t i = 0; i < k; ++i) {
+            for (size_t j = 0; j < k; ++j) {
+                if (idx_b[i] == idx_s[j]) {
+                    ++overlap;
+                    break;
+                }
+            }
+        }
+        return static_cast<double>(overlap) / static_cast<double>(k);
+    };
+
+    const double top1 = n >= 1 && idx_b[0] == idx_s[0] ? 1.0 : 0.0;
+    const double top5 = n >= 5 ? top_k_overlap(5) : top1;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    ++n_vectors;
+    sum_cosine += cosine;
+    sum_top1_overlap += top1;
+    sum_top5_overlap += top5;
+}
+
+static double slha_pearson(const std::vector<double> & x, const std::vector<double> & y) {
+    const size_t n = x.size();
+    if (n < 2 || n != y.size()) return 0.0;
+    double mx = 0.0, my = 0.0;
+    for (size_t i = 0; i < n; ++i) { mx += x[i]; my += y[i]; }
+    mx /= n; my /= n;
+    double num = 0.0, dx2 = 0.0, dy2 = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double dx = x[i] - mx;
+        const double dy = y[i] - my;
+        num += dx * dy;
+        dx2 += dx * dx;
+        dy2 += dy * dy;
+    }
+    const double den = std::sqrt(dx2 * dy2);
+    return den > 1e-18 ? num / den : 0.0;
+}
+
+static double slha_spearman(const std::vector<double> & x, const std::vector<double> & y) {
+    const size_t n = x.size();
+    if (n < 2 || n != y.size()) return 0.0;
+    std::vector<size_t> idx(n);
+    for (size_t i = 0; i < n; ++i) idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) { return x[a] < x[b]; });
+    std::vector<double> rx(n), ry(n);
+    for (size_t i = 0; i < n; ) {
+        size_t j = i;
+        while (j < n && x[idx[j]] == x[idx[i]]) ++j;
+        const double rank = (i + 1 + j) / 2.0;
+        for (size_t k = i; k < j; ++k) rx[idx[k]] = rank;
+        i = j;
+    }
+    for (size_t i = 0; i < n; ++i) idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) { return y[a] < y[b]; });
+    for (size_t i = 0; i < n; ) {
+        size_t j = i;
+        while (j < n && y[idx[j]] == y[idx[i]]) ++j;
+        const double rank = (i + 1 + j) / 2.0;
+        for (size_t k = i; k < j; ++k) ry[idx[k]] = rank;
+        i = j;
+    }
+    return slha_pearson(rx, ry);
+}
+
+void slha_shadow_metrics::print(int32_t layer_id) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (n_samples == 0 && n_vectors == 0) return;
+    const double mae = n_samples ? sum_abs_error / static_cast<double>(n_samples) : 0.0;
+    const double rel_l2 = n_samples ? sum_rel_l2 / static_cast<double>(n_samples) : 0.0;
+    const double cosine = n_vectors ? sum_cosine / static_cast<double>(n_vectors) : 0.0;
+    const double top1 = n_vectors ? sum_top1_overlap / static_cast<double>(n_vectors) : 0.0;
+    const double top5 = n_vectors ? sum_top5_overlap / static_cast<double>(n_vectors) : 0.0;
+    std::cout << "[SLHA] layer " << layer_id
+              << " shadow n=" << n_samples
+              << " max_abs_err=" << max_abs_error
+              << " mae=" << mae
+              << " rel_l2=" << rel_l2
+              << " mismatches=" << n_mismatch
+              << " vectors=" << n_vectors
+              << " cosine=" << cosine
+              << " top1=" << top1
+              << " top5=" << top5
+              << "\n";
+}
+
+void slha_print_shadow_metrics_unlocked() {
+    auto & state = get_global_state();
+    for (auto & layer : state.layers) {
+        if (layer.shadow_metrics) {
+            layer.shadow_metrics->print(layer.layer_id);
+        }
+    }
+}
+
+void slha_print_shadow_metrics() {
+    auto & state = get_global_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    slha_print_shadow_metrics_unlocked();
+}
+
+// Diagnostic counters (defined before slha_k_clear_all which references them)
+static size_t g_diag_call_count = 0;
+static std::mutex g_diag_mutex;
+
+void slha_k_clear_all() {
+    for (size_t i = 0; i < SLHA_MAX_LAYERS; ++i) {
+        g_slha_tiles_written[i].store(0, std::memory_order_relaxed);
+    }
+    if (g_slha_tile_store.n_layers > 0) {
+        g_slha_tile_store.reset();
+    }
+}
+
 void slha_global_shutdown() {
     auto & state = get_global_state();
     std::lock_guard<std::mutex> lock(state.mutex);
 
     // Flush collected activations if in collect mode
-    if (state.mode == SLHA_KV_COLLECT) {
+    if (state.kv_mode == SLHA_KV_COLLECT) {
         if (!state.weights_dir.empty()) {
             // Unlock before calling flush (it will re-lock per layer)
             state.mutex.unlock();
             slha_flush_collected_activations(state.weights_dir.c_str());
             state.mutex.lock();
         }
+    }
+
+    slha_print_shadow_metrics_unlocked();
+
+    if (state.score_mode == SLHA_SCORE_REPLACE) {
+        slha_print_replace_summary();
     }
 
     for (auto & layer : state.layers) {
@@ -123,9 +422,11 @@ void slha_global_shutdown() {
             layer.model_handle = nullptr;
         }
         layer.collected_k.clear();
+        layer.shadow_metrics.reset();
     }
     state.layers.clear();
     state.initialized = false;
+    g_slha_tile_store.reset();
 }
 
 int slha_get_num_layers() {
@@ -176,7 +477,7 @@ bool slha_load_layer_model(slha_layer_state * layer, const std::string & weights
         std::cerr << "[SLHA] layer " << layer->layer_id
                   << ": failed to load weights from " << path
                   << ": " << slha_last_error_message() << "\n";
-        layer->mode = SLHA_KV_OFF;
+        layer->kv_mode = SLHA_KV_OFF;
         return false;
     }
 
@@ -187,7 +488,7 @@ bool slha_load_layer_model(slha_layer_state * layer, const std::string & weights
                   << ": dimension mismatch: model d=" << model_dim
                   << ", expected " << expected_dim << "\n";
         slha_weights_free(model);
-        layer->mode = SLHA_KV_OFF;
+        layer->kv_mode = SLHA_KV_OFF;
         return false;
     }
 
@@ -204,12 +505,522 @@ void slha_k_transform(
     int nth,
     void * userdata
 ) {
+    slha_k_transform_with_idxs(dst, a, nullptr, ith, nth, userdata);
+}
+
+static void slha_diag_score(
+    const float * dst_data,
+    int64_t n_kv,
+    int64_t n_token,
+    int64_t n_head,
+    int64_t n_stream,
+    int32_t layer_id,
+    size_t n_written
+);
+
+
+void slha_shadow_score(
+    ggml_tensor * dst,
+    const ggml_tensor * kq,
+    const ggml_tensor * q,
+    int ith,
+    int nth,
+    void * userdata
+) {
+    auto * layer = static_cast<slha_layer_state *>(userdata);
+    if (!layer || layer->score_mode == SLHA_SCORE_OFF) {
+        return;
+    }
+
+    // Common: check tensor types
+    if (kq->type != GGML_TYPE_F32 || q->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        if (layer->score_mode == SLHA_SCORE_REPLACE) {
+            if (ith == 0) {
+                g_slha_replace_counters.n_unsupported_shape.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                std::cerr << "[SLHA] replace: unsupported tensor type\n";
+            }
+        }
+        return;
+    }
+
+    // Common: verify nb[0] == sizeof(float) for all tensors (unit K stride)
+    if (kq->nb[0] != sizeof(float) || q->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
+        if (layer->score_mode == SLHA_SCORE_REPLACE) {
+            if (ith == 0) {
+                g_slha_replace_counters.n_unsupported_stride.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                std::cerr << "[SLHA] replace: unsupported nb[0] stride (kq="
+                          << kq->nb[0] << " q=" << q->nb[0] << " dst=" << dst->nb[0]
+                          << "); require sizeof(float)=" << sizeof(float) << "\n";
+            }
+        }
+        return;
+    }
+
+    // This callback is inserted after build_attn_mha permutes q and k with
+    // permute(0,2,1,3). After that, q is [head_dim, n_tokens, n_head, ...]
+    // and kq is [n_kv, n_tokens, n_head, ...].
+    const int64_t n_kv     = kq->ne[0];
+    const int64_t n_token  = kq->ne[1];
+    const int64_t n_head   = kq->ne[2];
+    const int64_t n_stream = kq->ne[3];
+    const int64_t head_dim = q->ne[0];
+
+    // Validate q dimensions match kq
+    if (q->ne[1] != n_token || q->ne[2] != n_head || q->ne[3] != n_stream) {
+        if (layer->score_mode == SLHA_SCORE_REPLACE) {
+            if (ith == 0) {
+                g_slha_replace_counters.n_unsupported_shape.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                std::cerr << "[SLHA] replace: unsupported shape (q="
+                          << q->ne[0] << "," << q->ne[1] << "," << q->ne[2] << "," << q->ne[3]
+                          << " kq=" << kq->ne[0] << "," << kq->ne[1] << "," << kq->ne[2] << "," << kq->ne[3]
+                          << ")\n";
+            }
+        }
+        return;
+    }
+
+    // Validate GQA dimensions
+    if (layer->n_embd_gqa == 0 || layer->n_embd_gqa % head_dim != 0) {
+        if (layer->score_mode == SLHA_SCORE_REPLACE) {
+            if (ith == 0) {
+                g_slha_replace_counters.n_unsupported_shape.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                std::cerr << "[SLHA] replace: unsupported dimensions n_embd_gqa="
+                          << layer->n_embd_gqa << " head_dim=" << head_dim << "\n";
+            }
+        }
+        return;
+    }
+
+    const int64_t n_kv_head = layer->n_embd_gqa / head_dim;
+    if (n_kv_head == 0 || n_head % n_kv_head != 0) {
+        if (layer->score_mode == SLHA_SCORE_REPLACE) {
+            if (ith == 0) {
+                g_slha_replace_counters.n_unsupported_shape.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                std::cerr << "[SLHA] replace: bad GQA geometry n_head=" << n_head
+                          << " n_kv_head=" << n_kv_head << "\n";
+            }
+        }
+        return;
+    }
+    const int64_t gqa_factor = n_head / n_kv_head;
+
+    // ==================================================================
+    // SHADOW MODE
+    // ==================================================================
+    if (layer->score_mode == SLHA_SCORE_SHADOW) {
+        // Copy baseline logits element-wise so the attention graph is unchanged
+        // regardless of tensor strides or shape.
+        {
+            const int64_t n = ggml_nelements(dst);
+            const int64_t i0 = (n * ith) / nth;
+            const int64_t i1 = (n * (ith + 1)) / nth;
+            const float * src = static_cast<const float *>(kq->data);
+            float * out = static_cast<float *>(dst->data);
+            for (int64_t i = i0; i < i1; ++i) {
+                out[i] = src[i];
+            }
+        }
+
+        // Load model and init shadow metrics
+        {
+            std::lock_guard<std::mutex> lock(*layer->collect_mutex);
+            if (!layer->model_handle) {
+                auto & state = get_global_state();
+                slha_load_layer_model(layer, state.weights_dir);
+            }
+            if (!layer->shadow_metrics) {
+                layer->shadow_metrics = std::make_unique<slha_shadow_metrics>();
+            }
+        }
+
+        if (!layer->model_handle || !layer->shadow_metrics) {
+            return;
+        }
+
+        const size_t d = static_cast<size_t>(layer->n_embd_gqa);
+        SlhaModel * model = static_cast<SlhaModel *>(layer->model_handle);
+
+        thread_local std::vector<float> q_extended;
+        thread_local std::vector<float> q_coarse;
+        thread_local std::vector<uint64_t> q_sign;
+        thread_local std::vector<float> scores;
+        q_coarse.resize(SLHA_D_C);
+        q_sign.resize(SLHA_RESIDUAL_WORDS);
+
+        const float * kq_data = static_cast<const float *>(kq->data);
+        const float * q_data  = static_cast<const float *>(q->data);
+
+        const size_t q_token_stride = q->nb[1] / sizeof(float);
+        const size_t q_head_stride  = q->nb[2] / sizeof(float);
+        const size_t q_stream_stride = q->nb[3] / sizeof(float);
+        const size_t kq_token_stride = kq->nb[1] / sizeof(float);
+        const size_t kq_head_stride  = kq->nb[2] / sizeof(float);
+        const size_t kq_stream_stride = kq->nb[3] / sizeof(float);
+
+        const int64_t total = n_stream * n_token * n_head;
+        const int64_t per_thread = (total + nth - 1) / nth;
+        const int64_t start = ith * per_thread;
+        const int64_t end = std::min(start + per_thread, total);
+
+        for (int64_t idx = start; idx < end; ++idx) {
+            const int64_t s = idx / (n_token * n_head);
+            const int64_t r = idx % (n_token * n_head);
+            const int64_t t = r / n_head;
+            const int64_t h = r % n_head;
+            const int64_t kv_head = h / gqa_factor;
+            q_extended.assign(d, 0.0f);
+            const float * q_head = q_data + s * q_stream_stride + t * q_token_stride + h * q_head_stride;
+            const size_t slot_start = static_cast<size_t>(kv_head * head_dim);
+            for (int64_t i = 0; i < head_dim; ++i) {
+                q_extended[slot_start + i] = q_head[i];
+            }
+
+            int rc = slha_prepare_query(model, q_extended.data(), d, q_coarse.data(), q_sign.data());
+            if (rc != SLHA_OK) {
+                std::cerr << "[SLHA] shadow score prepare_query failed: "
+                          << slha_last_error_message() << "\n";
+                continue;
+            }
+
+            const size_t pos_offset = static_cast<size_t>(s * n_kv);
+            const SciRustSlhaTile * tiles =
+                static_cast<const SciRustSlhaTile *>(g_slha_tile_store.read(layer->layer_id, pos_offset));
+            if (!tiles) {
+                continue;
+            }
+
+            // Verify contiguous range is fully populated.
+            bool contiguous = true;
+            for (int64_t k = 0; k < n_kv; ++k) {
+                if (!g_slha_tile_store.check_capacity(layer->layer_id, pos_offset + static_cast<size_t>(k)) ||
+                    !g_slha_tile_store.read(layer->layer_id, pos_offset + static_cast<size_t>(k))) {
+                    contiguous = false;
+                    break;
+                }
+            }
+            if (!contiguous) {
+                continue;
+            }
+
+            scores.resize(static_cast<size_t>(n_kv));
+            rc = slha_score_tiles(model, tiles, static_cast<size_t>(n_kv), q_coarse.data(), q_sign.data(), scores.data());
+            if (rc != SLHA_OK) {
+                std::cerr << "[SLHA] shadow score score_tiles failed: "
+                          << slha_last_error_message() << "\n";
+                continue;
+            }
+
+            const float * kq_head = kq_data + s * kq_stream_stride + t * kq_token_stride + h * kq_head_stride;
+            std::vector<double> baseline_vec(static_cast<size_t>(n_kv));
+            std::vector<double> slha_vec(static_cast<size_t>(n_kv));
+            for (int64_t k = 0; k < n_kv; ++k) {
+                baseline_vec[k] = static_cast<double>(kq_head[k]);
+                slha_vec[k] = static_cast<double>(scores[k]);
+                layer->shadow_metrics->add_sample(kq_head[k], scores[k]);
+            }
+            layer->shadow_metrics->add_vector(baseline_vec, slha_vec);
+
+            // Padding baseline audit: measure baseline values at positions
+            // k >= n_written where no tile data exists.
+            const size_t n_written_shadow = g_slha_tiles_written[layer->layer_id].load(std::memory_order_acquire);
+            if (n_written_shadow > 0 && static_cast<size_t>(n_kv) > n_written_shadow) {
+                double max_abs_pad = 0.0;
+                size_t n_nonzero = 0;
+                size_t n_nonfinite = 0;
+                for (int64_t k = static_cast<int64_t>(n_written_shadow); k < n_kv; ++k) {
+                    const double v = static_cast<double>(kq_head[k]);
+                    if (!std::isfinite(v)) {
+                        ++n_nonfinite;
+                    } else if (std::abs(v) > 1e-12) {
+                        ++n_nonzero;
+                        max_abs_pad = std::max(max_abs_pad, std::abs(v));
+                    }
+                }
+                if (n_nonzero > 0 || n_nonfinite > 0) {
+                    std::cerr << "[SLHA] shadow padding audit: layer=" << layer->layer_id
+                              << " n_kv=" << n_kv << " n_written=" << n_written_shadow
+                              << " max_abs_pad=" << max_abs_pad
+                              << " nonzero=" << n_nonzero
+                              << " nonfinite=" << n_nonfinite << "\n";
+                }
+            }
+        }
+        return;
+    }
+
+    // ==================================================================
+    // REPLACE MODE — fail-closed, no baseline fallback
+    // ==================================================================
+
+    g_slha_replace_counters.n_callbacks.fetch_add(1, std::memory_order_relaxed);
+
+    // Record n_stream and enforce single-stream for current experiment
+    if (ith == 0) {
+        g_slha_replace_counters.n_stream.store(
+            static_cast<size_t>(n_stream), std::memory_order_relaxed);
+    }
+
+    if (n_stream != 1) {
+        if (ith == 0) {
+            g_slha_replace_counters.n_unsupported_shape.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+            std::cerr << "[SLHA] replace: unsupported n_stream=" << n_stream
+                      << "; only n_stream=1 is supported\n";
+        }
+        return;
+    }
+
+    // Record expected counts (thread 0 only)
+    if (ith == 0) {
+        const int64_t total_vectors = n_stream * n_token * n_head;
+        g_slha_replace_counters.n_expected_vectors.fetch_add(
+            static_cast<size_t>(total_vectors), std::memory_order_relaxed);
+        g_slha_replace_counters.n_expected_logits.fetch_add(
+            static_cast<size_t>(total_vectors) * static_cast<size_t>(n_kv), std::memory_order_relaxed);
+    }
+
+    // Load model
+    {
+        std::lock_guard<std::mutex> lock(*layer->collect_mutex);
+        if (!layer->model_handle) {
+            auto & state = get_global_state();
+            slha_load_layer_model(layer, state.weights_dir);
+        }
+    }
+
+    if (!layer->model_handle) {
+        if (ith == 0) {
+            g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+            std::cerr << "[SLHA] replace: missing layer model for layer "
+                      << layer->layer_id << "\n";
+        }
+        return;
+    }
+
+    const size_t d = static_cast<size_t>(layer->n_embd_gqa);
+    SlhaModel * model = static_cast<SlhaModel *>(layer->model_handle);
+
+    // Thread-local working storage (never directly written to dst)
+    thread_local std::vector<float> q_extended;
+    thread_local std::vector<float> q_coarse;
+    thread_local std::vector<uint64_t> q_sign;
+    thread_local std::vector<float> temp_scores;
+    q_extended.resize(d, 0.0f);
+    q_coarse.resize(SLHA_D_C);
+    q_sign.resize(SLHA_RESIDUAL_WORDS);
+    temp_scores.resize(static_cast<size_t>(n_kv));
+
+    const float * q_data  = static_cast<const float *>(q->data);
+
+    const size_t q_token_stride  = q->nb[1] / sizeof(float);
+    const size_t q_head_stride   = q->nb[2] / sizeof(float);
+    const size_t q_stream_stride = q->nb[3] / sizeof(float);
+    const size_t dst_token_stride  = dst->nb[1] / sizeof(float);
+    const size_t dst_head_stride   = dst->nb[2] / sizeof(float);
+    const size_t dst_stream_stride = dst->nb[3] / sizeof(float);
+
+    const int64_t total = n_stream * n_token * n_head;
+    const int64_t per_thread = (total + nth - 1) / nth;
+    const int64_t start = ith * per_thread;
+    const int64_t end = std::min(start + per_thread, total);
+
+    // Safety-initialize the thread's portion of dst to zero (defined memory).
+    {
+        const int64_t n = ggml_nelements(dst);
+        const int64_t i0 = (n * ith) / nth;
+        const int64_t i1 = (n * (ith + 1)) / nth;
+        float * out = static_cast<float *>(dst->data);
+        for (int64_t i = i0; i < i1; ++i) {
+            out[i] = 0.0f;
+        }
+    }
+
+    // Load the number of tiles written for this layer. n_kv from kq->ne[0] is
+    // padded to at least 256 by llama_kv_cache::get_n_kv, but only n_written
+    // tiles actually exist. We only validate and score positions with tiles.
+    const size_t n_written = g_slha_tiles_written[layer->layer_id].load(std::memory_order_acquire);
+
+    for (int64_t idx = start; idx < end; ++idx) {
+        const int64_t s = idx / (n_token * n_head);
+        const int64_t r = idx % (n_token * n_head);
+        const int64_t t = r / n_head;
+        const int64_t h = r % n_head;
+        const int64_t kv_head = h / gqa_factor;
+
+        // n_stream == 1 is enforced above, so s must be 0.
+        // Defensively handle s > 0 as inactive stream (counted, not replaced).
+        if (s > 0) {
+            g_slha_replace_counters.inactive_stream_vectors.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.inactive_stream_logits.fetch_add(
+                static_cast<size_t>(n_kv), std::memory_order_relaxed);
+            continue;
+        }
+
+        // Build extended Q vector for this (stream, token, head)
+        std::fill(q_extended.begin(), q_extended.end(), 0.0f);
+        const float * q_head_ptr = q_data
+            + s * static_cast<ptrdiff_t>(q_stream_stride)
+            + t * static_cast<ptrdiff_t>(q_token_stride)
+            + h * static_cast<ptrdiff_t>(q_head_stride);
+        const size_t slot_start = static_cast<size_t>(kv_head * head_dim);
+        for (int64_t i = 0; i < head_dim; ++i) {
+            q_extended[slot_start + i] = q_head_ptr[i];
+        }
+
+        // Prepare query — failure is fatal for this vector
+        int rc = slha_prepare_query(model, q_extended.data(), d, q_coarse.data(), q_sign.data());
+        if (rc != SLHA_OK) {
+            g_slha_replace_counters.n_query_prep_fail.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+            if (ith == 0) {
+                std::cerr << "[SLHA] replace layer " << layer->layer_id
+                          << " query prepare failed: " << slha_last_error_message() << "\n";
+            }
+            continue;
+        }
+
+        // Only check tile positions that have actually been written.
+        // n_kv is padded (e.g. 256 for a batch of 2 tokens); n_written is the
+        // real count.  Positions beyond n_written have no KV data (K=0).
+        const size_t n_check = n_written < static_cast<size_t>(n_kv)
+            ? n_written : static_cast<size_t>(n_kv);
+
+        // Active vector: n_check > 0 means at least some positions are scored
+        g_slha_replace_counters.active_expected_vectors.fetch_add(1, std::memory_order_relaxed);
+        g_slha_replace_counters.active_expected_logits.fetch_add(
+            n_check, std::memory_order_relaxed);
+
+        // Padding: positions beyond n_written
+        if (static_cast<size_t>(n_kv) > n_written) {
+            g_slha_replace_counters.padding_vectors.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.padding_logits.fetch_add(
+                static_cast<size_t>(n_kv) - n_written, std::memory_order_relaxed);
+        }
+
+        // Read tile pointer base (position 0) and verify all needed positions
+        const SciRustSlhaTile * tiles = n_check > 0
+            ? static_cast<const SciRustSlhaTile *>(g_slha_tile_store.read(layer->layer_id, 0))
+            : nullptr;
+        size_t first_missing = SIZE_MAX;
+        if (n_check > 0 && !tiles) {
+            first_missing = 0;
+        } else {
+            for (size_t k = 1; k < n_check; ++k) {
+                if (!g_slha_tile_store.read(layer->layer_id, k)) {
+                    first_missing = k;
+                    break;
+                }
+            }
+        }
+        if (first_missing != SIZE_MAX) {
+            g_slha_replace_counters.n_missing_tile.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+            if (ith == 0 && first_missing < 5) {
+                static thread_local size_t diag_count = 0;
+                if (diag_count < 3) {
+                    ++diag_count;
+                    std::cerr << "[SLHA] replace diag: layer=" << layer->layer_id
+                              << " n_kv=" << n_kv << " n_token=" << n_token
+                              << " n_written=" << n_written << " n_check=" << n_check
+                              << " s=" << s << " t=" << t << " h=" << h
+                              << " first_missing=" << first_missing
+                              << " tiles_ptr=" << (void*)tiles << "\n";
+                }
+            }
+            continue;
+        }
+
+        if (n_check > 0) {
+            rc = slha_score_tiles(model, tiles, n_check, q_coarse.data(), q_sign.data(), temp_scores.data());
+            if (rc != SLHA_OK) {
+                g_slha_replace_counters.n_score_fail.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                if (ith == 0) {
+                    std::cerr << "[SLHA] replace layer " << layer->layer_id
+                              << " score_tiles failed: " << slha_last_error_message() << "\n";
+                }
+                continue;
+            }
+
+            bool all_finite = true;
+            for (size_t k = 0; k < n_check; ++k) {
+                if (!std::isfinite(temp_scores[k])) {
+                    all_finite = false;
+                    break;
+                }
+            }
+            if (!all_finite) {
+                g_slha_replace_counters.n_nonfinite_score.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
+                g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                continue;
+            }
+
+            // Write validated scores to dst (first n_check positions)
+            float * dst_head = static_cast<float *>(dst->data)
+                + s * static_cast<ptrdiff_t>(dst_stream_stride)
+                + t * static_cast<ptrdiff_t>(dst_token_stride)
+                + h * static_cast<ptrdiff_t>(dst_head_stride);
+            std::memcpy(dst_head, temp_scores.data(), n_check * sizeof(float));
+            if (ith == 0 && idx == start && g_diag_call_count < 100) {
+                slha_diag_score(dst_head, static_cast<int64_t>(n_kv),
+                                n_token, n_head, n_stream, layer->layer_id,
+                                n_written);
+            }
+
+            g_slha_replace_counters.active_replaced_vectors.fetch_add(1, std::memory_order_relaxed);
+            g_slha_replace_counters.active_replaced_logits.fetch_add(
+                n_check, std::memory_order_relaxed);
+            slha_replace_inc_layer_success(layer->layer_id);
+        }
+    }
+}
+
+void slha_diag_score(
+    const float * dst_data,
+    int64_t n_kv,
+    int64_t n_token,
+    int64_t n_head,
+    int64_t n_stream,
+    int32_t layer_id,
+    size_t n_written
+) {
+    std::lock_guard<std::mutex> lock(g_diag_mutex);
+    if (g_diag_call_count >= 100) return;
+    ++g_diag_call_count;
+    std::cerr << "[SLHA] diag cb#" << g_diag_call_count
+              << " layer=" << layer_id
+              << " n_kv=" << n_kv << " n_token=" << n_token
+              << " n_head=" << n_head << " n_stream=" << n_stream
+              << " n_written=" << n_written;
+    std::cerr << " s[0]=" << dst_data[0]
+              << " s[1]=" << dst_data[1];
+    std::cerr << "\n";
+}
+
+void slha_k_transform_with_idxs(
+    ggml_tensor * dst,
+    const ggml_tensor * a,
+    const ggml_tensor * b,
+    int ith,
+    int nth,
+    void * userdata
+) {
     auto * layer = static_cast<slha_layer_state *>(userdata);
     if (!layer) {
         return;
     }
 
-    if (layer->mode == SLHA_KV_OFF) {
+    if (layer->kv_mode == SLHA_KV_OFF) {
         return;
     }
 
@@ -217,10 +1028,10 @@ void slha_k_transform(
     // ne[0] = n_embd_gqa (columns, K vector dimension)
     // ne[1] = n_tokens (rows)
     // Data is row-major: each row is one token's K vector [n_embd_gqa]
-    
+
     const int64_t n_embd_gqa = a->ne[0];
     const int64_t n_tokens = a->ne[1];
-    
+
     // All threads must participate in both passthrough and collection.
     // Divide tokens among threads.
     const int64_t tokens_per_thread = (n_tokens + nth - 1) / nth;
@@ -231,7 +1042,7 @@ void slha_k_transform(
         return;  // This thread has no work
     }
 
-    if (layer->mode == SLHA_KV_PASSTHROUGH) {
+    if (layer->kv_mode == SLHA_KV_PASSTHROUGH) {
         // Passthrough: copy input to output unchanged.
         const size_t elem_size = ggml_type_size(a->type);
         const size_t block_size = ggml_blck_size(a->type);
@@ -248,17 +1059,17 @@ void slha_k_transform(
         return;
     }
 
-    if (layer->mode == SLHA_KV_COLLECT) {
+    if (layer->kv_mode == SLHA_KV_COLLECT) {
         // Collect mode: gather K vectors for training.
         // All threads collect their assigned tokens with synchronization.
-        
+
         // Update dimension on first call (any thread can do this).
         if (layer->n_embd_gqa == 0) {
             std::lock_guard<std::mutex> lock(*layer->collect_mutex);
             if (layer->n_embd_gqa == 0) {  // Double-check after acquiring lock
                 layer->n_embd_gqa = n_embd_gqa;
-                std::cout << "[SLHA] layer " << layer->layer_id 
-                          << " collecting K vectors, dim=" << n_embd_gqa 
+                std::cout << "[SLHA] layer " << layer->layer_id
+                          << " collecting K vectors, dim=" << n_embd_gqa
                           << ", n_tokens=" << n_tokens << "\n";
             }
         }
@@ -270,25 +1081,25 @@ void slha_k_transform(
             const size_t elem_size = ggml_type_size(a->type);
             const size_t block_size = ggml_blck_size(a->type);
             const size_t row_bytes = (n_embd_gqa / block_size) * elem_size;
-            
+
             const uint8_t * src = static_cast<const uint8_t *>(a->data);
             uint8_t * dst_data = static_cast<uint8_t *>(dst->data);
-            
+
             for (int64_t t = token_start; t < token_end; ++t) {
                 const uint8_t * src_row = src + t * row_bytes;
                 uint8_t * dst_row = dst_data + t * row_bytes;
                 std::memcpy(dst_row, src_row, row_bytes);
             }
-            
+
             if (ith == 0) {
-                std::cerr << "[SLHA] WARNING: layer " << layer->layer_id 
+                std::cerr << "[SLHA] WARNING: layer " << layer->layer_id
                           << " tensor type is not F32, skipping collection\n";
             }
             return;
         }
 
         const float * src_data = static_cast<const float *>(a->data);
-        
+
         // Each thread collects its assigned tokens with mutex protection.
         {
             std::lock_guard<std::mutex> lock(*layer->collect_mutex);
@@ -305,17 +1116,113 @@ void slha_k_transform(
         // Pass through: copy to output.
         const size_t row_bytes = n_embd_gqa * sizeof(float);
         uint8_t * dst_data = static_cast<uint8_t *>(dst->data);
-        
+
         for (int64_t t = token_start; t < token_end; ++t) {
             const uint8_t * src_row = static_cast<const uint8_t *>(a->data) + t * row_bytes;
             uint8_t * dst_row = dst_data + t * row_bytes;
             std::memcpy(dst_row, src_row, row_bytes);
         }
-        
+
         return;
     }
 
-    if (layer->mode == SLHA_KV_ROUNDTRIP) {
+    if (layer->kv_mode == SLHA_KV_TILESTORE) {
+        // Copy K through unchanged; side-store the compressed tile for each token.
+        const size_t row_bytes = ggml_row_size(a->type, n_embd_gqa);
+        const uint8_t * src_base = static_cast<const uint8_t *>(a->data);
+        uint8_t * dst_base = static_cast<uint8_t *>(dst->data);
+        for (int64_t t = token_start; t < token_end; ++t) {
+            std::memcpy(dst_base + t * dst->nb[1], src_base + t * a->nb[1], row_bytes);
+        }
+
+        if (a->type != GGML_TYPE_F32) {
+            if (ith == 0) {
+                std::cerr << "[SLHA] WARNING: layer " << layer->layer_id
+                          << " tilestore requires F32 input, got type " << a->type
+                          << "; skipping tile store\n";
+            }
+            return;
+        }
+
+        if (!b || b->type != GGML_TYPE_I64 || b->ne[0] < n_tokens) {
+            if (ith == 0) {
+                std::cerr << "[SLHA] WARNING: layer " << layer->layer_id
+                          << " tilestore missing/invalid k_idxs\n";
+            }
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(*layer->collect_mutex);
+            if (layer->n_embd_gqa == 0) {
+                layer->n_embd_gqa = n_embd_gqa;
+                std::cout << "[SLHA] layer " << layer->layer_id
+                          << " tilestore dim=" << n_embd_gqa << "\n";
+            }
+            if (!layer->model_handle) {
+                auto & state = get_global_state();
+                slha_load_layer_model(layer, state.weights_dir);
+            }
+            if (layer->score_mode == SLHA_SCORE_SHADOW && !layer->shadow_metrics) {
+                layer->shadow_metrics = std::make_unique<slha_shadow_metrics>();
+            }
+        }
+
+        if (layer->kv_mode == SLHA_KV_OFF || !layer->model_handle) {
+            return;
+        }
+
+        SlhaModel * model = static_cast<SlhaModel *>(layer->model_handle);
+        const int32_t codec = slha_codec_from_env();
+        const size_t d = static_cast<size_t>(n_embd_gqa);
+        const int64_t * idxs = static_cast<const int64_t *>(b->data);
+
+        // Track the maximum tile position written across ALL micro-batches
+        // within a chunk using CAS-based max-tracking.  This lets the callback
+        // always check up to n_kv (padded) — any position with a valid tile is
+        // scored.  Between chunks slha_k_clear_all() resets the counters via
+        // the llama_memory_clear hook.
+        size_t my_max_pos = 0;
+        for (int64_t t = token_start; t < token_end; ++t) {
+            const float * src_row = reinterpret_cast<const float *>(src_base + t * a->nb[1]);
+            const int64_t pos = idxs[t];
+            if (pos < 0) {
+                std::cerr << "[SLHA] layer " << layer->layer_id
+                          << " token " << t << " invalid position " << pos << "\n";
+                continue;
+            }
+            alignas(SLHA_TILE_ALIGN) SciRustSlhaTile tile;
+            int rc = slha_encode_key(model, src_row, d, static_cast<uint32_t>(pos), codec, &tile);
+            if (rc != SLHA_OK) {
+                std::cerr << "[SLHA] layer " << layer->layer_id
+                          << " token " << t << " encode failed: "
+                          << slha_last_error_message() << "\n";
+                continue;
+            }
+            if (!g_slha_tile_store.write(layer->layer_id, static_cast<size_t>(pos), &tile)) {
+                std::cerr << "[SLHA] layer " << layer->layer_id
+                          << " position " << pos << " tile store overflow (capacity="
+                          << g_slha_tile_store.capacity << ")\n";
+            } else {
+                const size_t pos_plus_1 = static_cast<size_t>(pos) + 1;
+                if (pos_plus_1 > my_max_pos) {
+                    my_max_pos = pos_plus_1;
+                }
+            }
+        }
+        if (my_max_pos > 0) {
+            size_t old = g_slha_tiles_written[layer->layer_id].load(std::memory_order_relaxed);
+            while (my_max_pos > old
+                   && !g_slha_tiles_written[layer->layer_id].compare_exchange_weak(
+                       old, my_max_pos, std::memory_order_release, std::memory_order_relaxed)) {
+                // CAS failed because another thread updated to a higher value; retry
+            }
+        }
+
+        return;
+    }
+
+    if (layer->kv_mode == SLHA_KV_ROUNDTRIP) {
         // First call: set the expected dimension and load the per-layer projection.
         // Hold the per-layer mutex so that other threads do not observe a set
         // dimension before the model handle is installed.
@@ -332,7 +1239,7 @@ void slha_k_transform(
             }
         }
 
-        if (layer->mode == SLHA_KV_OFF) {
+        if (layer->kv_mode == SLHA_KV_OFF) {
             // Model loading failed: copy through unchanged.
             const size_t row_bytes = ggml_row_size(a->type, n_embd_gqa);
             const uint8_t * src = static_cast<const uint8_t *>(a->data);
@@ -434,7 +1341,7 @@ void slha_k_transform(
 
 void slha_flush_collected_activations(const char * output_dir) {
     auto & state = get_global_state();
-    
+
     if (!output_dir) {
         std::cerr << "[SLHA] flush: output_dir is NULL\n";
         return;
@@ -452,7 +1359,7 @@ void slha_flush_collected_activations(const char * output_dir) {
     for (auto & layer : state.layers) {
         std::vector<float> data_copy;
         int64_t n_embd_gqa_copy = 0;
-        
+
         // Copy data under lock, then release before I/O.
         {
             std::lock_guard<std::mutex> lock(*layer.collect_mutex);
@@ -465,11 +1372,11 @@ void slha_flush_collected_activations(const char * output_dir) {
         }
 
         // Write to temporary file first (atomic write).
-        std::string k_path_tmp = std::string(output_dir) + "/layer-" + 
+        std::string k_path_tmp = std::string(output_dir) + "/layer-" +
                                  std::to_string(layer.layer_id) + "-k.bin.tmp";
-        std::string k_path = std::string(output_dir) + "/layer-" + 
+        std::string k_path = std::string(output_dir) + "/layer-" +
                             std::to_string(layer.layer_id) + "-k.bin";
-        
+
         std::ofstream out(k_path_tmp, std::ios::binary);
         if (!out) {
             std::cerr << "[SLHA] failed to open " << k_path_tmp << "\n";
@@ -483,8 +1390,8 @@ void slha_flush_collected_activations(const char * output_dir) {
 
         // Validate: ensure we have complete rows.
         if (data_copy.size() % n_embd_gqa_copy != 0) {
-            std::cerr << "[SLHA] layer " << layer.layer_id 
-                      << ": collected data size (" << data_copy.size() 
+            std::cerr << "[SLHA] layer " << layer.layer_id
+                      << ": collected data size (" << data_copy.size()
                       << ") is not a multiple of dimension (" << n_embd_gqa_copy << ")\n";
             out.close();
             std::remove(k_path_tmp.c_str());
@@ -498,7 +1405,7 @@ void slha_flush_collected_activations(const char * output_dir) {
                   data_copy.size() * sizeof(float));
 
         if (!out) {
-            std::cerr << "[SLHA] layer " << layer.layer_id 
+            std::cerr << "[SLHA] layer " << layer.layer_id
                       << ": write failed, discarding partial file\n";
             out.close();
             std::remove(k_path_tmp.c_str());
@@ -506,16 +1413,16 @@ void slha_flush_collected_activations(const char * output_dir) {
         }
 
         out.close();
-        
+
         // Atomically rename temporary file to final name.
         if (std::rename(k_path_tmp.c_str(), k_path.c_str()) != 0) {
-            std::cerr << "[SLHA] layer " << layer.layer_id 
+            std::cerr << "[SLHA] layer " << layer.layer_id
                       << ": failed to rename " << k_path_tmp << " to " << k_path << "\n";
             std::remove(k_path_tmp.c_str());
             continue;
         }
 
-        std::cout << "[SLHA] layer " << layer.layer_id << ": wrote " 
+        std::cout << "[SLHA] layer " << layer.layer_id << ": wrote "
                   << rows << " tokens × " << cols << " dims to " << k_path << "\n";
     }
 }

@@ -147,7 +147,7 @@ SlhaContext* slha_init(void);
 int32_t slha_shutdown(SlhaContext* context);
 
 /**
- * Score one tile. Unaligned input/output storage is accepted.
+ * Process one tile. Unaligned input/output storage is accepted.
  * score_out is not modified on failure.
  */
 int32_t slha_process_tile(
@@ -155,6 +155,52 @@ int32_t slha_process_tile(
     const float* q_coarse,
     const uint64_t* q_sign,
     float* score_out
+);
+
+/**
+ * Prepare a query for direct SLHA scoring.
+ *
+ * Computes q_coarse (D_C floats) and q_sign (SLHA_RESIDUAL_WORDS uint64s) from
+ * the d-dimensional query vector using the per-layer projection. Output buffers
+ * are not modified on failure. Unaligned input/output storage is accepted.
+ */
+int32_t slha_prepare_query(
+    const SlhaModel* model,
+    const float* q,
+    size_t d,
+    float* q_coarse,
+    uint64_t* q_sign
+);
+
+/**
+ * Score one tile with a model-validated prepared query.
+ *
+ * Equivalent to slha_process_tile with an extra model-handle check. Provided
+ * for symmetry with slha_score_tiles. score_out is not modified on failure.
+ * Unaligned tile/output storage is accepted.
+ */
+int32_t slha_score_tile(
+    const SlhaModel* model,
+    const SciRustSlhaTile* tile,
+    const float* q_coarse,
+    const uint64_t* q_sign,
+    float* score_out
+);
+
+/**
+ * Score N tiles with a single prepared query.
+ *
+ * scores_out must point to at least n_tiles writable floats. tiles must point
+ * to n_tiles contiguous readable SciRustSlhaTile structs; unaligned storage is
+ * accepted. scores_out is not modified on failure.
+ */
+int32_t slha_score_tiles(
+    const SlhaModel* model,
+    const SciRustSlhaTile* tiles,
+    size_t n_tiles,
+    const float* q_coarse,
+    const uint64_t* q_sign,
+    float* scores_out
 );
 
 /**

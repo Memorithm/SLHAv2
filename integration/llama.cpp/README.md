@@ -18,6 +18,9 @@ Implemented and measured:
 * Automated per-layer projection training script (outputs `layer-NNN.slhw` +
   `manifest.json`).
 * SLHA K round-trip callback using `slha_encode_key` + `slha_decode_key`.
+* **Experimental shadow-score quality gate**: `SLHA_SCORE_MODE=shadow` compares
+  baseline Q·K logits with direct SLHA scores while leaving attention output
+  unchanged.
 * Reproducible build/apply/measure scripts.
 
 Measured conclusion on the chosen configuration: **the round-trip path does not
@@ -39,7 +42,7 @@ integration/llama.cpp/
 ├── README.md                         # this file
 ├── build_and_roundtrip.sh            # clone, patch, build, run all modes
 ├── patches/0001-slha-k-passthrough.patch
-├── shim/slha_llama.cpp               # C++ shim (collect / passthrough / roundtrip)
+├── shim/slha_llama.cpp               # C++ shim (collect / passthrough / roundtrip / tilestore / shadow)
 ├── shim/slha_llama.hpp
 ├── scripts/prepare_calibration.sh    # build a separate calibration corpus
 ├── scripts/train_layer_weights.sh    # train one .slhw per layer
@@ -78,6 +81,9 @@ WORK=/tmp/slha-llama \
 # 7. Round-trip perplexity
 SLHA_CODEC=mixed WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip
 SLHA_CODEC=mix3 WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh roundtrip
+
+# 8. Shadow-score quality gate (attention is unchanged; prints SLHA-vs-baseline metrics)
+SLHA_CODEC=mixed WORK=/tmp/slha-llama integration/llama.cpp/build_and_roundtrip.sh shadow
 ```
 
 All scripts pin the llama.cpp tag (`b9860`) and verify the commit hash before
@@ -87,11 +93,16 @@ building.
 
 Modes are selected via environment variables:
 
-| Variable          | Values                              |
-|-------------------|-------------------------------------|
-| `SLHA_KV_MODE`    | `off` / `passthrough` / `collect` / `roundtrip` |
-| `SLHA_CODEC`      | `mixed` (default) / `mix3` / `grouped` / `nf4` / `tq3` |
-| `SLHA_WEIGHTS_DIR`| directory with `layer-NNN.slhw` and `manifest.json` |
+| Variable           | Values                              |
+|--------------------|-------------------------------------|
+| `SLHA_KV_MODE`     | `off` / `passthrough` / `collect` / `roundtrip` / `tilestore` |
+| `SLHA_SCORE_MODE`  | `off` (default) / `shadow` / `replace` |
+| `SLHA_CODEC`       | `mixed` (default) / `mix3` / `grouped` / `nf4` / `tq3` |
+| `SLHA_WEIGHTS_DIR` | directory with `layer-NNN.slhw` and `manifest.json` |
+
+Shadow mode requires `SLHA_KV_MODE=tilestore` so the K tiles are encoded at the
+K-cache write seam; it forces `--flash-attn off --parallel 1` so the baseline
+logits are materialised for comparison.
 
 ## Measured results
 
@@ -103,6 +114,7 @@ Qwen2.5-1.5B-Instruct Q8_0, WikiText-2 test, 12 chunks, 512 context, 4 threads.
 | passthrough | 11.8753  |          0.00 |          0.0% | 44.81 | hook sanity     |
 | mixed       | 16.5976  |          4.72 |         39.8% | 42.28 | SLHA round-trip |
 | mix3        | 16.6460  |          4.77 |         40.2% | 42.22 | SLHA round-trip |
+| shadow      | 11.8699  |         -0.01 |         -0.0% | 22.44 | score-only gate; cosine 0.73-0.91, top-1 35-76%, top-5 43-57% |
 
 See [`results/measurements.json`](results/measurements.json) for exact SHAs,
 commands, and timestamps.

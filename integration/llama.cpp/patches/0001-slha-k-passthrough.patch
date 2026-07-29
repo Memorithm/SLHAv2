@@ -1,12 +1,13 @@
-diff -ru llama.cpp/src/CMakeLists.txt llama.cpp.modified/src/CMakeLists.txt
---- llama.cpp/src/CMakeLists.txt	2026-07-27 16:36:07.273487000 +0200
-+++ llama.cpp.modified/src/CMakeLists.txt	2026-07-27 16:41:59.443164178 +0200
-@@ -43,6 +43,13 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 320784c3a..63a33c0e7 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -43,6 +43,13 @@ add_library(llama
              ${LLAMA_MODELS_SOURCES}
              )
  
 +if (SLHA_INTEGRATION)
-+    target_sources(llama PRIVATE slha_llama.cpp)
++    target_sources(llama PRIVATE slha_llama.cpp slha_replace_counters.cpp)
 +    target_compile_definitions(llama PRIVATE SLHA_INTEGRATION)
 +    target_include_directories(llama PRIVATE ${SLHA_INCLUDE_DIR})
 +    target_link_libraries(llama PRIVATE ${SLHA_LIB})
@@ -15,13 +16,89 @@ diff -ru llama.cpp/src/CMakeLists.txt llama.cpp.modified/src/CMakeLists.txt
  set_target_properties(llama PROPERTIES
      VERSION ${LLAMA_INSTALL_VERSION}
      SOVERSION 0
-diff -ru llama.cpp/src/llama-kv-cache.cpp llama.cpp.modified/src/llama-kv-cache.cpp
---- llama.cpp/src/llama-kv-cache.cpp	2026-07-27 16:36:07.277487066 +0200
-+++ llama.cpp.modified/src/llama-kv-cache.cpp	2026-07-27 16:42:14.647407204 +0200
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 0465430..0d32f6f 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -12,6 +12,10 @@
+ #include "llama-ext.h"
+ #include "llama.h"
+
++#if defined(SLHA_INTEGRATION)
++#include "slha_llama.hpp"
++#endif
++
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstring>
+@@ -3834,6 +3838,9 @@ void llama_memory_clear(llama_memory_t mem, bool data) {
+     }
+
+     mem->clear(data);
++#if defined(SLHA_INTEGRATION)
++    slha_k_clear_all();
++#endif
+ }
+
+ bool llama_memory_seq_rm(
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 4c86e43..b155dd3 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -5,6 +5,10 @@
+ #include "llama-batch.h"
+ #include "llama-cparams.h"
+
++#if defined(SLHA_INTEGRATION)
++#include "slha_llama.hpp"
++#endif
++
+ #include "llama-kv-cache.h"
+ #include "llama-kv-cache-iswa.h"
+ #include "llama-kv-cache-dsa.h"
+@@ -16,6 +20,7 @@
+ #include <cassert>
+ #include <cmath>
+ #include <cstring>
++#include <iostream>
+ #include <numeric>
+ #include <sstream>
+ #include <string>
+@@ -2445,6 +2450,26 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+         //       while for some models F16 is enough, for others it is not, so we default to F32 here
+         ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+
++#if defined(SLHA_INTEGRATION)
++        // Shadow/replace-mode: compare or substitute baseline logits with SLHA
++        // direct scores.  In shadow mode the op copies kq through unchanged and
++        // only records metrics; in replace mode the op overwrites the logits.
++        {
++            slha_layer_state * layer_state = slha_get_layer_state(il);
++            if (layer_state && layer_state->score_mode != SLHA_SCORE_OFF) {
++                kq = ggml_map_custom2(
++                    ctx0,
++                    kq,
++                    q,
++                    slha_shadow_score,
++                    GGML_N_TASKS_MAX,
++                    layer_state
++                );
++                cb(kq, "kq_slha_score", il);
++            }
++        }
++#endif
++
+         if (arch == LLM_ARCH_GROK) {
+             // need to do the following:
+             // multiply by attn_output_multiplier
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 12bf5c3..49df394 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
 @@ -5,6 +5,10 @@
  #include "llama-model.h"
  #include "llama-context.h"
- 
+
 +#if defined(SLHA_INTEGRATION)
 +#include "slha_llama.hpp"
 +#endif
@@ -29,10 +106,10 @@ diff -ru llama.cpp/src/llama-kv-cache.cpp llama.cpp.modified/src/llama-kv-cache.
  #include <algorithm>
  #include <cassert>
  #include <cmath>
-@@ -375,6 +379,18 @@
+@@ -375,6 +379,18 @@ llama_kv_cache::llama_kv_cache(
          }
      }
- 
+
 +
 +#if defined(SLHA_INTEGRATION)
 +    // Initialize SLHA K-cache integration if enabled via environment variable.
@@ -48,24 +125,37 @@ diff -ru llama.cpp/src/llama-kv-cache.cpp llama.cpp.modified/src/llama-kv-cache.
      const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
      debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
  }
-@@ -1327,6 +1343,20 @@
- 
+@@ -1327,6 +1343,33 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
+
      k_cur = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
- 
+
 +#if defined(SLHA_INTEGRATION)
 +    // Apply SLHA transformation to K if enabled.
 +    slha_layer_state * layer_state = slha_get_layer_state(il);
-+    if (layer_state && layer_state->mode != SLHA_KV_OFF) {
-+        k_cur = ggml_map_custom1(
-+            ctx,
-+            k_cur,
-+            slha_k_transform,
-+            GGML_N_TASKS_MAX,
-+            layer_state
-+        );
++    if (layer_state && layer_state->kv_mode != SLHA_KV_OFF) {
++        // In tilestore mode the callback also needs the KV cache indices so
++        // tiles can be stored by their absolute position.
++        if (layer_state->kv_mode == SLHA_KV_TILESTORE || layer_state->score_mode != SLHA_SCORE_OFF) {
++            k_cur = ggml_map_custom2(
++                ctx,
++                k_cur,
++                k_idxs,
++                slha_k_transform_with_idxs,
++                GGML_N_TASKS_MAX,
++                layer_state
++            );
++        } else {
++            k_cur = ggml_map_custom1(
++                ctx,
++                k_cur,
++                slha_k_transform,
++                GGML_N_TASKS_MAX,
++                layer_state
++            );
++        }
 +    }
 +#endif
 +
      const int64_t n_stream = k->ne[2];
- 
+
      if (n_stream > 1) {
