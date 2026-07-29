@@ -52,7 +52,7 @@ if [ "$MODE" != "baseline" ]; then
         echo "ERROR: patch file not found: $PATCH_FILE"
         exit 1
     fi
-    
+
     # Check if patch is already applied.
     if ! grep -q "SLHA_INTEGRATION" llama.cpp/src/llama-kv-cache.cpp 2>/dev/null; then
         cd llama.cpp
@@ -61,11 +61,13 @@ if [ "$MODE" != "baseline" ]; then
     else
         echo "  patch already applied"
     fi
-    
+
     # Copy the shim files.
     echo "== copying SLHA shim =="
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_llama.hpp" llama.cpp/src/
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_llama.cpp" llama.cpp/src/
+    cp "$REPO_ROOT/integration/llama.cpp/shim/slha_replace_counters.hpp" llama.cpp/src/
+    cp "$REPO_ROOT/integration/llama.cpp/shim/slha_replace_counters.cpp" llama.cpp/src/
 fi
 
 # 4. Build llama.cpp.
@@ -117,6 +119,10 @@ elif [ "$MODE" = "shadow" ]; then
     export SLHA_KV_MODE=tilestore
     export SLHA_SCORE_MODE=shadow
     export SLHA_WEIGHTS_DIR="$WORK/weights"
+elif [ "$MODE" = "replace" ]; then
+    export SLHA_KV_MODE=tilestore
+    export SLHA_SCORE_MODE=replace
+    export SLHA_WEIGHTS_DIR="$WORK/weights"
 else
     unset SLHA_KV_MODE
 fi
@@ -128,19 +134,86 @@ else
 fi
 FLASH_ATTN_FLAG=""
 PARALLEL_FLAG=""
-if [ "$MODE" = "shadow" ]; then
-    # Shadow scoring requires the non-flash attention path so kq logits are
-    # materialised for comparison, and a single stream so the tile store
-    # positions are contiguous.
+BATCH_FLAG=""
+if [ "$MODE" = "shadow" ] || [ "$MODE" = "replace" ]; then
+    # Shadow scoring and the direct compressed-score path require the non-flash
+    # attention path so kq logits are materialised, and a single stream so the
+    # tile store positions are contiguous.
+    # --parallel 1 and --batch-size 512 ensure n_seq=1 so tile store positions
+    # are contiguous within a single sequence (no multi-sequence collision).
     FLASH_ATTN_FLAG="--flash-attn off"
     PARALLEL_FLAG="--parallel 1"
+    BATCH_FLAG="--batch-size 512"
 fi
 
+set +o pipefail  # Temporarily disable for grep filter
 llama.cpp/build/bin/llama-perplexity \
-    -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" $FLASH_ATTN_FLAG $PARALLEL_FLAG \
-    2>&1 | tee "$OUTPUT_FILE" | grep -E "Final estimate|PPL"
+    -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" $FLASH_ATTN_FLAG $PARALLEL_FLAG $BATCH_FLAG \
+    2>&1 | tee "$OUTPUT_FILE" | grep -E "Final estimate|PPL" || true
+set -o pipefail
 
 echo
 echo "Results written to $OUTPUT_FILE"
 echo "Mode: $MODE"
 echo "llama.cpp commit: $LLAMA_COMMIT"
+
+# Replace-mode validation: parse SLHA_REPLACE_SUMMARY and reject unless valid.
+if [ "$MODE" = "replace" ]; then
+    echo "== validating strict replace coverage =="
+    SUMMARY_BLOCK=$(grep -A 30 "^SLHA_REPLACE_SUMMARY$" "$OUTPUT_FILE" || true)
+    VALID=$(echo "$SUMMARY_BLOCK" | grep "^valid=" | head -1 | cut -d= -f2)
+    ACTIVE_COVERAGE=$(echo "$SUMMARY_BLOCK" | grep "^active_coverage=" | head -1 | cut -d= -f2)
+    CALLBACKS=$(echo "$SUMMARY_BLOCK" | grep "^callbacks=" | head -1 | cut -d= -f2)
+    AE_V=$(echo "$SUMMARY_BLOCK" | grep "^active_expected_vectors=" | head -1 | cut -d= -f2)
+    AR_V=$(echo "$SUMMARY_BLOCK" | grep "^active_replaced_vectors=" | head -1 | cut -d= -f2)
+    AE_L=$(echo "$SUMMARY_BLOCK" | grep "^active_expected_logits=" | head -1 | cut -d= -f2)
+    AR_L=$(echo "$SUMMARY_BLOCK" | grep "^active_replaced_logits=" | head -1 | cut -d= -f2)
+    PAD_V=$(echo "$SUMMARY_BLOCK" | grep "^padding_vectors=" | head -1 | cut -d= -f2)
+    PAD_L=$(echo "$SUMMARY_BLOCK" | grep "^padding_logits=" | head -1 | cut -d= -f2)
+    INACT_V=$(echo "$SUMMARY_BLOCK" | grep "^inactive_stream_vectors=" | head -1 | cut -d= -f2)
+    INACT_L=$(echo "$SUMMARY_BLOCK" | grep "^inactive_stream_logits=" | head -1 | cut -d= -f2)
+    FAILED_V=$(echo "$SUMMARY_BLOCK" | grep "^failed_vectors=" | head -1 | cut -d= -f2)
+    FALLBACK_V=$(echo "$SUMMARY_BLOCK" | grep "^fallback_vectors=" | head -1 | cut -d= -f2)
+    N_STREAM=$(echo "$SUMMARY_BLOCK" | grep "^n_stream=" | head -1 | cut -d= -f2)
+
+    if [ -z "$VALID" ]; then
+        echo "ERROR: SLHA_REPLACE_SUMMARY not found in output. Replace path may not have executed."
+        exit 1
+    fi
+
+    echo "  callbacks=$CALLBACKS"
+    echo "  active_expected_vectors=$AE_V"
+    echo "  active_replaced_vectors=$AR_V"
+    echo "  active_expected_logits=$AE_L"
+    echo "  active_replaced_logits=$AR_L"
+    echo "  padding_vectors=$PAD_V"
+    echo "  padding_logits=$PAD_L"
+    echo "  inactive_stream_vectors=$INACT_V"
+    echo "  inactive_stream_logits=$INACT_L"
+    echo "  failed_vectors=$FAILED_V"
+    echo "  fallback_vectors=$FALLBACK_V"
+    echo "  n_stream=$N_STREAM"
+    echo "  active_coverage=$ACTIVE_COVERAGE"
+    echo "  valid=$VALID"
+
+    if [ "$VALID" != "true" ]; then
+        echo "ERROR: strict replace validation FAILED (valid=$VALID). A valid replace run requires"
+        echo "  active_replaced_vectors == active_expected_vectors,"
+        echo "  active_replaced_logits == active_expected_logits,"
+        echo "  failed_vectors == 0, fallback_vectors == 0,"
+        echo "  n_stream == 1, active_coverage == 1, valid == true"
+        exit 1
+    fi
+
+    if [ "$ACTIVE_COVERAGE" != "1" ] && [ "$ACTIVE_COVERAGE" != "1.0" ]; then
+        echo "ERROR: strict replace coverage FAILED (active_coverage=$ACTIVE_COVERAGE). Expected 1.0"
+        exit 1
+    fi
+
+    if [ "$N_STREAM" != "1" ]; then
+        echo "ERROR: strict replace n_stream FAILED (n_stream=$N_STREAM). Expected 1"
+        exit 1
+    fi
+
+    echo "  strict replace validation PASSED"
+fi

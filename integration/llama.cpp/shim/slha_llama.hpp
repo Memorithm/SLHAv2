@@ -1,12 +1,15 @@
 #ifndef SLHA_LLAMA_HPP
 #define SLHA_LLAMA_HPP
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <memory>
 #include <mutex>
 #include <string>
+
+#include "slha_replace_counters.hpp"
 
 struct ggml_context;
 struct ggml_tensor;
@@ -41,6 +44,7 @@ struct slha_tile_store {
 
     bool init(size_t n_layers, size_t capacity, size_t tile_bytes);
     void reset();
+    void clear_layer(int32_t layer_id);
     bool write(int32_t layer_id, size_t position, const void * tile);
     const void * read(int32_t layer_id, size_t position) const;
     bool check_capacity(int32_t layer_id, size_t position) const;
@@ -74,23 +78,23 @@ struct slha_layer_state {
     slha_score_mode score_mode;
     void * model_handle;
     void * scratch;
-    
+
     // For collect mode
     std::vector<float> collected_k;
     std::unique_ptr<std::mutex> collect_mutex;
-    
+
     // For shadow/replace modes
     std::unique_ptr<slha_shadow_metrics> shadow_metrics;
-    
+
     slha_layer_state() : layer_id(0), n_embd_gqa(0), kv_mode(SLHA_KV_OFF),
                          score_mode(SLHA_SCORE_OFF),
                          model_handle(nullptr), scratch(nullptr),
                          collect_mutex(std::make_unique<std::mutex>()) {}
-    
+
     // Non-copyable due to mutex
     slha_layer_state(const slha_layer_state&) = delete;
     slha_layer_state& operator=(const slha_layer_state&) = delete;
-    
+
     // Movable
     slha_layer_state(slha_layer_state&&) = default;
     slha_layer_state& operator=(slha_layer_state&&) = default;
@@ -143,8 +147,21 @@ void slha_shadow_score(
     void * userdata
 );
 
+/** Per-layer count of tiles written to the tilestore.
+ *  Incremented in slha_k_transform_with_idxs for each successful tile write.
+ *  Accessed in slha_shadow_score to limit tile-presence checking to positions
+ *  that have actually been written (because n_kv from kq->ne[0] is padded to
+ *  at least 256 by llama_kv_cache::get_n_kv). */
+extern std::atomic<size_t> g_slha_tiles_written[SLHA_MAX_LAYERS];
+
+void slha_print_replace_summary();
+
 void slha_flush_collected_activations(const char * output_dir);
 void slha_print_shadow_metrics();
 void slha_print_shadow_metrics_unlocked();
+
+/** Clear the tile store and reset tile-written counters.
+ *  Called from llama_kv_cache::clear() to avoid stale tile data between chunks. */
+void slha_k_clear_all();
 
 #endif
