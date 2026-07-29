@@ -245,7 +245,7 @@ sanitization script SHA-256:
 ```
 
 The position and pattern are consistent with a warmup-like callback, but the
-exact origin was not instrumentally proven.
+exact upstream origin was not instrumentally proven.
 
 The weights were generated after the squash merge from implementation commit
 `6361dfdbcd30660bf2d623fe19029938dd209cd7` using an out-of-tree deterministic
@@ -254,6 +254,84 @@ non-finite-row removal step.
 Per-layer raw and cleaned hashes, aggregate calibration hashes, all weight-file
 hashes, the manifest hash and the exact training command are recorded in
 [`results/measurements.json`](results/measurements.json).
+
+> **Update.** The out-of-tree sanitization above is no longer required: the
+> production pipeline now validates calibration and fails closed on any
+> non-finite row. See **Calibration integrity policy** below.
+
+## Calibration integrity policy
+
+The collection and training pipeline is fail-safe with respect to non-finite
+(NaN / +Inf / -Inf) K-activation rows. A single shared validator
+(`shim/slha_calibration.{hpp,cpp}`) is linked by the collection driver, the
+trainer gate CLI (`shim/slha_calibrate_cli.cpp`) and the unit tests
+(`tests/calibration_tests.cpp`), so all three enforce identical rules.
+
+**Default policy — `reject`.** Any non-finite scalar in any dump makes the whole
+calibration invalid and fails the run with a non-zero status. Structural
+defects — empty files, truncated payloads, a size that disagrees with the
+header, dimensions that differ across layers, missing layers (when the expected
+count is known), or duplicate layer ids — fail the same way. Nothing is
+silently removed while still returning success.
+
+**Manifest.** `build_and_roundtrip.sh collect` writes
+`<calib_dir>/calibration_manifest.json` recording: format version,
+implementation and llama.cpp commits, model identifier and hash, dataset hash,
+collection command, UTC timestamp, per-layer rows observed / accepted /
+rejected, NaN / +Inf / -Inf row counts, per-layer non-finite row indices,
+per-layer raw and clean SHA-256, `sanitized`, and the global `valid` flag. A
+valid collection has `total_rows_rejected == 0`, `nan_row_count == 0`,
+`sanitized == false`, `valid == true`.
+
+**Fail before training.** `train_layer_weights.sh` runs the same validator as a
+gate *before* fitting any projection. On failure it exits non-zero and writes no
+weights. Training then proceeds into a staging directory; only after every
+expected `.slhw` exists and is non-empty, and the manifest is written, is the
+staging directory moved into the final destination. On any failure the staging
+directory is removed and a pre-existing valid weights directory is left
+untouched (atomic swap). The trainer also cross-checks a collection manifest
+when present and rejects a `valid=false` manifest or a codec / dimension /
+model / dataset mismatch.
+
+**Research/recovery mode — `drop-row` (never the default).** Set
+`SLHA_CALIBRATION_NONFINITE_POLICY=drop-row` to have the validator remove whole
+rows that contain any non-finite scalar. Finite values are never clamped or
+imputed; removed rows are recorded; the output is marked `sanitized=true`; raw
+and clean hashes are both recorded; and the result is accepted only when each
+layer retains at least `SLHA_CALIBRATION_MIN_ROWS` rows (default 1). This
+reproduces the earlier out-of-tree cleanup, but explicitly and inside the
+production pipeline.
+
+```bash
+# Production default (fails closed on any non-finite row):
+CALIB_DIR=/tmp/slha-llama/calibration \
+  DATA_FILE=/tmp/slha-llama/wiki.train.raw \
+  WORK=/tmp/slha-llama \
+  integration/llama.cpp/build_and_roundtrip.sh collect
+
+# Research/recovery only (deterministic whole-row removal):
+SLHA_CALIBRATION_NONFINITE_POLICY=drop-row \
+  CALIB_DIR=/tmp/slha-llama/calibration \
+  WEIGHTS_DIR=/tmp/slha-llama/weights \
+  WORK=/tmp/slha-llama \
+  integration/llama.cpp/scripts/train_layer_weights.sh mixed
+```
+
+**Origin (observed vs inferred).** Instrumentation of the collect callback
+showed that the first collect invocation for every layer processes exactly two
+tokens at absolute rows 0–1, before the twelve 512-token evaluation passes
+(`n_tokens=2` at `row_base=0`, then `n_tokens=512`). The earlier non-finite
+rows sat at exactly those indices (0 or 1). In the earlier session each affected
+layer had one full 256-wide row of NaN (27 layers × 256 = 6912 non-finite
+scalars), while a fresh collection on a different host produced zero non-finite
+rows from the identical pipeline. *Observed:* the corrupt rows are whole-row and
+originate in the initial two-token priming decode, and the defect is
+intermittent across hosts. *Inferred:* the priming decode reads a K slot that
+was not populated with valid activations, so its contents are host-dependent
+garbage. *Not proven:* the precise upstream mechanism inside llama.cpp. Because
+the trigger is intermittent and only distinguishable by symptoms (a low row
+index, or the value being non-finite), the robust fix is the validation
+boundary above rather than a source-side exclusion predicate.
 
 ## Excluded runs
 
@@ -287,9 +365,14 @@ integration/llama.cpp/
 ├── shim/slha_llama.hpp
 ├── shim/slha_replace_counters.cpp    # strict replacement counters
 ├── shim/slha_replace_counters.hpp
+├── shim/slha_calibration.cpp         # calibration integrity validator (shared core)
+├── shim/slha_calibration.hpp
+├── shim/slha_calibrate_cli.cpp       # slha_calibrate — validation/manifest gate
 ├── tests/replace_strict_tests.cpp    # production-linked strict-counter tests
+├── tests/calibration_tests.cpp       # production-linked calibration validator tests
+├── tests/trainer_atomicity_test.sh   # trainer fail-before-training / atomic-swap tests
 ├── scripts/prepare_calibration.sh    # build a separate calibration corpus
-├── scripts/train_layer_weights.sh    # train one .slhw per layer
+├── scripts/train_layer_weights.sh    # validate calibration, then atomically train .slhw
 └── results/
     ├── measurements.json             # machine-readable results and provenance
     └── README.md                     # Markdown report
@@ -316,9 +399,9 @@ CALIB_DIR=/tmp/slha-llama/calibration \
   WORK=/tmp/slha-llama \
   integration/llama.cpp/build_and_roundtrip.sh collect
 
-# 6. Train per-layer projections (mixed codec).
-#    NOTE: see "Calibration preprocessing" — the collected dumps currently
-#    contain non-finite rows that this step does not filter.
+# 6. Train per-layer projections (mixed codec). The trainer validates the
+#    calibration first (default policy 'reject'): a non-finite row aborts the
+#    run with no weights written. See "Calibration integrity policy".
 MODEL_REPO=Qwen/Qwen2.5-1.5B-Instruct-GGUF \
   MODEL_FILE=qwen2.5-1.5b-instruct-q8_0.gguf \
   WORK=/tmp/slha-llama \
@@ -349,6 +432,8 @@ Modes are selected via environment variables:
 | `SLHA_SCORE_MODE`  | `off` (default) / `shadow` / `replace` |
 | `SLHA_CODEC`       | `mixed` (default) / `mix3` / `grouped` / `nf4` / `tq3` |
 | `SLHA_WEIGHTS_DIR` | directory with `layer-NNN.slhw` and `manifest.json` |
+| `SLHA_CALIBRATION_NONFINITE_POLICY` | `reject` (default) / `drop-row` (research/recovery only) |
+| `SLHA_CALIBRATION_MIN_ROWS` | minimum rows a layer must retain under `drop-row` (default 1) |
 
 Shadow and replace modes require `SLHA_KV_MODE=tilestore` so the K tiles are
 encoded at the K-cache write seam. Both force `--flash-attn off --parallel 1`
@@ -380,9 +465,13 @@ error, and the round-trip perplexity reflects that limitation.
 * Baseline Q·K is still materialised by llama.cpp; the custom operation replaces
   logits after the baseline matrix multiplication.
 * Strict replace mode supports only one parallel sequence (`n_stream == 1`).
-* **The committed collector emits non-finite calibration rows in this
-  experiment, and the committed trainer does not reject or filter them. A
-  production fix is still required.**
+* Calibration collection can intermittently emit non-finite K rows (see
+  **Calibration integrity policy**). This is now caught: the collection driver
+  and the trainer both fail closed on any non-finite row under the default
+  `reject` policy, so poisoned dumps can no longer reach training silently. The
+  precise upstream trigger inside llama.cpp's priming decode is characterised
+  (whole-row, host-dependent) but not instrumentally proven, so the validation
+  boundary — not a source-side exclusion predicate — is the fix.
 * Numerical PPL results show run-to-run variation even in unpatched llama.cpp
   (observed spread 0.0100 PPL over three runs). Production counters were fully
   deterministic; the source of the numerical variation was not instrumentally
@@ -411,7 +500,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-de
 cargo +1.89.0 check --locked --workspace --all-targets --all-features
 ```
 
-The production-linked strict-counter tests:
+The production-linked tests (strict-replacement counters, calibration validator,
+and trainer atomicity):
 
 ```bash
 make -C integration/llama.cpp/tests clean
