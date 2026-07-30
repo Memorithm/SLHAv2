@@ -83,6 +83,12 @@ struct slha_layer_state {
     std::vector<float> collected_k;
     std::unique_ptr<std::mutex> collect_mutex;
 
+    // For ranking-dataset collection (offline training data only): the raw K
+    // rows indexed by KV position, so a candidate projection can be re-scored
+    // offline. Written only when SLHA_RANK_DATASET_DIR is set; empty otherwise.
+    std::vector<float> raw_k_by_pos;
+    size_t raw_k_max_pos = 0;
+
     // For shadow/replace modes
     std::unique_ptr<slha_shadow_metrics> shadow_metrics;
 

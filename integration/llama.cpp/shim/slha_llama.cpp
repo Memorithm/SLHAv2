@@ -5,6 +5,7 @@
 #include "slha_scale_fit.hpp"
 #include "slha_score_oracle.hpp"
 #include "slha_oracle_metrics.hpp"
+#include "slha_rank_dataset.hpp"
 
 #include "slha.h"
 
@@ -431,6 +432,21 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
         }
     }
 
+    // Ranking-training dataset collection. OFFLINE ONLY: enabling this makes the
+    // run record exact baseline logits as training labels, so it is never part
+    // of a deployable measurement. Inert unless SLHA_RANK_DATASET_DIR is set.
+    {
+        const char * rd = std::getenv("SLHA_RANK_DATASET_DIR");
+        if (rd && rd[0]) {
+            slha_rank_dataset::enable(rd);
+            std::cout << "[SLHA] rank-training dataset collection enabled -> " << rd
+                      << " (stride=" << slha_rank_dataset::sampling().token_stride
+                      << ", heads<" << slha_rank_dataset::sampling().max_heads << ")\n";
+        } else {
+            slha_rank_dataset::enable(nullptr);
+        }
+    }
+
     // Offline per-layer score-scale fitting (shadow diagnostic). Active only when
     // SLHA_SCALE_FIT_JSON names an output path; the JSON is written at shutdown.
     {
@@ -731,6 +747,24 @@ static size_t g_diag_call_count = 0;
 static std::mutex g_diag_mutex;
 
 void slha_k_clear_all() {
+    // The KV cache is about to be cleared and positions restart at 0, so the raw
+    // key matrix collected for the ranking dataset must be sealed into the
+    // current chunk BEFORE it is overwritten. Rows recorded after this point
+    // belong to the next chunk.
+    if (slha_rank_dataset::enabled()) {
+        auto & state = get_global_state();
+        for (auto & layer : state.layers) {
+            std::lock_guard<std::mutex> lock(*layer.collect_mutex);
+            if (layer.raw_k_max_pos > 0 && layer.n_embd_gqa > 0) {
+                slha_rank_dataset::add_keys(layer.layer_id, layer.raw_k_by_pos.data(),
+                                            layer.raw_k_max_pos,
+                                            static_cast<size_t>(layer.n_embd_gqa));
+            }
+            layer.raw_k_max_pos = 0;
+            std::fill(layer.raw_k_by_pos.begin(), layer.raw_k_by_pos.end(), 0.0f);
+        }
+        slha_rank_dataset::begin_chunk();
+    }
     for (size_t i = 0; i < SLHA_MAX_LAYERS; ++i) {
         g_slha_tiles_written[i].store(0, std::memory_order_relaxed);
     }
@@ -776,6 +810,24 @@ void slha_global_shutdown() {
             } else {
                 std::cerr << "[SLHA] failed to write SLHA_ORACLE_METRICS_JSON='" << mp << "'\n";
             }
+        }
+    }
+
+    // Write the ranking-training dataset if collection was enabled.
+    if (slha_rank_dataset::enabled()) {
+        for (auto & layer : state.layers) {
+            std::lock_guard<std::mutex> lock(*layer.collect_mutex);
+            if (layer.raw_k_max_pos > 0 && layer.n_embd_gqa > 0) {
+                slha_rank_dataset::add_keys(layer.layer_id, layer.raw_k_by_pos.data(),
+                                            layer.raw_k_max_pos,
+                                            static_cast<size_t>(layer.n_embd_gqa));
+            }
+        }
+        std::string rd_err;
+        if (slha_rank_dataset::flush(&rd_err)) {
+            std::cout << "[SLHA] wrote rank-training dataset\n";
+        } else {
+            std::cerr << "[SLHA] rank-training dataset flush FAILED: " << rd_err << "\n";
         }
     }
 
@@ -1486,6 +1538,23 @@ void slha_shadow_score(
                     0);                                          // non-finite rejected
             }
 
+            // Ranking-training dataset. OFFLINE ONLY: this records the exact
+            // baseline row as a training LABEL, which is precisely what the
+            // deployable path may never do at inference. It is enabled solely by
+            // SLHA_RANK_DATASET_DIR and is inert otherwise.
+            if (slha_rank_dataset::enabled() && slha_rank_dataset::wanted(t, h)
+                && n_visible > 0) {
+                const float * mb_row = kq_data
+                    + s * static_cast<ptrdiff_t>(kq_stream_stride)
+                    + t * static_cast<ptrdiff_t>(kq_token_stride)
+                    + h * static_cast<ptrdiff_t>(kq_head_stride);
+                slha_rank_dataset::add_row(
+                    layer->layer_id, static_cast<int32_t>(h),
+                    static_cast<int32_t>(kv_head), t,
+                    q_extended.data(), static_cast<size_t>(d),
+                    mb_row, temp_scores.data(), n_visible);
+            }
+
             // Diagnostic score oracle. Rewrites this row from the PAIRED
             // baseline row B and the SLHA row S so that ranking errors can be
             // separated from order-preserving score-shape errors. Applied to
@@ -1786,6 +1855,20 @@ void slha_k_transform_with_idxs(
                           << " token " << t << " encode failed: "
                           << slha_last_error_message() << "\n";
                 continue;
+            }
+            // Offline training data only: keep the raw K row addressed by KV
+            // position so a candidate projection can be re-scored without
+            // re-running the model. Never read by the deployable path.
+            if (slha_rank_dataset::enabled()) {
+                std::lock_guard<std::mutex> lock(*layer->collect_mutex);
+                const size_t need = (static_cast<size_t>(pos) + 1) * d;
+                if (layer->raw_k_by_pos.size() < need) {
+                    layer->raw_k_by_pos.resize(need, 0.0f);
+                }
+                std::memcpy(layer->raw_k_by_pos.data() + static_cast<size_t>(pos) * d,
+                            src_row, d * sizeof(float));
+                layer->raw_k_max_pos =
+                    std::max(layer->raw_k_max_pos, static_cast<size_t>(pos) + 1);
             }
             if (!g_slha_tile_store.write(layer->layer_id, static_cast<size_t>(pos), &tile)) {
                 std::cerr << "[SLHA] layer " << layer->layer_id

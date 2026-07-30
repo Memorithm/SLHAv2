@@ -78,6 +78,8 @@ if [ "$MODE" != "baseline" ]; then
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_score_oracle.cpp" llama.cpp/src/
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_oracle_metrics.hpp" llama.cpp/src/
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_oracle_metrics.cpp" llama.cpp/src/
+    cp "$REPO_ROOT/integration/llama.cpp/shim/slha_rank_dataset.hpp" llama.cpp/src/
+    cp "$REPO_ROOT/integration/llama.cpp/shim/slha_rank_dataset.cpp" llama.cpp/src/
 fi
 
 # 4. Build llama.cpp.
