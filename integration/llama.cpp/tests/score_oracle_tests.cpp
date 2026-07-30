@@ -311,6 +311,53 @@ int main() {
       std::vector<float> p = {0.0f}, m = {-0.0f};
       CHECK(!multiset_equal(p, m)); } DONE();
 
+    // 26. tie-aware ordering invariant: with tied transplanted values the strict
+    //     permutation check is the WRONG predicate; respects_ranking is correct.
+    TEST("tie-aware ordering invariant");
+    { std::vector<float> b = {1.0f, 9.0f};
+      std::vector<float> s2 = {5.0f, 5.0f};      // S ties -> order unobservable
+      CHECK(run(Mode::BaselineRankSlhaValues, b, s2, out) == ApplyStatus::Ok);
+      CHECK(multiset_equal(out, s2));
+      // strict permutation equality legitimately fails here ...
+      CHECK(!ranking_equal(out, b));
+      // ... but the tie-aware invariant holds, which is what the runtime checks
+      CHECK(respects_ranking(out.data(), b.data(), b.size(), g_ws));
+      // with DISTINCT values both predicates must agree
+      std::vector<float> s3 = {5.0f, 6.0f};
+      CHECK(run(Mode::BaselineRankSlhaValues, b, s3, out) == ApplyStatus::Ok);
+      CHECK(ranking_equal(out, b));
+      CHECK(respects_ranking(out.data(), b.data(), b.size(), g_ws)); } DONE();
+
+    // 27. respects_ranking actually rejects a genuinely mis-ordered row
+    TEST("tie-aware invariant rejects real violations");
+    { std::vector<float> ref = {1.0f, 9.0f, 5.0f};
+      std::vector<float> bad = {9.0f, 1.0f, 5.0f};   // ref ranks key1 first, bad ranks it last
+      CHECK(!respects_ranking(bad.data(), ref.data(), ref.size(), g_ws));
+      std::vector<float> good = {1.0f, 9.0f, 5.0f};
+      CHECK(respects_ranking(good.data(), ref.data(), ref.size(), g_ws));
+      // ties in the OUTPUT are accepted, a strict inversion is not
+      std::vector<float> flat = {4.0f, 4.0f, 4.0f};
+      CHECK(respects_ranking(flat.data(), ref.data(), ref.size(), g_ws)); } DONE();
+
+    // 28. tie-heavy rows round-trip through every mode without violating invariants
+    TEST("tie-heavy rows preserve invariants in all modes");
+    { std::vector<float> b(64), s2(64);
+      for (size_t i = 0; i < b.size(); ++i) {
+          b[i]  = static_cast<float>(i % 4);      // many exact ties
+          s2[i] = static_cast<float>(i % 3);      // many exact ties
+      }
+      for (Mode m : {Mode::BaselineRankSlhaValues, Mode::SlhaRankBaselineValues}) {
+          CHECK(run(m, b, s2, out) == ApplyStatus::Ok);
+          const std::vector<float> & ref = (m == Mode::BaselineRankSlhaValues) ? b : s2;
+          const std::vector<float> & val = (m == Mode::BaselineRankSlhaValues) ? s2 : b;
+          CHECK(respects_ranking(out.data(), ref.data(), out.size(), g_ws));
+          CHECK(multiset_equal(out, val));
+      }
+      for (int k : {1, 4, 16}) {
+          CHECK(run(Mode::BaselineTopKRank, b, s2, out, k) == ApplyStatus::Ok);
+          CHECK(multiset_equal(out, s2));
+      } } DONE();
+
     std::printf("=== score-oracle tests complete: %s ===\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
     return g_failures == 0 ? 0 : 1;
 }

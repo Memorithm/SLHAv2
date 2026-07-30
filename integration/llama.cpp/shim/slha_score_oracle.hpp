@@ -119,8 +119,18 @@ ApplyStatus apply(Mode mode,
 void rank_permutation(const float * v, size_t n, std::vector<int32_t> & perm,
                       uint64_t * ties);
 
-// True if the two vectors induce the same ranking permutation.
+// True if the two vectors induce the same ranking permutation. NOTE: this is
+// only the right predicate when the assigned values are distinct. When a
+// transplant assigns tied values, the relative order of the equal-valued keys
+// is not observable from the output, so use respects_ranking() instead.
 bool same_ranking(const float * x, const float * y, size_t n, Workspace & ws);
+
+// Tie-aware ordering invariant: true when `out` is non-increasing along the
+// ranking permutation of `ref`. This is the correct statement of "keys ordered
+// like ref" for a value transplant — wherever the assigned values differ the
+// order must match ref exactly, and wherever they tie the order is unobservable
+// and therefore unconstrained.
+bool respects_ranking(const float * out, const float * ref, size_t n, Workspace & ws);
 
 // True if the two vectors hold the same value multiset (compared bitwise on
 // the sorted order, so -0.0 and +0.0 are distinguished).

@@ -183,6 +183,20 @@ bool same_ranking(const float * x, const float * y, size_t n, Workspace & ws) {
     return true;
 }
 
+bool respects_ranking(const float * out, const float * ref, size_t n, Workspace & ws) {
+    if (n == 0) {
+        return true;
+    }
+    ws.ensure(n);
+    rank_permutation(ref, n, ws.perm_b, nullptr);
+    for (size_t r = 1; r < n; ++r) {
+        if (out[ws.perm_b[r]] > out[ws.perm_b[r - 1]]) {
+            return false;   // a later-ranked key strictly outranks an earlier one
+        }
+    }
+    return true;
+}
+
 bool same_value_multiset(const float * x, const float * y, size_t n,
                          std::vector<float> & sx, std::vector<float> & sy) {
     sx.assign(x, x + n);

@@ -1465,12 +1465,15 @@ void slha_shadow_score(
                     bool ok = true;
                     switch (g_oracle.mode) {
                         case slha_oracle::Mode::BaselineRankSlhaValues:
-                            ok = slha_oracle::same_ranking(oracle_out.data(), b_row, n_check, ows)
+                            // respects_ranking, not same_ranking: when the
+                            // transplanted values tie, the relative order of the
+                            // equal-valued keys is unobservable in the output.
+                            ok = slha_oracle::respects_ranking(oracle_out.data(), b_row, n_check, ows)
                               && slha_oracle::same_value_multiset(oracle_out.data(),
                                      temp_scores.data(), n_check, vx, vy);
                             break;
                         case slha_oracle::Mode::SlhaRankBaselineValues:
-                            ok = slha_oracle::same_ranking(oracle_out.data(),
+                            ok = slha_oracle::respects_ranking(oracle_out.data(),
                                      temp_scores.data(), n_check, ows)
                               && slha_oracle::same_value_multiset(oracle_out.data(),
                                      b_row, n_check, vx, vy);
