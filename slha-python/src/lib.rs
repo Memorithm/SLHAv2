@@ -222,7 +222,11 @@ fn checked_score(
 }
 
 /// Python wrapper for `SciRustSlhaTile`.
-#[pyclass]
+///
+/// `skip_from_py_object`: nothing extracts `PySlhaTile` by value (all methods
+/// take `&self`), so the automatic `FromPyObject` impl pyo3 is deprecating was
+/// dead code — skipping it matches the upcoming pyo3 default.
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PySlhaTile {
     pub inner: SciRustSlhaTile,
@@ -397,7 +401,8 @@ fn compress_latent(
 /// runs. Any Rust panic is converted into `RuntimeError`.
 #[pyfunction]
 fn run_audit(py: Python<'_>) -> PyResult<String> {
-    let result = py.allow_threads(|| catch_unwind(AssertUnwindSafe(|| audit::run().to_compact())));
+    // pyo3 0.24 renamed `allow_threads` to `detach`; 0.29 removed the old name.
+    let result = py.detach(|| catch_unwind(AssertUnwindSafe(|| audit::run().to_compact())));
 
     result.map_err(|_| runtime_error("panic while running the SLHA self-audit"))
 }
