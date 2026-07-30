@@ -1,10 +1,10 @@
 # cargo-deny policy — supply-chain gate run by the `supply-chain` CI job.
 #
 # The license allowlist covers exactly what the graph contains today: the
-# workspace's own PolyForm-Noncommercial (and slhav2-vram's declared
-# MIT OR Apache-2.0 — see LICENSING.md for the repo-level licensing surface),
-# plus the permissive licenses of the dependency tree. Adding a dependency
-# under any other license must be a conscious decision: it fails this gate.
+# workspace's own PolyForm-Noncommercial (all five members — maintainer
+# decision of 2026-07-30, see LICENSING.md) plus the permissive licenses of
+# the dependency tree. Adding a dependency under any other license must be a
+# conscious decision: it fails this gate.
 
 [graph]
 all-features = true

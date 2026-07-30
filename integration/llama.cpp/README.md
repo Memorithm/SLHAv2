@@ -786,6 +786,277 @@ on-policy; that is why the sweep, not the fit, carries the conclusion. The
 per-layer scale files tested are magnitude-fitted perturbations of the identity
 (all within ~3%), not a PPL-optimised search of the 28-dimensional scale space.
 
+## Research: rank-transplant oracle (ranking vs order-preserving error)
+
+PR #62 established that no rescaling constant within a softmax row explains the
+compressed-score quality gap. That left two mechanisms unseparated: **(A) key-ranking
+errors** — SLHA puts the wrong keys at the top — and **(B) order-preserving errors** in
+the score gaps and shape. This section separates them with a diagnostic transplant
+oracle. It is measurement only: production score mathematics are unchanged and the
+oracle is default-off.
+
+Provenance: source content proven byte-identical to squash merge `e8db022`,
+llama-perplexity `43dc88a072b590d6…`, libllama `ea4979aa14ff6c68…`,
+model `d7efb072e7724d25…`, dataset `136677b69515d194…`,
+weight manifest `afe6deb0cf986015…`. Full data, per-layer tables and
+hashes: [`results/rank_transplant_oracle.json`](results/rank_transplant_oracle.json).
+
+> **These oracles require access to exact baseline scores and are not deployable
+> replacement methods.** Every one of them reads the baseline `Q·Kᵀ` row that a compressed
+> KV cache exists precisely to avoid computing. They bound what a better codec could
+> achieve; they are not one. The oracle is default-off and no production path changes.
+
+### The oracles
+
+At the raw `kq = Q·Kᵀ` seam, for query token `t`, the oracle rewrites the row from the
+paired baseline row `B` and SLHA row `S`:
+
+```
+Oracle A   baseline ranking  +  the visible SLHA value multiset
+Oracle B   SLHA ranking      +  the visible baseline value multiset
+top-k      baseline's top-k keys promoted; the tail keeps its relative SLHA order
+```
+
+**Causal visibility is part of the definition.** Query `t` attends keys `0..t`, so the
+oracle domain is `n_visible = min(n_check, t+1)`. An earlier version spanned the whole
+written prefix; masked keys then consumed value-multiset slots that softmax never sees,
+which diluted the transplant. At the four-chunk screening resolution, fixing it moved
+Oracle A from 10.4088 to
+10.9429 PPL and the recovered fraction from
+74.6% to
+61.4% — a material change, not a rounding
+difference. Every pre-fix oracle run was quarantined, not reinterpreted.
+
+Values are gathered through the *other* vector's own ranking permutation, so the
+transplanted multiset is bit-exact. The ordering invariant is **weak-order** preserving:
+the output must be non-increasing along the reference permutation. A strict
+permutation-equality check is wrong whenever the transplanted values tie —
+`B = [1.0, 9.0]`,
+`S = [5.0, 5.0]` gives
+`out = [5.0, 5.0]`, whose rank vector
+`[0, 1]` cannot equal the reference
+permutation `[1, 0]` because the two values are equal.
+
+### Identity controls
+
+Nothing below is interpreted unless both identity controls are exact at twelve chunks.
+
+| control | PPL (12 chunks, mean of 3) | must equal |
+| --- | ---: | --- |
+| pass-through | 11.8644 | — |
+| baseline-identity oracle | 11.8644 | pass-through |
+| strict replacement | 16.8855 | — |
+| SLHA-identity oracle | 16.8855 | strict replacement |
+
+Both hold exactly (`controls_exact = true`). Three repetitions of each of the
+nine configurations are **bit-identical**, sample standard deviation exactly zero, with
+identical strict, oracle, exact-tie, invariant-check and active-domain accounting
+counters (`all_deterministic = true`). Any difference would be a regression after the
+PR #62 race fix and would block aggregation.
+
+### Result
+
+Total gap at twelve chunks: 16.8855 − 11.8644 = **5.0211 PPL**.
+
+| oracle | PPL | change vs strict | fraction of gap |
+| --- | ---: | ---: | ---: |
+| Oracle A — baseline ranking, visible SLHA values | 13.5756 | +3.3099 | 65.92% |
+| Oracle B — SLHA ranking, visible baseline values | 19.6719 | -2.7864 | -55.49% |
+| order-preserving residual (Oracle A − pass-through) | — | +1.7112 | 34.08% |
+
+Restoring the baseline ordering of causally visible keys while preserving the causally
+visible SLHA score-value multiset recovers 65.9% of the gap. The remaining
+1.7112 PPL is the **order-preserving residual** — error that survives with
+the ranking already correct. It is *not* labelled magnitude error: PR #62 rejected the
+magnitude hypothesis, and this experiment does not identify what the residual is.
+
+Oracle B is reported independently and read conservatively: applying the baseline value
+distribution to the incorrect SLHA key ordering **amplifies** the quality loss. This
+demonstrates a strong interaction between key assignment and score geometry; it does not
+prove that score geometry is irrelevant. **Oracle A and Oracle B are not an additive
+decomposition** — their fractions do not sum to 1 and must not be read as a variance
+partition.
+
+### How many keys have to be right
+
+| restoration | PPL | absolute recovery | fraction of gap | fraction of full Oracle A | remaining residual |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| top-1 | 14.2400 | +2.6455 | 52.69% | 79.93% | 2.3756 |
+| top-16 | 13.6278 | +3.2577 | 64.88% | 98.42% | 1.7634 |
+| full ranking (Oracle A) | 13.5756 | +3.3099 | 65.92% | 100.00% | 1.7112 |
+
+- CONFIRMED: top-1 restoration alone reaches 79.93% of the full Oracle A recovery.
+- CONFIRMED as approximate saturation: top-16 reaches 98.42% of the full Oracle A recovery.
+
+The SIGN of the top-16 minus full-ranking difference reversed between the two resolutions. At four chunks top-16 was 0.0113 PPL BELOW full ranking; at twelve chunks it is 0.0522 PPL ABOVE it. The screening appearance that top-16 slightly exceeded full ranking therefore does NOT persist: at the validated resolution top-16 recovers slightly less than the full ranking, as expected. Both differences are small in absolute terms, but the reversal is why the four-chunk contrast was never promoted to a claim.
+
+### Early layers
+
+| restoration | PPL | recovery | fraction of gap |
+| --- | ---: | ---: | ---: |
+| full-rank Oracle A, layers 0–6 | 12.4770 | +4.4085 | 87.80% |
+| full-rank Oracle A, all 28 layers | 13.5756 | +3.3099 | 65.92% |
+
+Correcting rankings only in early layers can outperform correcting every layer because some later-layer SLHA deviations may be compensating, while early ranking errors trigger downstream amplification. This does not mean later layers are irrelevant.
+
+### Screening versus final
+
+The twelve-chunk matrix is authoritative. The four-chunk sweep is screening evidence only.
+
+| metric (recovered fraction of gap) | four-chunk screening | twelve-chunk final | absolute difference | direction preserved |
+| --- | ---: | ---: | ---: | :---: |
+| Oracle A recovery | 61.36% | 65.92% | +4.56 pp | yes |
+| Oracle B change | -37.26% | -55.49% | -18.23 pp | yes |
+| top-1 recovery | 46.98% | 52.69% | +5.71 pp | yes |
+| top-16 recovery | 61.64% | 64.88% | +3.24 pp | yes |
+| early 0-6 recovery | 88.55% | 87.80% | -0.75 pp | yes |
+
+Every direction is preserved (`all_directions_preserved = true`). The
+magnitudes move by a few percentage points, which is why the four-chunk figures were never
+promoted to validated claims.
+
+### Layerwise screening, including the anomalies
+
+The 28 matched pairs (`U_layer_L` strict vs `L_oracleA_L` oracle, identical conditions)
+are a **four-chunk screening** result; no equivalent twelve-chunk layerwise decomposition
+was run. Classification precedence, applied in this order:
+
+1. `unstable_denominator` — |damage| < eps -- checked first, because every fraction below is undefined when the denominator is not resolvable
+1. `negative_damage` — damage <= -eps -- replacing this layer alone IMPROVES PPL, so a 'recovered fraction' has no meaning regardless of the oracle change
+1. `over_recovery` — damage >= eps and oracle_change > damage (fraction > 1) -- the oracle drives PPL below pass-through; the fraction is reported uncapped
+1. `negative_recovery` — damage >= eps and oracle_change < 0 -- the transplant makes this layer worse; the negative fraction is reported signed, never clipped
+1. `positive_recovery` — everything else
+
+With a declared denominator guard of ε = 0.01 PPL:
+
+- **negative damage** (replacing the layer alone *improves* PPL, so a fraction is meaningless): layers 3, 25
+- **unstable denominator** (|damage| < ε): layer 10
+- **positive damage but negative recovery** (the transplant makes the layer worse; the signed fraction is reported, never clipped): layers 1, 2, 8, 9, 15, 18, 22
+- **over-recovery** (fraction > 1): none — no screening layer recovers more than 100%
+
+No fraction is capped anywhere in the artifact. Layer 5 carries the largest single-layer
+damage (0.5578 PPL) and the largest absolute recovery
+(+0.4220 PPL), but its recovery does not exceed its damage: the
+fraction is 0.7565 and the oracle result 9.5210 stays above
+pass-through 9.3852. The largest fraction observed is
+0.9907 at layer 27.
+
+Summing the **signed** single-layer absolute recoveries over layers 0–6 — including the
+negative terms, none excluded — gives 0.3811 PPL, while restoring the group
+jointly recovers 3.5693 PPL: an interaction of
+**+3.1882 PPL**. Early ranking errors amplify downstream. This is a
+screening figure and is labelled as such in the artifact.
+
+### Active-key rank agreement
+
+All statistics are restricted to **causally visible** keys — written tile, in-stream,
+finite, unmasked. They supersede the PR #60 top-1/top-5 figures, which were computed over
+the full padded row and are not attention-relevant. Micro (pooled over rows) and macro
+(equal weight per layer) are reported separately and never averaged together.
+
+| statistic | micro | macro mean | macro median | macro min | macro max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| top-1 agreement | 0.7389 | 0.7389 | 0.8159 | 0.2093 | 1.0000 |
+| top-2 overlap | 0.7548 | 0.7548 | 0.8004 | 0.4597 | 0.9173 |
+| top-4 overlap | 0.8055 | 0.8055 | 0.8054 | 0.6361 | 0.9435 |
+| top-8 overlap | 0.8384 | 0.8384 | 0.8465 | 0.7182 | 0.9506 |
+| top-16 overlap | 0.8627 | 0.8627 | 0.8703 | 0.7704 | 0.9619 |
+| Spearman (fractional ranks) | 0.9640 | 0.9640 | 0.9644 | 0.9267 | 0.9934 |
+| Kendall tau-b | 0.8529 | 0.8529 | 0.8484 | 0.7807 | 0.9383 |
+
+**Tie counts are sampled diagnostics, not exhaustive.** The metrics hook records a row only
+when `(t % 16) == 0 && h < 2`, so 7,224 rows were inspected
+(258 per layer across 28 layers) — 1.049% of the
+688,800 replaced vectors in a full-model run. On that sample:
+96 baseline exact-tie pairs, 70 SLHA exact-tie pairs,
+280 undefined rows and top-k boundary ties
+top1=0, top2=0, top4=0, top8=0, top16=1 — a boundary tie means the
+k-th and (k+1)-th baseline scores are exactly equal, so top-k membership is decided by the
+deterministic index tiebreak rather than by the score. These are **not** comparable with the exhaustive oracle
+counter `oracle_ties = 12511`, which counts tied comparisons over every replaced vector
+during permutation construction — a different population and a different definition. Do
+not divide one by the other.
+
+Position accounting holds on every sampled row (`physical = included + causally_masked +
+padding + inactive_stream + nonfinite`), with 0 failures.
+
+### What this does and does not establish
+
+Restoring the baseline ordering of causally visible keys while preserving the causally visible SLHA score-value multiset recovered most of the measured quality gap. Correcting only a small number of highest-ranked keys captured a large fraction of that benefit, and correcting layers 0-6 prevented substantial downstream amplification.
+
+The dominant measured mechanism is therefore incorrect assignment of high score values to visible keys. A substantial order-preserving residual remains, and Oracle B demonstrates that key assignment and score geometry interact strongly.
+
+It does **not** establish that:
+
+- ranking explains all degradation
+- the residual is purely magnitude error
+- later layers do not matter
+- Oracle A and Oracle B partition the gap additively
+
+These oracles require access to exact baseline scores and are not deployable replacement methods. Every oracle in this experiment reads the baseline Q·K row that a compressed KV cache exists precisely to avoid computing; the measurements bound what a better codec could achieve, they do not constitute one.
+
+### Limitations
+
+- one model (Qwen2.5-1.5B-Instruct Q8_0), one corpus (WikiText-2 raw test), one codec configuration; nothing here is shown to generalise
+- twelve chunks of 512 tokens is 6144 tokens -- enough to separate these effects, far short of a full benchmark
+- the layerwise decomposition and the early-layer interaction are FOUR-CHUNK screening results; no twelve-chunk layerwise matrix was run
+- the active-key statistics come from a deterministic 1-in-16 token, 2-of-12 head sample, not an exhaustive pass
+- perplexity is the only quality metric; no downstream task was measured
+- the order-preserving residual is quantified but not explained -- this experiment does not identify what it consists of
+- two process-tree terminations remain unexplained; they were reconciled by re-running, not by root-cause analysis
+
+### Recommended next experiment
+
+Constrain the codec so that the top-k baseline ordering is preserved by construction and measure how much of the 65.92% ranking recovery survives without any baseline-score access. The top-1 result (79.93% of the full ranking benefit from a single key) and the layers 0-6 result (87.80% of the gap from seven layers) together suggest the cheapest viable target: an early-layer, top-k-preserving score path. A parallel line should attack the order-preserving residual directly, since PR #62 already ruled out a per-row rescaling constant and this experiment shows the residual is 34.08% of the gap even with the ranking exactly correct.
+
+### Methodological corrections
+
+Every defect found during this experiment is recorded in the artifact under
+`provenance.experimental_provenance_chronological`. The two that changed a measurement or
+a decision:
+
+1. **Incorrect strict-permutation invariant.** The ordering check required exact
+   permutation equality, which is only valid when no two transplanted values tie. Corrected
+   to a weak-order check. Observational: the quarantined runs reproduced identical PPL.
+2. **Non-causal oracle span.** The oracle spanned the whole written prefix instead of the
+   causally visible one. Material: it inflated the apparent ranking contribution. All
+   affected runs were quarantined and re-run, never reinterpreted.
+
+Also recorded there: the four pre-lineage twelve-chunk attempts that were quarantined and
+re-run once the harness recorded the full lineage block; the `running`-state PID recording
+fix; and the two unexplained process-tree terminations.
+
+### Resolution
+
+No single scalar "experimental resolution" is claimed. The relevant quantities have
+different sources and are reported separately:
+
+- deterministic PPL printing precision: 0.0001 (llama-perplexity prints the final estimate to four decimal places)
+- twelve-chunk repetition spread: 0.0000 PPL maximum across all nine configurations (all bit-identical)
+- screening chunk-count limitation: 4 chunks × 512 tokens = 2048 tokens evaluated
+- smallest screening contrast treated as meaningful: 0.0108 PPL (layer 27 single-layer damage, the smallest damage still classified stable)
+- The top-16 and full-ranking screening values differ by 0.0113 PPL, which is small relative to the coarse four-chunk screening protocol. The twelve-chunk validation is used to determine whether this difference persists. It did not persist with the same sign: at twelve chunks top-16 sits 0.0522 PPL ABOVE full ranking rather than below it. Top-16 still reaches 98.42% of the full Oracle A recovery, so approximate saturation holds, but the four-chunk contrast was too fine for its sign to be meaningful.
+
+### Execution integrity
+
+Two completeness gates run independently; neither implies the other.
+
+- screening: 75/75 accepted and revalidated, two agreeing reads under proven quiescence, report `526f6f5da91352f5…`
+- twelve-chunk: 27/27 accepted and revalidated, two agreeing reads, report `5979a43b5253f723…`, bound by sha256 to the frozen screening report
+
+Acceptance is validated from the run itself, never inferred from a results row. Each
+attempt has an immutable log and parsed summary, an explicit child wait, exit and signal
+status, and an atomically written state record. Twelve-chunk states additionally require
+a complete lineage block and the exact declared run geometry. Resume revalidates every
+accepted state before skipping it. Superseded and interrupted attempts are preserved as
+provenance and never counted toward completeness.
+
+On 2 occasions the process tree was unexpectedly terminated. Available evidence
+did not identify an OOM, disk-capacity failure or application crash
+(15,209 MB of 16,075 MB free; disk 35% used; no OOM record; no crash trace), so the cause is recorded as **unknown**. Both
+were reconciled by preserving the interrupted attempt as provenance and launching a new
+immutable attempt.
+
 ## Earlier round-trip results
 
 Recorded under the earlier protocol; see git history and
