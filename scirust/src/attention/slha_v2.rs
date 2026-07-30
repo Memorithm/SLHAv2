@@ -2891,6 +2891,8 @@ mod tests {
                 // Alternate HOT / WARM to cover both branches.
                 let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
                 let s = tile.compute_score_scalar(&q, &q_sign);
+                // SAFETY: guarded by the is_x86_feature_detected!("avx2") early
+                // return above; slices are the fixed D_C/RESIDUAL_WORDS sizes.
                 let a = unsafe { tile.compute_score_avx2(&q, &q_sign) };
                 assert!(
                     (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
@@ -2915,6 +2917,8 @@ mod tests {
             for (i, t) in toks.iter().enumerate() {
                 let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
                 let s = tile.compute_score_scalar(&q, &q_sign);
+                // SAFETY: guarded by the is_x86_feature_detected!("avx512f")
+                // early return above; slices are the fixed expected sizes.
                 let a = unsafe { tile.compute_score_avx512(&q, &q_sign) };
                 assert!(
                     (s - a).abs() <= 1e-3 * (1.0 + s.abs()),

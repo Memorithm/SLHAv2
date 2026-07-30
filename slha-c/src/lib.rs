@@ -1,3 +1,7 @@
+// Every unsafe block must state its precondition. Permanent gate: clippy
+// runs with -D warnings in CI, so an undocumented block fails the build.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use scirust::attention::slha_v2::{
     LatentCodec, SciRustSlhaTile, D_C, FLAG_MIX3, FLAG_MIXED, FLAG_NF4, FLAG_TQ3, FLAG_TQ3_NOCORR,
     FLAG_WARM, RESIDUAL_WORDS,
@@ -324,7 +328,9 @@ pub unsafe extern "C" fn slha_process_tile(
         // SAFETY: the caller guarantees readable storage. read_unaligned removes
         // any Rust-side alignment requirement.
         let tile = unsafe { tile.read_unaligned() };
+        // SAFETY: same caller contract — q_coarse holds D_C readable f32s.
         let q_coarse = unsafe { read_array_unaligned::<f32, D_C>(q_coarse) };
+        // SAFETY: same caller contract — q_sign holds RESIDUAL_WORDS readable u64s.
         let q_sign = unsafe { read_array_unaligned::<u64, RESIDUAL_WORDS>(q_sign) };
 
         validate_tile(&tile)?;
@@ -394,6 +400,7 @@ pub unsafe extern "C" fn slha_prepare_query(
 
         // SAFETY: the caller guarantees writable storage of the documented size.
         unsafe { write_slice_unaligned(q_coarse, &coarse) };
+        // SAFETY: same caller contract — q_sign has RESIDUAL_WORDS writable u64s.
         unsafe { write_slice_unaligned(q_sign, &signs) };
         Ok(())
     })
@@ -428,7 +435,9 @@ pub unsafe extern "C" fn slha_score_tile(
 
         // SAFETY: the caller guarantees readable storage.
         let tile = unsafe { tile.read_unaligned() };
+        // SAFETY: same caller contract — q_coarse holds D_C readable f32s.
         let q_coarse = unsafe { read_array_unaligned::<f32, D_C>(q_coarse) };
+        // SAFETY: same caller contract — q_sign holds RESIDUAL_WORDS readable u64s.
         let q_sign = unsafe { read_array_unaligned::<u64, RESIDUAL_WORDS>(q_sign) };
 
         validate_tile(&tile)?;
@@ -482,7 +491,10 @@ pub unsafe extern "C" fn slha_score_tiles(
             return Ok(());
         }
 
+        // SAFETY: caller contract (# Safety) — q_coarse holds D_C readable
+        // f32s and q_sign holds RESIDUAL_WORDS readable u64s.
         let q_coarse = unsafe { read_array_unaligned::<f32, D_C>(q_coarse) };
+        // SAFETY: see the caller contract stated on the previous block.
         let q_sign = unsafe { read_array_unaligned::<u64, RESIDUAL_WORDS>(q_sign) };
         validate_finite(&q_coarse, "q_coarse")?;
 
@@ -611,6 +623,8 @@ pub unsafe extern "C" fn slha_weights_load(path: *const c_char) -> *mut SlhaMode
 pub unsafe extern "C" fn slha_model_dim(model: *const SlhaModel) -> usize {
     clear_last_error();
 
+    // SAFETY: this fn's # Safety contract — model is a live handle from
+    // slha_weights_load; model_ref re-validates magic and nullness.
     match catch_unwind(AssertUnwindSafe(|| unsafe {
         model_ref(model).map(|model| model.inner.d)
     })) {
@@ -842,6 +856,13 @@ pub unsafe extern "C" fn slha_weights_free(model: *mut SlhaModel) {
 }
 
 #[cfg(test)]
+// SAFETY (module-wide): every unsafe block below calls one of the crate's own
+// `unsafe extern "C"` entry points with pointers derived from live local
+// values the test owns, and lengths that are the true buffer lengths. The
+// per-call preconditions are the documented `# Safety` contracts of those
+// entry points; repeating that sentence on ~70 call sites would bury the
+// production annotations this lint exists to protect.
+#[allow(clippy::undocumented_unsafe_blocks)]
 mod tests {
     use super::*;
     use scirust::learned::gen_keys;

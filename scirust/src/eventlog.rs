@@ -111,6 +111,9 @@ pub fn tile_from_bytes(b: &[u8; TILE_BYTES]) -> SciRustSlhaTile {
     let mut latent_kv = [0u8; LATENT_BYTES];
     latent_kv.copy_from_slice(take(LATENT_BYTES, &mut o));
     let mut residual_bitmap = [0u64; RESIDUAL_WORDS];
+    // Infallible conversions: `take(n, ..)` returns exactly n bytes by
+    // construction, so `try_into()` to [u8; n] cannot fail. This holds for
+    // every unwrap in this decoder.
     for w in &mut residual_bitmap {
         *w = u64::from_le_bytes(take(8, &mut o).try_into().unwrap());
     }
@@ -270,6 +273,8 @@ impl EventLog {
         let mut header = [0u8; HEADER_BYTES];
         file.read_exact(&mut header)?;
 
+        // Infallible: `header[o..o + 4]` is exactly 4 bytes, so the conversion
+        // to [u8; 4] cannot fail.
         let at = |o: usize| u32::from_le_bytes(header[o..o + 4].try_into().unwrap());
 
         if at(0) != MAGIC {
@@ -405,6 +410,8 @@ impl EventLog {
     }
 
     fn decode_record(&self, rec: &[u8; RECORD_BYTES]) -> io::Result<LogRecord> {
+        // Infallible: fixed-width subslices of a fixed-size record buffer —
+        // 8 and 4 bytes exactly — so `try_into()` cannot fail.
         let seq = u64::from_le_bytes(rec[0..8].try_into().unwrap());
         let slot = u32::from_le_bytes(rec[8..12].try_into().unwrap());
 
@@ -412,6 +419,7 @@ impl EventLog {
         tile_bytes.copy_from_slice(&rec[16..16 + TILE_BYTES]);
 
         if self.version == VERSION {
+            // Infallible: rec[12..16] is exactly 4 bytes.
             let stored = u32::from_le_bytes(rec[12..16].try_into().unwrap());
             let expected = record_checksum(seq, slot, &tile_bytes);
 

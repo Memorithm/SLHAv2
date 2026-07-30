@@ -199,9 +199,12 @@ impl Drop for AlignedBuffer {
     }
 }
 
-// La mémoire est du contenu brut sans affinité de thread ; le déplacement du handle
-// vers un autre thread est sûr (l'accès synchronisé relève de l'utilisateur).
+// SAFETY: la mémoire est du contenu brut sans affinité de thread ; le
+// déplacement du handle vers un autre thread est sûr (l'accès synchronisé
+// relève de l'utilisateur).
 unsafe impl Send for AlignedBuffer {}
+// SAFETY: même invariant que Send ci-dessus — aucun état interne non
+// synchronisé n'est muté à travers &AlignedBuffer.
 unsafe impl Sync for AlignedBuffer {}
 
 // ════════════════════════════════════════════════════════════════════════
@@ -435,7 +438,11 @@ mod imp {
         }
     }
 
+    // SAFETY: le mapping mmap sous-jacent est de la mémoire brute possédée
+    // exclusivement par ce handle (munmap au Drop) ; aucune affinité de thread.
     unsafe impl Send for NumaBuffer {}
+    // SAFETY: &NumaBuffer n'expose que des lectures de champs immuables
+    // (ptr/cap) ; la synchronisation des accès au contenu relève de l'appelant.
     unsafe impl Sync for NumaBuffer {}
 
     // ── Helpers internes ─────────────────────────────────────────────────
