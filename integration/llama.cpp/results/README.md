@@ -59,3 +59,38 @@ tiles directly), which is out of scope for this milestone.
   and fall back to passthrough for the affected layer.
 * AddressSanitizer build succeeds; runtime shadow-memory allocation failed in
   the current container environment.
+
+## Reproducibility — what this repository alone can and cannot re-derive
+
+This section applies to every artifact in this directory
+(`measurements.json`, `layerwise_score_gap.json`,
+`score_temperature_calibration.json`) and to
+`rank_transplant_oracle.json`, which as of 2026-07-30 is versioned on the
+`research/llama-rank-transplant-oracle` branch (see
+`docs/RESEARCH_BRANCHES.md`).
+
+**Reproducible from the repository alone:**
+
+* The complete measurement *pipeline*: shim sources, patches, build scripts
+  (`build_and_baseline.sh`, `build_and_roundtrip.sh`), calibration and
+  training scripts, and their C++/Rust test suites (run in CI).
+* The *verification* of any re-run against the original inputs: every
+  artifact pins the model, corpus, llama.cpp tag/commit and weight files by
+  sha256, so a re-measurement provably uses the same inputs.
+
+**NOT reproducible from the repository alone:**
+
+* The measured numbers themselves. Re-deriving them requires downloading the
+  pinned external inputs — `Qwen/Qwen2.5-1.5B-Instruct-GGUF`
+  (`qwen2.5-1.5b-instruct-q8_0.gguf`, sha256 `d7efb072…`) and
+  WikiText-2-raw-v1 slices (sha256 pinned above) — building llama.cpp at tag
+  `b9860`, and hours of CPU time. The repository stores the *evidence and the
+  recipe*, not the inputs.
+* The completeness-gate transcripts of `rank_transplant_oracle.json`
+  (screening 75/75, twelve-chunk 27/27, determinism runs). They were written
+  to an ephemeral session container scratch directory that no longer exists.
+  **Only their sha256 values survive**, recorded inside the artifact itself
+  (`frozen_gates.gate_artifacts`). They cannot be reconstructed, and this
+  README does not pretend otherwise: a future re-run can regenerate
+  *equivalent* transcripts and gates, but not the original byte streams the
+  recorded hashes describe.
