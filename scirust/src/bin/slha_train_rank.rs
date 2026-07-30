@@ -10,7 +10,10 @@
 
 use scirust::attention::slha_v2::D_C;
 use scirust::learned::LearnedModel;
-use scirust::ranking::{parse_layer_set, train_ranking, Geometry, Objective, Row, TrainConfig};
+use scirust::ranking::{
+    frozen_l2_scale, parse_layer_set, train_ranking, Geometry, Objective, Row, TrainConfig,
+    L2_SCALE_EPSILON,
+};
 use scirust::weights;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -347,6 +350,7 @@ fn main() {
     std::fs::create_dir_all(&stage).unwrap_or_else(|e| fail(format!("cannot create stage: {e}")));
 
     let mut per_layer = Vec::new();
+    let mut norm_rows: Vec<(usize, usize, u64, f64)> = Vec::new();
     let mut loss_history: BTreeMap<usize, Vec<f32>> = BTreeMap::new();
     let mut rows_seen_total = 0u64;
     let mut pair_total = 0u64;
@@ -409,7 +413,23 @@ fn main() {
                     }
                 })
                 .collect();
+            // Frozen per-layer L2 scale from the TRAINING split only. One scalar
+            // for the whole layer: a per-row normaliser would reweight rows and,
+            // because the projection is shared across the layer, would change
+            // the minimiser rather than merely rescale the objective.
+            let (scale64, scale_n) = frozen_l2_scale(
+                rows.iter()
+                    .flat_map(|r| r.baseline[..r.n_visible.min(a.max_keys)].iter().copied()),
+            );
+            if !scale64.is_finite() || scale64 <= 0.0 {
+                let _ = std::fs::remove_dir_all(&stage);
+                fail(format!(
+                    "layer {layer}: frozen L2 scale is not positive-finite"
+                ));
+            }
+            norm_rows.push((layer, rows.len(), scale_n, scale64));
             let cfg = TrainConfig {
+                l2_scale: scale64 as f32,
                 objective: objective.clone(),
                 geometry: Geometry {
                     weight: if a.objective == "l2" {
@@ -527,6 +547,19 @@ fn main() {
     lines.push(format!(
         "  \"wall_time_seconds\": {:.3},",
         t0.elapsed().as_secs_f64()
+    ));
+    lines.push(format!("  \"l2_scale_epsilon\": {},", L2_SCALE_EPSILON));
+    lines.push(format!(
+        "  \"layer_normalisation\": {{{}}},",
+        norm_rows
+            .iter()
+            .map(|(l, r, n, s)| format!(
+                "\"{l}\":{{\"training_rows\":{r},\"training_active_scores\":{n},\"rms_b_squared_plus_eps\":{s},\"rms_b\":{},\"finite\":{}}}",
+                (s - L2_SCALE_EPSILON).max(0.0).sqrt(),
+                s.is_finite() && *s > 0.0
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
     ));
     lines.push(format!("  \"loss_history\": {},", loss_json));
     lines.push(format!("  \"per_layer_sha256\": {{{}}},", per_layer_json));

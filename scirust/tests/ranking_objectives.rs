@@ -5,7 +5,8 @@
 
 use scirust::attention::slha_v2::D_C;
 use scirust::ranking::{
-    baseline_topk, row_weights, train_ranking, Geometry, History, Objective, Row, TrainConfig,
+    baseline_topk, frozen_l2_scale, row_weights, train_ranking, Geometry, History, Objective, Row,
+    TrainConfig, L2_SCALE_EPSILON,
 };
 use scirust::rng::Rng;
 
@@ -18,6 +19,7 @@ fn cfg(obj: Objective) -> TrainConfig {
         batch: 1,
         seed: 1,
         max_keys: 256,
+        l2_scale: 1.0,
     }
 }
 
@@ -436,4 +438,78 @@ fn history_default_is_empty() {
     assert!(h.epoch_loss.is_empty());
     assert_eq!(h.rows_seen, 0);
     assert_eq!(h.pairwise_comparisons, 0);
+}
+
+// A2: the L2 normaliser must be a frozen per-layer scalar, not per-row --------
+#[test]
+fn frozen_l2_scale_is_deterministic_and_positive() {
+    let rows: Vec<f32> = vec![3.0, -4.0, 0.0, 12.0, 5.0];
+    let (a, na) = frozen_l2_scale(rows.iter().copied());
+    let (b, nb) = frozen_l2_scale(rows.iter().copied());
+    assert_eq!(a, b, "same input must give a bit-identical scale");
+    assert_eq!((na, nb), (5, 5));
+    let want = (9.0 + 16.0 + 0.0 + 144.0 + 25.0) / 5.0 + L2_SCALE_EPSILON;
+    assert!((a - want).abs() < 1e-12, "{a} != {want}");
+    assert!(a > 0.0);
+    // an empty layer still yields a strictly positive scale via epsilon
+    let (e, ne) = frozen_l2_scale(std::iter::empty());
+    assert_eq!(ne, 0);
+    assert_eq!(e, L2_SCALE_EPSILON);
+}
+
+#[test]
+fn l2_scale_rescales_uniformly_and_preserves_relative_row_weighting() {
+    // Two rows of very different magnitude. Under a FROZEN shared scale their
+    // losses keep their relative sizes; a per-row normaliser would flatten them
+    // and thereby change which row dominates the shared-parameter gradient.
+    let big_b = [1000.0f32, 900.0, 800.0];
+    let big_s = [1100.0f32, 900.0, 800.0];
+    let small_b = [1.0f32, 0.9, 0.8];
+    let small_s = [1.1f32, 0.9, 0.8];
+
+    let mut c = cfg(Objective::L2);
+    c.l2_scale = 1.0;
+    let raw_big = weights(&c, &big_b, &big_s).1;
+    let raw_small = weights(&c, &small_b, &small_s).1;
+
+    c.l2_scale = 12345.0; // one frozen scalar shared by both rows
+    let sc_big = weights(&c, &big_b, &big_s).1;
+    let sc_small = weights(&c, &small_b, &small_s).1;
+
+    let ratio_raw = raw_big / raw_small;
+    let ratio_scaled = sc_big / sc_small;
+    assert!(
+        (ratio_raw - ratio_scaled).abs() <= 1e-3 * ratio_raw,
+        "a shared scale must not change the ratio between rows: {ratio_raw} vs {ratio_scaled}"
+    );
+    // and it really does shrink the magnitude
+    assert!(sc_big < raw_big);
+}
+
+#[test]
+fn per_row_normalisation_would_change_relative_row_weighting() {
+    // Demonstrates precisely why A1 was withdrawn: normalising each row by its
+    // own RMS makes two rows of very different scale contribute almost equally,
+    // which is a different objective, not a rescaled one.
+    let big_b = [1000.0f32, 900.0, 800.0];
+    let big_s = [1100.0f32, 900.0, 800.0];
+    let small_b = [1.0f32, 0.9, 0.8];
+    let small_s = [1.1f32, 0.9, 0.8];
+    let mut c = cfg(Objective::L2);
+
+    c.l2_scale = 1.0;
+    let ratio_shared = weights(&c, &big_b, &big_s).1 / weights(&c, &small_b, &small_s).1;
+
+    let rms2 = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32;
+    c.l2_scale = rms2(&big_b);
+    let per_row_big = weights(&c, &big_b, &big_s).1;
+    c.l2_scale = rms2(&small_b);
+    let per_row_small = weights(&c, &small_b, &small_s).1;
+    let ratio_per_row = per_row_big / per_row_small;
+
+    assert!(
+        (ratio_shared - ratio_per_row).abs() > 0.1 * ratio_shared,
+        "per-row normalisation must visibly change the relative weighting \
+         (shared {ratio_shared}, per-row {ratio_per_row})"
+    );
 }
