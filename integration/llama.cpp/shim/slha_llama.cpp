@@ -4,6 +4,7 @@
 #include "slha_score_scale.hpp"
 #include "slha_scale_fit.hpp"
 #include "slha_score_oracle.hpp"
+#include "slha_oracle_metrics.hpp"
 
 #include "slha.h"
 
@@ -417,6 +418,19 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
         slha_score_oracle_reset();
     }
 
+    // Active-key ranking / tie statistics (diagnostic). Active only when
+    // SLHA_ORACLE_METRICS_JSON names an output path.
+    {
+        const char * mp = std::getenv("SLHA_ORACLE_METRICS_JSON");
+        if (mp && mp[0]) {
+            slha_oracle_metrics::reset();
+            slha_oracle_metrics::enable(true);
+            std::cout << "[SLHA] active-key rank metrics enabled -> " << mp << "\n";
+        } else {
+            slha_oracle_metrics::enable(false);
+        }
+    }
+
     // Offline per-layer score-scale fitting (shadow diagnostic). Active only when
     // SLHA_SCALE_FIT_JSON names an output path; the JSON is written at shutdown.
     {
@@ -749,6 +763,20 @@ void slha_global_shutdown() {
         slha_print_score_scale_summary();
         slha_print_score_oracle_summary();
         slha_print_replace_summary();
+    }
+
+    // Write the active-key ranking / tie statistics if requested.
+    if (slha_oracle_metrics::enabled()) {
+        const char * mp = std::getenv("SLHA_ORACLE_METRICS_JSON");
+        if (mp && mp[0]) {
+            std::ofstream out(mp);
+            if (out) {
+                out << slha_oracle_metrics::dump_json();
+                std::cout << "[SLHA] wrote active-key rank metrics to " << mp << "\n";
+            } else {
+                std::cerr << "[SLHA] failed to write SLHA_ORACLE_METRICS_JSON='" << mp << "'\n";
+            }
+        }
     }
 
     // Write the offline score-scale fit (shadow diagnostic) if requested.
@@ -1426,6 +1454,18 @@ void slha_shadow_score(
                     g_scaled_vectors.fetch_add(1, std::memory_order_relaxed);
                     g_scaled_logits.fetch_add(n_check, std::memory_order_relaxed);
                 }
+            }
+
+            // Active-key ranking / tie statistics on the UNTRANSFORMED pair.
+            // Deterministic (t,h) sampling keeps the O(n^2) Kendall tau-b
+            // bounded and is independent of thread scheduling.
+            if (slha_oracle_metrics::enabled() && (t % 16) == 0 && h < 2) {
+                const float * mb_row = kq_data
+                    + s * static_cast<ptrdiff_t>(kq_stream_stride)
+                    + t * static_cast<ptrdiff_t>(kq_token_stride)
+                    + h * static_cast<ptrdiff_t>(kq_head_stride);
+                slha_oracle_metrics::add_row(layer->layer_id, static_cast<int>(h),
+                                             mb_row, temp_scores.data(), n_check);
             }
 
             // Diagnostic score oracle. Rewrites this row from the PAIRED
