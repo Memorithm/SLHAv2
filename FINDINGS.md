@@ -232,9 +232,10 @@ calculer — **aucune fraction des 65,92 % n'est convertie en gain déployable �
 ce jour**.
 
 Source versionnée : `integration/llama.cpp/results/rank_transplant_oracle.json`
-(clés `validation_12chunk.*`), branche `research/llama-rank-transplant-oracle`
-(head `f0d3930`) ; protocole et débit dans le `integration/llama.cpp/README.md`
-de cette branche.
+(clés `validation_12chunk.*`), dans l'arbre depuis le rapatriement des commits
+`de14212`/`f0d3930` de la branche `research/llama-rank-transplant-oracle` ;
+protocole et débit : section « Research: rank-transplant oracle » du
+`integration/llama.cpp/README.md`.
 
 ## 6. Prochaines étapes (hors périmètre sandbox)
 

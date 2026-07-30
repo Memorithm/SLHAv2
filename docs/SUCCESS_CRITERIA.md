@@ -136,14 +136,14 @@ intégration) et **D est en régression** (≈ 3,1× plus lent par passe —
 implémentation CPU de mesure, non optimisée). M et D ne rachètent jamais un
 échec de F (§1).
 
-Source versionnée :
+Source versionnée (dans l'arbre depuis le rapatriement des résultats de la
+branche `research/llama-rank-transplant-oracle`, commits `de14212`/`f0d3930`) :
 `integration/llama.cpp/results/rank_transplant_oracle.json`, clé
-`validation_12chunk.endpoints`, sur la branche
-`research/llama-rank-transplant-oracle` (head `f0d3930`) ; débit : section
-« Throughput » du `integration/llama.cpp/README.md` de la même branche.
+`validation_12chunk.endpoints` ; débit : section « Research: rank-transplant
+oracle » du `integration/llama.cpp/README.md`.
 
-**Ce que le NO-GO ne dit pas.** Le diagnostic causal mesuré sur la même
-branche (oracles de transplantation de rang) attribue **65,92 %** du déficit au
+**Ce que le NO-GO ne dit pas.** Le diagnostic causal mesuré par le même
+artefact (oracles de transplantation de rang) attribue **65,92 %** du déficit au
 mauvais **classement des clés** (Oracle A : PPL 13,5756), et corriger le seul
 top-16 atteint **98,42 %** de ce bénéfice. C'est une *direction de correction*,
 pas une récupération : les oracles lisent la ligne Q·K exacte que le cache

@@ -4,6 +4,15 @@
 **fusionner / archiver / abandonner** pour chaque branche sans relire les
 diffs. Aucune fusion n'est faite ici ; ce document constate.
 
+> **Décisions exécutées (30 juillet 2026, sur instruction du mainteneur).**
+> Les recommandations ci-dessous ont été appliquées : les deux commits de
+> résultats de `research/llama-rank-transplant-oracle` (`de14212`, `f0d3930`)
+> sont rapatriés dans l'arbre (l'artefact et la section README vivent
+> désormais sur la branche principale), et chaque branche absorbée a été
+> **archivée en tag** `archive/<nom>` pointant sur sa tête — l'historique
+> complet reste joignable — puis supprimée en tant que branche. Le tableau
+> ci-dessous est conservé comme constat d'origine.
+
 Méthode : pour chaque branche, `git diff origin/master origin/<branche>`
 restreint aux fichiers que la branche ajoute ou modifie (le reste du diff est
 du retard sur master, pas du contenu). « Reproductible depuis le dépôt seul »
