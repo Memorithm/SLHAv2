@@ -358,6 +358,80 @@ int main() {
           CHECK(multiset_equal(out, s2));
       } } DONE();
 
+    // 29. tied-block taxonomy: the weak (reference) ordering must hold and the
+    //     multiset must be exact for every tie topology.
+    TEST("tied-block taxonomy");
+    { struct Case { const char * name; std::vector<float> b, s; };
+      const std::vector<Case> cases = {
+        {"all transplanted equal",   {4.0f,1.0f,7.0f,2.0f}, {5.0f,5.0f,5.0f,5.0f}},
+        {"tied block at top",        {9.0f,8.0f,3.0f,1.0f}, {6.0f,6.0f,2.0f,1.0f}},
+        {"tied block in middle",     {9.0f,8.0f,3.0f,1.0f}, {9.0f,4.0f,4.0f,1.0f}},
+        {"tied block at bottom",     {9.0f,8.0f,3.0f,1.0f}, {9.0f,7.0f,2.0f,2.0f}},
+        {"several disjoint blocks",  {9.0f,8.0f,7.0f,3.0f,2.0f,1.0f},
+                                     {6.0f,6.0f,4.0f,4.0f,1.0f,1.0f}},
+        {"ties in reference only",   {5.0f,5.0f,5.0f,1.0f}, {9.0f,7.0f,3.0f,1.0f}},
+        {"ties in transplant only",  {9.0f,7.0f,3.0f,1.0f}, {5.0f,5.0f,5.0f,1.0f}},
+        {"ties in both",             {5.0f,5.0f,2.0f,2.0f}, {8.0f,8.0f,4.0f,4.0f}},
+      };
+      for (const Case & c : cases) {
+          CHECK(run(Mode::BaselineRankSlhaValues, c.b, c.s, out) == ApplyStatus::Ok);
+          CHECK(respects_ranking(out.data(), c.b.data(), c.b.size(), g_ws));
+          CHECK(multiset_equal(out, c.s));
+          CHECK(run(Mode::SlhaRankBaselineValues, c.b, c.s, out) == ApplyStatus::Ok);
+          CHECK(respects_ranking(out.data(), c.s.data(), c.s.size(), g_ws));
+          CHECK(multiset_equal(out, c.b));
+      } } DONE();
+
+    // 30. a genuine inversion OUTSIDE a tied block is still rejected
+    TEST("inversion outside a tied block rejected");
+    { std::vector<float> ref = {9.0f, 5.0f, 5.0f, 1.0f};
+      // swapping within the tied block (keys 1,2) is unobservable -> accepted
+      std::vector<float> in_block = {9.0f, 5.0f, 5.0f, 1.0f};
+      CHECK(respects_ranking(in_block.data(), ref.data(), ref.size(), g_ws));
+      // moving the bottom key above the top one is a real inversion -> rejected
+      std::vector<float> inverted = {1.0f, 5.0f, 5.0f, 9.0f};
+      CHECK(!respects_ranking(inverted.data(), ref.data(), ref.size(), g_ws)); } DONE();
+
+    // 31. multiset mismatch is rejected even when the weak ordering passes
+    TEST("multiset mismatch rejected under valid weak order");
+    { std::vector<float> ref = {9.0f, 5.0f, 1.0f};
+      std::vector<float> vals = {7.0f, 4.0f, 2.0f};
+      std::vector<float> weak_ok_wrong_values = {8.0f, 4.0f, 2.0f};  // ordering fine, values wrong
+      CHECK(respects_ranking(weak_ok_wrong_values.data(), ref.data(), ref.size(), g_ws));
+      CHECK(!multiset_equal(weak_ok_wrong_values, vals));
+      // the real oracle satisfies BOTH predicates together
+      CHECK(run(Mode::BaselineRankSlhaValues, ref, vals, out) == ApplyStatus::Ok);
+      CHECK(respects_ranking(out.data(), ref.data(), ref.size(), g_ws));
+      CHECK(multiset_equal(out, vals)); } DONE();
+
+    // 32. the rank permutation is a valid bijection: every key exactly once
+    TEST("permutation is a bijection over key indices");
+    { uint64_t st = 5150; std::vector<float> v(200);
+      auto nxt=[&st](){ st=st*6364136223846793005ULL+1442695040888963407ULL;
+                        return static_cast<float>((st>>40)%7); };   // heavy ties
+      for (auto & x : v) x = nxt();
+      std::vector<int32_t> perm; uint64_t t = 0;
+      rank_permutation(v.data(), v.size(), perm, &t);
+      std::vector<int> seen(v.size(), 0);
+      for (size_t i = 0; i < v.size(); ++i) {
+          CHECK(perm[i] >= 0 && perm[i] < static_cast<int32_t>(v.size()));
+          seen[perm[i]]++;
+      }
+      for (size_t i = 0; i < v.size(); ++i) CHECK(seen[i] == 1);
+      CHECK(t > 0);   // the construction really did encounter ties
+    } DONE();
+
+    // 33. deterministic reconstruction over repeated runs with heavy ties
+    TEST("deterministic reconstruction under heavy ties");
+    { std::vector<float> b(96), s2(96);
+      for (size_t i = 0; i < b.size(); ++i) { b[i] = static_cast<float>(i % 5);
+                                              s2[i] = static_cast<float>(i % 7); }
+      std::vector<float> o1, o2, o3;
+      CHECK(run(Mode::BaselineRankSlhaValues, b, s2, o1) == ApplyStatus::Ok);
+      CHECK(run(Mode::BaselineRankSlhaValues, b, s2, o2) == ApplyStatus::Ok);
+      CHECK(run(Mode::BaselineRankSlhaValues, b, s2, o3) == ApplyStatus::Ok);
+      CHECK(bit_equal(o1, o2) && bit_equal(o2, o3)); } DONE();
+
     std::printf("=== score-oracle tests complete: %s ===\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
     return g_failures == 0 ? 0 : 1;
 }
