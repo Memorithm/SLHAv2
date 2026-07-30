@@ -25,6 +25,8 @@ numa = ["libc"]
 # Optional, only with `numa`. Kept off the default build so the crate remains
 # zero-dependency offline.
 libc = { version = "0.2", optional = true, default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 [lib]
 name = "scirust"
@@ -32,6 +34,10 @@ path = "src/lib.rs"
 
 # Dedicated self-audit CLI: `cargo run --bin slha-audit -- [--json|--pretty]`.
 # Reuses the in-crate `audit` + `json` modules (no extra deps).
+[[bin]]
+name = "slha-train-rank"
+path = "src/bin/slha_train_rank.rs"
+
 [[bin]]
 name = "slha-audit"
 path = "src/bin/slha_audit.rs"

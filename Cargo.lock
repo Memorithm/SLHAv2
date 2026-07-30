@@ -393,6 +393,8 @@ version = "0.2.0"
 dependencies = [
  "criterion",
  "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -210,6 +210,16 @@ pub struct TrainConfig {
     /// Cap on visible keys considered per row. Keeps the pairwise term bounded
     /// on long rows; the retained prefix always contains the baseline top-k.
     pub max_keys: usize,
+    /// FROZEN scale for the score-reconstruction term: `rms_B_L^2 + epsilon`,
+    /// computed once per layer over that layer's TRAINING split only.
+    ///
+    /// This must not vary between rows. A per-row normaliser reweights rows
+    /// against each other, and because the projection is shared across every
+    /// row of the layer, `sum_r L_r` and `sum_r L_r / c_r` have different
+    /// minimisers whenever `c_r` varies. A single fixed positive scalar per
+    /// layer rescales the whole layer objective uniformly, so it preserves the
+    /// layer's minimiser while keeping the gradient magnitude tractable.
+    pub l2_scale: f32,
 }
 
 impl Default for TrainConfig {
@@ -222,8 +232,28 @@ impl Default for TrainConfig {
             batch: 16,
             seed: 7,
             max_keys: 256,
+            l2_scale: 1.0,
         }
     }
+}
+
+/// Documented epsilon guarding the frozen normaliser against a degenerate layer.
+pub const L2_SCALE_EPSILON: f64 = 1.0e-6;
+
+/// Frozen per-layer L2 scale `rms_B^2 + epsilon` from the TRAINING split only.
+///
+/// Deterministic: the caller supplies the rows in a fixed order and the
+/// accumulation is f64 in that order, so the value is reproducible bit for bit.
+/// Validation, diagnostic and test rows must never be passed here.
+pub fn frozen_l2_scale(training_baselines: impl Iterator<Item = f32>) -> (f64, u64) {
+    let mut acc = 0.0f64;
+    let mut n = 0u64;
+    for v in training_baselines {
+        acc += (v as f64) * (v as f64);
+        n += 1;
+    }
+    let ms = if n == 0 { 0.0 } else { acc / n as f64 };
+    (ms + L2_SCALE_EPSILON, n)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -366,14 +396,26 @@ pub fn row_weights(
         scale * l
     };
 
+    // Score reconstruction against a FROZEN per-layer scale.
+    //
+    // The raw attention logits reach ~1e4 on this model, so an unnormalised
+    // squared error is ~1e8 and its gradient overflows f32 within one step. The
+    // fix must not be a per-row normaliser: the projection is shared across
+    // every row of the layer, and dividing each row by its own constant changes
+    // the relative weight of rows, so `sum_r L_r` and `sum_r L_r / c_r` have
+    // different minimisers. `cfg.l2_scale` is instead a single positive scalar
+    // computed once per layer over the training split, so it rescales the whole
+    // layer objective uniformly and leaves that layer's minimiser intact.
     let add_l2 = |scale: f32, w: &mut Vec<f32>| -> f32 {
+        let nf = n as f32;
+        let norm = cfg.l2_scale.max(f32::MIN_POSITIVE);
         let mut l = 0.0f32;
         for j in 0..n {
             let r = scores[j] - baseline[j];
-            l += r * r;
-            w[j] += scale * 2.0 * r;
+            l += r * r / norm;
+            w[j] += scale * 2.0 * r / (norm * nf);
         }
-        scale * l
+        scale * l / nf
     };
 
     match cfg.objective.clone() {
