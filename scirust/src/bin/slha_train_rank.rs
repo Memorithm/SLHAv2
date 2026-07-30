@@ -10,6 +10,7 @@
 
 use scirust::attention::slha_v2::D_C;
 use scirust::learned::LearnedModel;
+use scirust::norm_manifest::{self, FrozenScales};
 use scirust::ranking::{
     parse_layer_set, train_ranking, Geometry, Objective, Row, TrainConfig, L2_SCALE_EPSILON,
 };
@@ -236,152 +237,36 @@ fn validate(a: &Args, given: &BTreeMap<String, String>) {
     }
 }
 
-/// One frozen layer scale, carrying the exact IEEE-754 bit pattern.
-pub struct LayerScale {
-    pub scale_bits: u64,
-    pub rms_bits: u64,
-    pub eps_bits: u64,
-}
-
 /// Load and FAIL-CLOSED verify the frozen normalisation manifest.
 ///
-/// Production training never recomputes a scale: the manifest is the only
-/// source. Every rejection happens before any staging directory exists.
-fn load_normalisation(a: &Args) -> BTreeMap<usize, LayerScale> {
-    let bytes = std::fs::read(&a.norm_manifest)
-        .unwrap_or_else(|e| fail(format!("cannot read normalisation manifest: {e}")));
+/// Parsing is strict and structural (`scirust::norm_manifest`): the complete
+/// byte stream is consumed, duplicate and unknown fields are rejected, and each
+/// failure carries a stable machine-readable code. Production training never
+/// recomputes a scale and there is no fallback from a failed load.
+fn load_normalisation(a: &Args) -> FrozenScales {
+    let bytes = match std::fs::read(&a.norm_manifest) {
+        Ok(b) => b,
+        Err(e) => fail(format!("MANIFEST_FILE_NOT_FOUND: {e}")),
+    };
     let actual = sha256_bytes(&bytes);
     if actual != a.norm_manifest_sha256 {
         fail(format!(
-            "normalisation manifest hash mismatch: expected {}, found {actual}",
+            "MANIFEST_HASH_MISMATCH: expected {}, found {actual}",
             a.norm_manifest_sha256
         ));
     }
-    let text = String::from_utf8(bytes).unwrap_or_else(|_| fail("manifest is not valid UTF-8"));
-    // Minimal, strict field extraction. The manifest is machine generated with a
-    // stable shape; anything unexpected is a rejection rather than a guess.
-    let field = |key: &str| -> Option<String> {
-        let pat = format!("\"{key}\":");
-        let i = text.find(&pat)? + pat.len();
-        let rest = text[i..].trim_start();
-        if let Some(r) = rest.strip_prefix('"') {
-            r.find('"').map(|e| r[..e].to_string())
-        } else {
-            let e = rest.find([',', '\n', '}']).unwrap_or(rest.len());
-            Some(rest[..e].trim().to_string())
-        }
-    };
-    if field("schema").as_deref() != Some("slha_l2_normalisation_manifest_v2") {
-        fail("manifest schema is not slha_l2_normalisation_manifest_v2");
+    match norm_manifest::parse_and_verify(
+        &bytes,
+        &actual,
+        A2_SHA,
+        DATASET_SHA,
+        RECON_SHA,
+        None,
+        L2_SCALE_EPSILON,
+    ) {
+        Ok(v) => v,
+        Err(e) => fail(e.to_string()),
     }
-    if !text.contains("\"valid\": true") {
-        fail("manifest is not marked valid");
-    }
-    for (key, want) in [
-        ("preregistration_a2_sha256", A2_SHA),
-        ("dataset_aggregate_sha256", DATASET_SHA),
-        ("row_reconciliation_sha256", RECON_SHA),
-    ] {
-        match field(key) {
-            Some(v) if v == want => {}
-            other => fail(format!(
-                "manifest binding {key} is {:?}, expected {want}",
-                other.unwrap_or_default()
-            )),
-        }
-    }
-    // one record per layer, in file order
-    let mut layers: Vec<(usize, u64, u64, u64, String, String, u64)> = Vec::new();
-    for seg in text.split("\"layer\":").skip(1) {
-        let num = |k: &str| -> Option<String> {
-            let pat = format!("\"{k}\":");
-            let i = seg.find(&pat)? + pat.len();
-            let rest = seg[i..].trim_start();
-            if let Some(r) = rest.strip_prefix('"') {
-                r.find('"').map(|e| r[..e].to_string())
-            } else {
-                let e = rest.find([',', '\n', '}']).unwrap_or(rest.len());
-                Some(rest[..e].trim().to_string())
-            }
-        };
-        let g = |k: &str| -> String {
-            num(k).unwrap_or_else(|| fail(format!("manifest layer missing {k}")))
-        };
-        let id: usize = seg
-            .trim_start()
-            .split([',', '\n'])
-            .next()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or_else(|| fail("manifest layer id is not an integer"));
-        let pu = |k: &str| -> u64 {
-            g(k).parse()
-                .unwrap_or_else(|_| fail(format!("manifest {k} is not an integer")))
-        };
-        layers.push((
-            id,
-            pu("rms_b_f64_bits"),
-            pu("scale_f64_bits"),
-            pu("epsilon_f64_bits"),
-            g("rms_b_decimal"),
-            g("epsilon_decimal"),
-            pu("training_active_scores"),
-        ));
-    }
-    if layers.len() != a.n_layers {
-        fail(format!(
-            "manifest has {} layer records, expected {}",
-            layers.len(),
-            a.n_layers
-        ));
-    }
-    let mut out: BTreeMap<usize, LayerScale> = BTreeMap::new();
-    for (id, rms_bits, scale_bits, eps_bits, rms_dec, eps_dec, n_scores) in layers {
-        if out.contains_key(&id) {
-            fail(format!("manifest has duplicate layer {id}"));
-        }
-        let rms = f64::from_bits(rms_bits);
-        let scale = f64::from_bits(scale_bits);
-        let eps = f64::from_bits(eps_bits);
-        if !rms.is_finite() || rms <= 0.0 {
-            fail(format!("manifest layer {id}: rms_b is not positive-finite"));
-        }
-        if !scale.is_finite() || scale <= 0.0 {
-            fail(format!("manifest layer {id}: scale is not positive-finite"));
-        }
-        if eps.to_bits() != L2_SCALE_EPSILON.to_bits() {
-            fail(format!(
-                "manifest layer {id}: epsilon does not match the frozen constant"
-            ));
-        }
-        if n_scores == 0 {
-            fail(format!("manifest layer {id}: active-score count is zero"));
-        }
-        // the decimal spelling must round-trip to the recorded bit pattern
-        if rms_dec.parse::<f64>().map(|v| v.to_bits()) != Ok(rms_bits) {
-            fail(format!(
-                "manifest layer {id}: rms decimal does not match its bit pattern"
-            ));
-        }
-        if eps_dec.parse::<f64>().map(|v| v.to_bits()) != Ok(eps_bits) {
-            fail(format!(
-                "manifest layer {id}: epsilon decimal does not match its bit pattern"
-            ));
-        }
-        out.insert(
-            id,
-            LayerScale {
-                scale_bits,
-                rms_bits,
-                eps_bits,
-            },
-        );
-    }
-    for l in 0..a.n_layers {
-        if !out.contains_key(&l) {
-            fail(format!("manifest is missing layer {l}"));
-        }
-    }
-    out
 }
 
 const A2_SHA: &str = "18bae50ac9716f343912e8364a799b67fd0ce64bfed44569118b5f4a8d75f861";
@@ -544,23 +429,24 @@ fn main() {
         // Immutable startup lineage, published atomically BEFORE optimisation.
         // This is what turns a future interrupted attempt from Case C (scales
         // unverifiable) into Case A (manifest consumption provable).
-        let rec: Vec<String> = scope
-            .iter()
+        let rec: Vec<String> = (0..a.n_layers)
             .map(|l| {
-                let sc = &scales[l];
+                let sc = &scales.by_layer[&l];
                 format!(
                     "    {{\"layer\":{l},\"rms_b_f64_bits\":{},\"scale_f64_bits\":{},\"epsilon_f64_bits\":{},\"rms_b_decimal\":\"{}\"}}",
-                    sc.rms_bits,
-                    sc.scale_bits,
-                    sc.eps_bits,
-                    f64::from_bits(sc.rms_bits)
+                    sc.0,
+                    sc.1,
+                    sc.2,
+                    f64::from_bits(sc.0)
                 )
             })
             .collect();
         let body = format!(
-            "{{\n  \"schema\":\"slha_training_startup_lineage_v1\",\n  \"variant_output\":\"{}\",\n  \"objective\":\"{}\",\n  \"layers\":\"{}\",\n  \"preregistration_a2_sha256\":\"{}\",\n  \"normalisation_manifest\":\"{}\",\n  \"normalisation_manifest_sha256\":\"{}\",\n  \"normalisation_schema_version\":\"slha_l2_normalisation_manifest_v2\",\n  \"dataset_aggregate_sha256\":\"{}\",\n  \"loaded_scale_count\":{},\n  \"manifest_layers_verified\":{},\n  \"normalisation_verified\":true,\n  \"production_recomputation\":false,\n  \"loaded_scales\":[\n{}\n  ]\n}}\n",
+            "{{\n  \"schema\":\"slha_training_startup_lineage_v1\",\n  \"variant_output\":\"{}\",\n  \"objective\":\"{}\",\n  \"layers\":\"{}\",\n  \"preregistration_a2_sha256\":\"{}\",\n  \"normalisation_manifest\":\"{}\",\n  \"normalisation_manifest_sha256\":\"{}\",\n  \"normalisation_schema_version\":\"slha_l2_normalisation_manifest_v2\",\n  \"dataset_aggregate_sha256\":\"{}\",\n  \"loaded_scale_count\":{},\n  \"manifest_layers_verified\":{},\n  \"ordered_rms_bits_sha256\":\"{}\",\n  \"normalisation_verified\":true,\n  \"production_recomputation\":false,\n  \"loaded_scales\":[\n{}\n  ]\n}}\n",
             a.output, a.objective, a.layers, A2_SHA, a.norm_manifest, norm_sha,
-            DATASET_SHA, scope.len(), scales.len(), rec.join(",\n")
+            DATASET_SHA, scope.len(), scales.by_layer.len(),
+            sha256_bytes(scales.ordered_rms_bits().iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",").as_bytes()),
+            rec.join(",\n")
         );
         let tmp = format!("{stage}/startup_lineage.json.tmp");
         std::fs::write(&tmp, &body)
@@ -639,16 +525,17 @@ fn main() {
             // Frozen per-layer L2 scale, taken ONLY from the verified manifest.
             // Production training never recomputes a scale; there is no fallback.
             let sc = scales
+                .by_layer
                 .get(&layer)
                 .unwrap_or_else(|| fail(format!("no frozen scale for layer {layer}")));
-            let scale64 = f64::from_bits(sc.scale_bits);
+            let scale64 = f64::from_bits(sc.1);
             if !scale64.is_finite() || scale64 <= 0.0 {
                 let _ = std::fs::remove_dir_all(&stage);
                 fail(format!(
                     "layer {layer}: frozen scale is not positive-finite"
                 ));
             }
-            norm_rows.push((layer, rows.len(), sc.rms_bits, scale64));
+            norm_rows.push((layer, rows.len(), sc.0, scale64));
             let cfg = TrainConfig {
                 l2_scale: scale64 as f32,
                 objective: objective.clone(),

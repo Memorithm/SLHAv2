@@ -31,6 +31,7 @@ pub mod json;
 pub mod learned;
 pub mod linalg;
 pub mod metrics;
+pub mod norm_manifest;
 pub mod numa;
 pub mod ranking;
 pub mod residual;

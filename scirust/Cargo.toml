@@ -25,6 +25,8 @@ numa = ["libc"]
 # Optional, only with `numa`. Kept off the default build so the crate remains
 # zero-dependency offline.
 libc = { version = "0.2", optional = true, default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 [lib]
 name = "scirust"
