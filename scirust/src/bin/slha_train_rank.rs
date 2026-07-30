@@ -9,6 +9,7 @@
 //! binary produces lets the inference path read a baseline score.
 
 use scirust::attention::slha_v2::D_C;
+use scirust::exec_binding;
 use scirust::learned::LearnedModel;
 use scirust::norm_manifest::{self, FrozenScales};
 use scirust::ranking::{
@@ -48,6 +49,8 @@ struct Args {
     max_keys: usize,
     norm_manifest: String,
     norm_manifest_sha256: String,
+    exec_binding: String,
+    exec_binding_sha256: String,
 }
 
 fn fail(msg: impl AsRef<str>) -> ! {
@@ -110,6 +113,8 @@ fn parse_args() -> Args {
         max_keys: num("--max-keys", Some("256")) as usize,
         norm_manifest: get("--normalisation-manifest", None),
         norm_manifest_sha256: get("--normalisation-manifest-sha256", None),
+        exec_binding: get("--execution-binding", None),
+        exec_binding_sha256: get("--execution-binding-sha256", None),
     };
     validate(&a, &m);
     a
@@ -237,6 +242,55 @@ fn validate(a: &Args, given: &BTreeMap<String, String>) {
     }
 }
 
+/// Verify the frozen execution binding. Delegates to the tested production
+/// validator in `scirust::exec_binding`; no validation logic is duplicated here.
+///
+/// The binding names the trainer binary, so the caller supplies the split and
+/// commit expectations it must declare. Runs before any staging directory,
+/// startup record, optimiser state or data iteration exists.
+fn verify_exec_binding(path: &str, expected_sha: &str, training_split: &str) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => fail(format!("EXEC_BINDING_MISSING: {path}: {e}")),
+    };
+    let actual = sha256_bytes(&bytes);
+    let self_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| sha256_bytes(&b))
+        .unwrap_or_default();
+    // Read the declared commits from the binding itself and require the binary
+    // hash to equal this running executable: that is the check a post-hoc
+    // attachment cannot satisfy.
+    let declared: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => fail(format!("EXEC_BINDING_JSON_INVALID: {e}")),
+    };
+    let g = |k: &str| {
+        declared
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let exp = exec_binding::Expected {
+        a2: A2_SHA,
+        scope_clarification: SCOPE_SHA,
+        manifest_v2: MANIFEST_V2_SHA,
+        equivalence: EQUIVALENCE_SHA,
+        dataset: DATASET_SHA,
+        reconciliation: RECON_SHA,
+        training_split,
+        strict_parser_commit: &g("strict_parser_commit"),
+        trainer_commit: &g("trainer_commit"),
+        trainer_binary: &self_bin,
+    };
+    match exec_binding::parse_and_verify(&bytes, &actual, expected_sha, &exp) {
+        Ok(_) => {}
+        Err(e) => fail(e.to_string()),
+    }
+}
+
 /// Load and FAIL-CLOSED verify the frozen normalisation manifest.
 ///
 /// Parsing is strict and structural (`scirust::norm_manifest`): the complete
@@ -269,6 +323,9 @@ fn load_normalisation(a: &Args) -> FrozenScales {
     }
 }
 
+const SCOPE_SHA: &str = "0ee924e2750d12396a996b5137ea917e8daccc1e7c279deaddf9bc426a92c5d9";
+const MANIFEST_V2_SHA: &str = "7212e34d31d5b38fa39467d992e9db790915b608c339ff59033dbe52e0c249ac";
+const EQUIVALENCE_SHA: &str = "5acecbaeaf0d1311ab9afee834e07225bd70c0bacb64ccdec451a57abd12f590";
 const A2_SHA: &str = "18bae50ac9716f343912e8364a799b67fd0ce64bfed44569118b5f4a8d75f861";
 const DATASET_SHA: &str = "a52348fcc329a69d8f477a45068fb51da29b565ea8a5a1645e961d4ec6622025";
 const RECON_SHA: &str = "85de6936a525cf6c77ec427a0d33ace434d153fb08f4ee4a824dec4da63961d6";
@@ -380,7 +437,87 @@ fn sha256_file(path: &str) -> String {
         .to_string()
 }
 
+/// Verification-only subcommands. They exercise the exact production parsers and
+/// validators, create no staging directory, no weight file and no optimiser, and
+/// never train. `verify-normalisation-manifest` deliberately does NOT require an
+/// execution binding, so the final binary can be audited before the final
+/// binding (which names that binary's hash) exists.
+fn verify_only(cmd: &str, argv: &[String]) -> ! {
+    let val = |k: &str| -> String {
+        argv.iter()
+            .position(|a| a == k)
+            .and_then(|i| argv.get(i + 1))
+            .cloned()
+            .unwrap_or_else(|| fail(format!("missing required argument {k}")))
+    };
+    match cmd {
+        "verify-normalisation-manifest" => {
+            let path = val("--normalisation-manifest");
+            let want = val("--normalisation-manifest-sha256");
+            if want.len() != 64 || !want.chars().all(|c| c.is_ascii_hexdigit()) {
+                fail("MANIFEST_HASH_INVALID: expected 64 hexadecimal characters");
+            }
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => fail(format!("MANIFEST_FILE_NOT_FOUND: {e}")),
+            };
+            let actual = sha256_bytes(&bytes);
+            if actual != want {
+                fail(format!(
+                    "MANIFEST_HASH_MISMATCH: expected {want}, found {actual}"
+                ));
+            }
+            match norm_manifest::parse_and_verify(
+                &bytes,
+                &actual,
+                A2_SHA,
+                DATASET_SHA,
+                RECON_SHA,
+                None,
+                L2_SCALE_EPSILON,
+            ) {
+                Ok(v) => {
+                    println!(
+                        "MANIFEST_OK layers={} ordered_rms_bits_sha256={}",
+                        v.by_layer.len(),
+                        sha256_bytes(
+                            v.ordered_rms_bits()
+                                .iter()
+                                .map(|b| b.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                                .as_bytes()
+                        )
+                    );
+                    std::process::exit(0)
+                }
+                Err(e) => fail(e.to_string()),
+            }
+        }
+        "verify-execution-binding" => {
+            let path = val("--execution-binding");
+            let want = val("--execution-binding-sha256");
+            let split = argv
+                .iter()
+                .position(|a| a == "--training-split-sha256")
+                .and_then(|i| argv.get(i + 1))
+                .cloned()
+                .unwrap_or_default();
+            verify_exec_binding(&path, &want, &split);
+            println!("EXEC_BINDING_OK");
+            std::process::exit(0)
+        }
+        _ => unreachable!(),
+    }
+}
+
 fn main() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(first) = argv.first() {
+        if first == "verify-normalisation-manifest" || first == "verify-execution-binding" {
+            verify_only(first, &argv[1..]);
+        }
+    }
     let a = parse_args();
     let scope = parse_layer_set(&a.layers, a.n_layers).unwrap();
     let split: Vec<i32> = a
@@ -413,6 +550,12 @@ fn main() {
         },
         other => other,
     };
+
+    // The execution binding is verified FIRST: before the manifest is loaded,
+    // before any staging directory, startup record, optimiser state or data
+    // iteration exists. There is no post-hoc attachment path.
+    let split_sha = std::env::var("SLHA_TRAINING_SPLIT_SHA256").unwrap_or_default();
+    verify_exec_binding(&a.exec_binding, &a.exec_binding_sha256, &split_sha);
 
     // Frozen scales are loaded and verified BEFORE any staging directory exists.
     let scales = load_normalisation(&a);
