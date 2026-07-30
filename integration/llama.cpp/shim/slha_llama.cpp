@@ -3,6 +3,7 @@
 #include "slha_layer_mask.hpp"
 #include "slha_score_scale.hpp"
 #include "slha_scale_fit.hpp"
+#include "slha_score_oracle.hpp"
 
 #include "slha.h"
 
@@ -62,6 +63,37 @@ static std::atomic<size_t> g_scaled_vectors{0};   // vectors where a != 1.0 was 
 static std::atomic<size_t> g_scaled_logits{0};    // logits multiplied by a != 1.0
 static std::atomic<size_t> g_scale_invalid{0};    // vectors that went non-finite after scaling
 
+// --------------------------------------------------------------------------
+// Experimental diagnostic score oracles (SLHA_SCORE_ORACLE). These rewrite an
+// attention row from the PAIRED baseline and SLHA rows to separate ranking
+// errors from order-preserving score-shape errors. They require the baseline
+// Q*K row and are therefore diagnostic instruments, never deployable.
+// --------------------------------------------------------------------------
+static slha_oracle::Config g_oracle;
+static std::atomic<size_t> g_oracle_vectors{0};
+static std::atomic<size_t> g_oracle_logits{0};
+static std::atomic<size_t> g_oracle_permutations{0};
+static std::atomic<size_t> g_oracle_ties{0};
+static std::atomic<size_t> g_oracle_nonfinite_input{0};
+static std::atomic<size_t> g_oracle_invalid_permutation{0};
+static std::atomic<size_t> g_oracle_partial_write{0};
+// Runtime invariant sampling: a bounded number of rows are re-checked against
+// the mode's declared rank / multiset guarantees.
+static std::atomic<size_t> g_oracle_invariant_checked{0};
+static std::atomic<size_t> g_oracle_invariant_failed{0};
+
+static void slha_score_oracle_reset() {
+    g_oracle_vectors.store(0, std::memory_order_relaxed);
+    g_oracle_logits.store(0, std::memory_order_relaxed);
+    g_oracle_permutations.store(0, std::memory_order_relaxed);
+    g_oracle_ties.store(0, std::memory_order_relaxed);
+    g_oracle_nonfinite_input.store(0, std::memory_order_relaxed);
+    g_oracle_invalid_permutation.store(0, std::memory_order_relaxed);
+    g_oracle_partial_write.store(0, std::memory_order_relaxed);
+    g_oracle_invariant_checked.store(0, std::memory_order_relaxed);
+    g_oracle_invariant_failed.store(0, std::memory_order_relaxed);
+}
+
 static void slha_score_scale_reset() {
     g_score_scale_resolved = false;
     g_scaled_vectors.store(0, std::memory_order_relaxed);
@@ -77,6 +109,7 @@ static void slha_score_mask_reset() {
     g_unselected_vectors.store(0, std::memory_order_relaxed);
     g_unselected_logits.store(0, std::memory_order_relaxed);
     slha_score_scale_reset();
+    slha_score_oracle_reset();
 }
 
 // Resolve the mask against the observed model layer count, once. Sets the
@@ -119,6 +152,10 @@ static void slha_resolve_score_mask_once() {
         } else if (g_score_scale_active && !g_score_scale.valid) {
             g_score_mask_error = true;      // unparseable spec -> fail closed
         }
+    }
+
+    if (g_oracle.active && !g_oracle.valid) {
+        g_score_mask_error = true;          // unknown oracle mode -> fail closed
     }
 
     if (g_score_mask_error) {
@@ -232,6 +269,32 @@ void slha_print_score_scale_summary() {
     std::cout.flush();
 }
 
+void slha_print_score_oracle_summary() {
+    if (!g_oracle.active) {
+        return;   // default: no oracle, nothing to report
+    }
+    const bool mode_valid = g_oracle.valid && !g_score_mask_error;
+    std::cout << "\nSLHA_SCORE_ORACLE_SUMMARY\n";
+    std::cout << "active=true\n";
+    std::cout << "requested_spec=" << (g_oracle.spec.empty() ? "(empty)" : g_oracle.spec) << "\n";
+    std::cout << "mode=" << slha_oracle::mode_name(g_oracle.mode) << "\n";
+    std::cout << "canonical=" << g_oracle.canonical << "\n";
+    std::cout << "topk=" << g_oracle.topk << "\n";
+    std::cout << "config_sha256=" << g_oracle.config_sha256 << "\n";
+    std::cout << "oracle_vectors=" << g_oracle_vectors.load() << "\n";
+    std::cout << "oracle_logits=" << g_oracle_logits.load() << "\n";
+    std::cout << "oracle_permutations=" << g_oracle_permutations.load() << "\n";
+    std::cout << "oracle_ties=" << g_oracle_ties.load() << "\n";
+    std::cout << "oracle_nonfinite_input=" << g_oracle_nonfinite_input.load() << "\n";
+    std::cout << "oracle_invalid_permutation=" << g_oracle_invalid_permutation.load() << "\n";
+    std::cout << "oracle_partial_write=" << g_oracle_partial_write.load() << "\n";
+    std::cout << "oracle_invariant_checked=" << g_oracle_invariant_checked.load() << "\n";
+    std::cout << "oracle_invariant_failed=" << g_oracle_invariant_failed.load() << "\n";
+    std::cout << "oracle_mode_valid=" << (mode_valid ? "true" : "false") << "\n";
+    std::cout << "END_SLHA_SCORE_ORACLE_SUMMARY\n";
+    std::cout.flush();
+}
+
 slha_kv_mode slha_kv_mode_from_env() {
     const char * env = std::getenv("SLHA_KV_MODE");
     if (!env) {
@@ -335,6 +398,23 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
                       << " (run will be marked invalid)\n";
         }
         slha_score_scale_reset();
+    }
+
+    // Experimental diagnostic score oracle (default off). Strict parsing: an
+    // unknown mode is rejected and marks the run invalid rather than silently
+    // falling back.
+    {
+        const char * orc = std::getenv("SLHA_SCORE_ORACLE");
+        const std::string spec = orc ? std::string(orc) : std::string();
+        slha_oracle::parse_oracle(spec, g_oracle);
+        if (g_oracle.active && !g_oracle.valid && state.score_mode == SLHA_SCORE_REPLACE) {
+            std::cerr << "[SLHA] invalid SLHA_SCORE_ORACLE='" << spec << "': "
+                      << g_oracle.error << " (run will be marked invalid)\n";
+        }
+        if (g_oracle.active && g_oracle.valid) {
+            std::cout << "[SLHA] score oracle enabled: " << g_oracle.canonical << "\n";
+        }
+        slha_score_oracle_reset();
     }
 
     // Offline per-layer score-scale fitting (shadow diagnostic). Active only when
@@ -667,6 +747,7 @@ void slha_global_shutdown() {
         // success counts, so it must also print before the replace summary.
         slha_print_score_mask_summary();
         slha_print_score_scale_summary();
+        slha_print_score_oracle_summary();
         slha_print_replace_summary();
     }
 
@@ -1166,6 +1247,12 @@ void slha_shadow_score(
     temp_scores.resize(static_cast<size_t>(n_kv));
 
     const float * q_data  = static_cast<const float *>(q->data);
+    // The diagnostic oracles need the PAIRED baseline row, which is exactly the
+    // kq input this op replaces.
+    const float * kq_data = static_cast<const float *>(kq->data);
+    const size_t kq_token_stride  = kq->nb[1] / sizeof(float);
+    const size_t kq_head_stride   = kq->nb[2] / sizeof(float);
+    const size_t kq_stream_stride = kq->nb[3] / sizeof(float);
 
     const size_t q_token_stride  = q->nb[1] / sizeof(float);
     const size_t q_head_stride   = q->nb[2] / sizeof(float);
@@ -1339,6 +1426,72 @@ void slha_shadow_score(
                     g_scaled_vectors.fetch_add(1, std::memory_order_relaxed);
                     g_scaled_logits.fetch_add(n_check, std::memory_order_relaxed);
                 }
+            }
+
+            // Diagnostic score oracle. Rewrites this row from the PAIRED
+            // baseline row B and the SLHA row S so that ranking errors can be
+            // separated from order-preserving score-shape errors. Applied to
+            // the active prefix [0, n_check) only, so padded and causally
+            // masked positions never enter an oracle construction. Fails
+            // closed: on any rejection the row is left as the zeroed padding
+            // and the vector is counted as failed, never partially written.
+            if (g_oracle.active && g_oracle.valid && g_oracle.mode != slha_oracle::Mode::Off) {
+                thread_local slha_oracle::Workspace ows;
+                thread_local std::vector<float> oracle_out;
+                oracle_out.resize(n_check);
+                const float * b_row = kq_data
+                    + s * static_cast<ptrdiff_t>(kq_stream_stride)
+                    + t * static_cast<ptrdiff_t>(kq_token_stride)
+                    + h * static_cast<ptrdiff_t>(kq_head_stride);
+                uint64_t row_ties = 0;
+                const slha_oracle::ApplyStatus st = slha_oracle::apply(
+                    g_oracle.mode, g_oracle.topk, b_row, temp_scores.data(),
+                    n_check, oracle_out.data(), &row_ties, ows);
+                if (st != slha_oracle::ApplyStatus::Ok) {
+                    if (st == slha_oracle::ApplyStatus::NonFiniteInput) {
+                        g_oracle_nonfinite_input.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        g_oracle_invalid_permutation.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
+                    g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                    continue;
+                }
+                // Bounded runtime invariant sampling: re-verify the mode's
+                // declared rank / value-multiset guarantees on a few rows.
+                if (g_oracle_invariant_checked.load(std::memory_order_relaxed) < 64) {
+                    g_oracle_invariant_checked.fetch_add(1, std::memory_order_relaxed);
+                    thread_local std::vector<float> vx, vy;
+                    bool ok = true;
+                    switch (g_oracle.mode) {
+                        case slha_oracle::Mode::BaselineRankSlhaValues:
+                            ok = slha_oracle::same_ranking(oracle_out.data(), b_row, n_check, ows)
+                              && slha_oracle::same_value_multiset(oracle_out.data(),
+                                     temp_scores.data(), n_check, vx, vy);
+                            break;
+                        case slha_oracle::Mode::SlhaRankBaselineValues:
+                            ok = slha_oracle::same_ranking(oracle_out.data(),
+                                     temp_scores.data(), n_check, ows)
+                              && slha_oracle::same_value_multiset(oracle_out.data(),
+                                     b_row, n_check, vx, vy);
+                            break;
+                        case slha_oracle::Mode::BaselineTopKRank:
+                            ok = slha_oracle::same_value_multiset(oracle_out.data(),
+                                     temp_scores.data(), n_check, vx, vy);
+                            break;
+                        default:
+                            break;
+                    }
+                    if (!ok) {
+                        g_oracle_invariant_failed.fetch_add(1, std::memory_order_relaxed);
+                        g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                    }
+                }
+                std::memcpy(temp_scores.data(), oracle_out.data(), n_check * sizeof(float));
+                g_oracle_vectors.fetch_add(1, std::memory_order_relaxed);
+                g_oracle_logits.fetch_add(n_check, std::memory_order_relaxed);
+                g_oracle_permutations.fetch_add(1, std::memory_order_relaxed);
+                g_oracle_ties.fetch_add(static_cast<size_t>(row_ties), std::memory_order_relaxed);
             }
 
             // Write validated scores to dst (first n_check positions; the rest of
