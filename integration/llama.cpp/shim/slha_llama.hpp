@@ -167,6 +167,12 @@ void slha_print_score_mask_summary();
  *  Only prints when a scale spec was provided (SLHA_SCORE_SCALE / _FILE). */
 void slha_print_score_scale_summary();
 
+/** Print the diagnostic score-oracle summary: mode, canonical spec, config
+ *  hash, oracle vector/logit/permutation/tie counts, rejection counters, the
+ *  runtime invariant-sampling result, and oracle_mode_valid. Only prints when
+ *  an oracle spec was provided (SLHA_SCORE_ORACLE). */
+void slha_print_score_oracle_summary();
+
 void slha_flush_collected_activations(const char * output_dir);
 void slha_print_shadow_metrics();
 void slha_print_shadow_metrics_unlocked();
