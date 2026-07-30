@@ -114,3 +114,44 @@ jobs:
         # `libc`'s own MSRV is well below 1.89, so the feature path must also
         # compile on the crate's declared MSRV.
         run: cargo --locked check -p scirust --features numa --all-targets
+
+  # The C++ shim test suite existed since the llama.cpp integration landed but
+  # was never wired into CI — six test binaries plus the trainer atomicity
+  # script ran only when someone remembered to. This job makes them a gate.
+  llama-shim:
+    name: llama.cpp shim (C++ tests + strict compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and run the shim test suite (-Wall -Wextra -Werror)
+        # Six binaries covering replace counters, calibration, layer mask,
+        # score scale, scale fit and the rank-transplant oracles, plus the
+        # trainer atomicity tests (bash + python3, no cargo — the fail-first
+        # gate rejects the crafted NaN calibration before any training).
+        run: make -C integration/llama.cpp/tests -j"$(nproc)" all test
+      - name: Strict compile of the shim sources the tests do not link
+        # slha_llama.cpp is the only shim file needing external headers; it is
+        # syntax-checked against the REAL ggml.h of the pinned llama.cpp tag
+        # (same tag as build_and_roundtrip.sh), never against stubs.
+        run: |
+          git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$RUNNER_TEMP/llama.cpp"
+          make -C integration/llama.cpp/tests compile-check LLAMA_CPP_DIR="$RUNNER_TEMP/llama.cpp"
+
+  # Supply-chain gates: RustSec advisories (cargo audit) and license/ban/source
+  # policy (cargo deny, config in deny.toml). Neither ran anywhere before.
+  supply-chain:
+    name: supply chain (cargo audit + cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Install cargo-audit and cargo-deny
+        run: cargo install cargo-audit cargo-deny --locked
+      - name: RustSec advisories
+        run: cargo audit
+      - name: License / bans / advisories / sources policy
+        run: cargo deny check

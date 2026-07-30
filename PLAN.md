@@ -28,10 +28,13 @@
 | NUMA / alloc alignée, filtre de sécurité latent | ✅ `numa`, `safety` |
 | Outils : `slha-audit` (+ `--perf`), serveur MCP | ✅ |
 | Bindings C (`slha-c`) et Python (`slha-python`) | ✅ |
+| Intégration llama.cpp — remplacement de score compressé + portes qualité (shim GGML, oracles, entraînement ranking) | ✅ codé et mesuré — **mais NO-GO sur F : +42,3 % de Δ-PPL** (Qwen2.5-1.5B, 12 chunks). Voir statut Phase 2 et `docs/SUCCESS_CRITERIA.md` §5. Pas de compression physique du cache KV sur ce chemin. |
 
 **Conséquence :** ce plan concerne surtout la **validation sur activations
 réelles** et quelques briques réellement neuves — pas la ré-implémentation de
-l'existant.
+l'existant. ⚠️ Aucun ✅ de ce tableau ne signifie « qualité validée sur LLM
+réel » : la seule mesure de perplexité réelle existante est un **NO-GO**
+(statut Phase 2).
 
 ---
 
@@ -104,6 +107,19 @@ Durée : ~2–4 semaines.
 > une technique dont l'argument est « tourner **sans GPU** » dilue le message
 > (PagedAttention gère déjà le KV GPU). Déplacé en **annexe** « si contexte
 > ultra-long côté GPU ».
+
+> **Statut (30 juillet 2026) : partiellement exécutée — NO-GO sur F.** Le
+> point dur 2.3 a été réalisé sous une forme de *porte qualité* (opération GGML
+> custom remplaçant les scores Q·Kᵀ par les scores SLHA reconstruits ; pas de
+> remplacement du stockage KV — 2.2 non fait, aucune réduction mémoire). La
+> mesure 2.5, gelée et déterministe (Qwen2.5-1.5B q8_0, WikiText-2, 12 chunks) :
+> pass-through **11,8644** → remplacement strict **16,8855**, soit **+42,3 %**
+> contre une cible F ≤ 1 % — **NO-GO** (`docs/SUCCESS_CRITERIA.md` §5). Le
+> diagnostic par oracles attribue 65,92 % du déficit au classement des clés
+> (top-16 = 98,42 % de ce bénéfice) — direction de correction, non convertie en
+> gain déployable à ce jour. Source :
+> `integration/llama.cpp/results/rank_transplant_oracle.json`, branche
+> `research/llama-rank-transplant-oracle`.
 
 ---
 
