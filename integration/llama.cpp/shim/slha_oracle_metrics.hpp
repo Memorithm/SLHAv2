@@ -59,11 +59,29 @@ struct LayerMetrics {
     uint64_t head_rows[kMaxHeads] = {0};
     uint64_t head_b_ties[kMaxHeads] = {0};
 
+    // physical-to-active reconciliation, accumulated per sampled row:
+    //   physical == included + padding + causally_masked + inactive_stream + nonfinite
+    uint64_t acct_rows = 0;
+    uint64_t acct_physical = 0;
+    uint64_t acct_included = 0;
+    uint64_t acct_padding = 0;
+    uint64_t acct_masked = 0;
+    uint64_t acct_inactive_stream = 0;
+    uint64_t acct_nonfinite = 0;
+    uint64_t acct_failures = 0;      // rows where the identity did not hold
+
     void merge(const LayerMetrics & o);
 };
 
 // Accumulate one active row pair. `b` and `s` must be the active prefix only.
 void add_row(int32_t layer_id, int head, const float * b, const float * s, size_t n);
+
+// Record the position accounting for one sampled row. The categories must be
+// disjoint and sum exactly to `physical`; a row that fails the identity is
+// counted in acct_failures and invalidates the run's metrics.
+void add_accounting(int32_t layer_id, uint64_t physical, uint64_t included,
+                    uint64_t padding, uint64_t masked, uint64_t inactive_stream,
+                    uint64_t nonfinite);
 
 void reset();
 void enable(bool on);

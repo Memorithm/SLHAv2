@@ -37,6 +37,14 @@ void LayerMetrics::merge(const LayerMetrics & o) {
         head_rows[i] += o.head_rows[i];
         head_b_ties[i] += o.head_b_ties[i];
     }
+    acct_rows += o.acct_rows;
+    acct_physical += o.acct_physical;
+    acct_included += o.acct_included;
+    acct_padding += o.acct_padding;
+    acct_masked += o.acct_masked;
+    acct_inactive_stream += o.acct_inactive_stream;
+    acct_nonfinite += o.acct_nonfinite;
+    acct_failures += o.acct_failures;
 }
 
 namespace {
@@ -87,6 +95,27 @@ uint64_t block_stats(const float * v, const std::vector<int32_t> & perm, size_t 
     return pairs;
 }
 }  // namespace
+
+void add_accounting(int32_t layer_id, uint64_t physical, uint64_t included,
+                    uint64_t padding, uint64_t masked, uint64_t inactive_stream,
+                    uint64_t nonfinite) {
+    if (!g_enabled.load(std::memory_order_acquire)) return;
+    if (layer_id < 0 || layer_id >= kMaxLayers) return;
+    LayerMetrics m;
+    m.acct_rows = 1;
+    m.acct_physical = physical;
+    m.acct_included = included;
+    m.acct_padding = padding;
+    m.acct_masked = masked;
+    m.acct_inactive_stream = inactive_stream;
+    m.acct_nonfinite = nonfinite;
+    if (included + padding + masked + inactive_stream + nonfinite != physical) {
+        m.acct_failures = 1;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_layers[layer_id].merge(m);
+    g_seen[layer_id] = true;
+}
 
 void add_row(int32_t layer_id, int head, const float * b, const float * s, size_t n) {
     if (!g_enabled.load(std::memory_order_acquire)) return;
@@ -264,6 +293,15 @@ std::string dump_json() {
         os << ", \"slha_block_p50\": " << pctile_from_hist(m.s_block_hist, 0.50);
         os << ", \"slha_block_p90\": " << pctile_from_hist(m.s_block_hist, 0.90);
         os << ", \"slha_block_p99\": " << pctile_from_hist(m.s_block_hist, 0.99);
+        os << ", \"acct_rows\": " << m.acct_rows;
+        os << ", \"acct_physical\": " << m.acct_physical;
+        os << ", \"acct_included\": " << m.acct_included;
+        os << ", \"acct_padding\": " << m.acct_padding;
+        os << ", \"acct_causally_masked\": " << m.acct_masked;
+        os << ", \"acct_inactive_stream\": " << m.acct_inactive_stream;
+        os << ", \"acct_nonfinite\": " << m.acct_nonfinite;
+        os << ", \"active_accounting_failures\": " << m.acct_failures;
+        os << ", \"acct_identity_holds\": " << (m.acct_failures == 0 ? "true" : "false");
         os << ", \"head_rows\": [";
         for (int hh = 0; hh < kMaxHeads; ++hh) {
             if (m.head_rows[hh] == 0) continue;

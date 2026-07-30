@@ -1456,16 +1456,34 @@ void slha_shadow_score(
                 }
             }
 
-            // Active-key ranking / tie statistics on the UNTRANSFORMED pair.
-            // Deterministic (t,h) sampling keeps the O(n^2) Kendall tau-b
-            // bounded and is independent of thread scheduling.
-            if (slha_oracle_metrics::enabled() && (t % 16) == 0 && h < 2) {
+            // CAUSALLY VISIBLE prefix. Query token t attends keys 0..t only;
+            // keys in [n_visible, n_check) are written tiles that soft_max_ext
+            // masks to -INF for this query, and [n_check, n_kv) is padding.
+            // Both oracle construction and the ranking statistics must be
+            // restricted to the visible set: a transplant that spans masked keys
+            // spends value-multiset slots on keys softmax never sees, which
+            // dilutes the transplant instead of measuring it.
+            const size_t n_visible =
+                std::min<size_t>(n_check, static_cast<size_t>(t) + 1);
+
+            // Active-key ranking / tie statistics on the UNTRANSFORMED pair,
+            // over the visible prefix only. Deterministic (t,h) sampling keeps
+            // the O(n^2) Kendall tau-b bounded and thread-independent.
+            if (slha_oracle_metrics::enabled() && (t % 16) == 0 && h < 2 && n_visible > 0) {
                 const float * mb_row = kq_data
                     + s * static_cast<ptrdiff_t>(kq_stream_stride)
                     + t * static_cast<ptrdiff_t>(kq_token_stride)
                     + h * static_cast<ptrdiff_t>(kq_head_stride);
                 slha_oracle_metrics::add_row(layer->layer_id, static_cast<int>(h),
-                                             mb_row, temp_scores.data(), n_check);
+                                             mb_row, temp_scores.data(), n_visible);
+                slha_oracle_metrics::add_accounting(
+                    layer->layer_id,
+                    static_cast<uint64_t>(n_kv),                 // physical
+                    static_cast<uint64_t>(n_visible),            // included
+                    static_cast<uint64_t>(n_kv) - static_cast<uint64_t>(n_check),  // padding
+                    static_cast<uint64_t>(n_check - n_visible),  // causally masked
+                    0,                                           // inactive stream (n_stream==1)
+                    0);                                          // non-finite rejected
             }
 
             // Diagnostic score oracle. Rewrites this row from the PAIRED
@@ -1475,10 +1493,11 @@ void slha_shadow_score(
             // masked positions never enter an oracle construction. Fails
             // closed: on any rejection the row is left as the zeroed padding
             // and the vector is counted as failed, never partially written.
-            if (g_oracle.active && g_oracle.valid && g_oracle.mode != slha_oracle::Mode::Off) {
+            if (g_oracle.active && g_oracle.valid && g_oracle.mode != slha_oracle::Mode::Off
+                && n_visible > 0) {
                 thread_local slha_oracle::Workspace ows;
                 thread_local std::vector<float> oracle_out;
-                oracle_out.resize(n_check);
+                oracle_out.resize(n_visible);
                 const float * b_row = kq_data
                     + s * static_cast<ptrdiff_t>(kq_stream_stride)
                     + t * static_cast<ptrdiff_t>(kq_token_stride)
@@ -1486,7 +1505,7 @@ void slha_shadow_score(
                 uint64_t row_ties = 0;
                 const slha_oracle::ApplyStatus st = slha_oracle::apply(
                     g_oracle.mode, g_oracle.topk, b_row, temp_scores.data(),
-                    n_check, oracle_out.data(), &row_ties, ows);
+                    n_visible, oracle_out.data(), &row_ties, ows);
                 if (st != slha_oracle::ApplyStatus::Ok) {
                     if (st == slha_oracle::ApplyStatus::NonFiniteInput) {
                         g_oracle_nonfinite_input.fetch_add(1, std::memory_order_relaxed);
@@ -1508,19 +1527,19 @@ void slha_shadow_score(
                             // respects_ranking, not same_ranking: when the
                             // transplanted values tie, the relative order of the
                             // equal-valued keys is unobservable in the output.
-                            ok = slha_oracle::respects_ranking(oracle_out.data(), b_row, n_check, ows)
+                            ok = slha_oracle::respects_ranking(oracle_out.data(), b_row, n_visible, ows)
                               && slha_oracle::same_value_multiset(oracle_out.data(),
-                                     temp_scores.data(), n_check, vx, vy);
+                                     temp_scores.data(), n_visible, vx, vy);
                             break;
                         case slha_oracle::Mode::SlhaRankBaselineValues:
                             ok = slha_oracle::respects_ranking(oracle_out.data(),
-                                     temp_scores.data(), n_check, ows)
+                                     temp_scores.data(), n_visible, ows)
                               && slha_oracle::same_value_multiset(oracle_out.data(),
-                                     b_row, n_check, vx, vy);
+                                     b_row, n_visible, vx, vy);
                             break;
                         case slha_oracle::Mode::BaselineTopKRank:
                             ok = slha_oracle::same_value_multiset(oracle_out.data(),
-                                     temp_scores.data(), n_check, vx, vy);
+                                     temp_scores.data(), n_visible, vx, vy);
                             break;
                         default:
                             break;
@@ -1530,9 +1549,9 @@ void slha_shadow_score(
                         g_slha_replace_counters.error_code.store(1, std::memory_order_release);
                     }
                 }
-                std::memcpy(temp_scores.data(), oracle_out.data(), n_check * sizeof(float));
+                std::memcpy(temp_scores.data(), oracle_out.data(), n_visible * sizeof(float));
                 g_oracle_vectors.fetch_add(1, std::memory_order_relaxed);
-                g_oracle_logits.fetch_add(n_check, std::memory_order_relaxed);
+                g_oracle_logits.fetch_add(n_visible, std::memory_order_relaxed);
                 g_oracle_permutations.fetch_add(1, std::memory_order_relaxed);
                 g_oracle_ties.fetch_add(static_cast<size_t>(row_ties), std::memory_order_relaxed);
             }
