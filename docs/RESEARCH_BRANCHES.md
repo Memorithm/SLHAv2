@@ -5,13 +5,22 @@
 diffs. Aucune fusion n'est faite ici ; ce document constate.
 
 > **Décisions exécutées (30 juillet 2026, sur instruction du mainteneur).**
-> Les recommandations ci-dessous ont été appliquées : les deux commits de
-> résultats de `research/llama-rank-transplant-oracle` (`de14212`, `f0d3930`)
-> sont rapatriés dans l'arbre (l'artefact et la section README vivent
-> désormais sur la branche principale), et chaque branche absorbée a été
-> **archivée en tag** `archive/<nom>` pointant sur sa tête — l'historique
-> complet reste joignable — puis supprimée en tant que branche. Le tableau
-> ci-dessous est conservé comme constat d'origine.
+> Le rapatriement recommandé est fait : les deux commits de résultats de
+> `research/llama-rank-transplant-oracle` (`de14212`, `f0d3930`) sont dans
+> l'arbre — l'artefact et sa section README vivent désormais avec le code.
+>
+> L'archivage/suppression des branches absorbées n'a **pas** pu être exécuté
+> par la session (le proxy git refuse les pushs de tags et les suppressions de
+> branches) ; il reste à faire côté mainteneur, en sécurité :
+>
+> - les têtes des six branches absorbées restent joignables via les refs de
+>   leurs pull requests (`refs/pull/58..63/head`) même après suppression ;
+> - supprimer `research/llama-rank-transplant-oracle` **seulement après** que
+>   le rapatriement ci-dessus a atteint la branche principale — avant cela,
+>   cette branche reste le seul exemplaire mergé de l'artefact ;
+> - `chore/remediation-audit` (absorbée par #66) peut être supprimée de même.
+>
+> Le tableau ci-dessous est conservé comme constat d'origine.
 
 Méthode : pour chaque branche, `git diff origin/master origin/<branche>`
 restreint aux fichiers que la branche ajoute ou modifie (le reste du diff est
