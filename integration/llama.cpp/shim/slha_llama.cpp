@@ -1043,11 +1043,26 @@ void slha_shadow_score(
             // Score-scale fit: accumulate (baseline, slha) over the causal region
             // only. Query token t (fresh-context chunk, position t) attends keys
             // 0..t; using k <= t is a strict subset of the truly-unmasked keys,
-            // so no softmax-masked position ever enters the magnitude fit.
+            // so no softmax-masked position ever enters the magnitude fit. It is
+            // also clamped to n_written so no padding position (no tile data) can
+            // contribute. Head id and query-position bucket are recorded so the
+            // fit can be shown not to be dominated by one head or by short rows.
             if (do_scale_fit) {
-                const int64_t kmax = std::min<int64_t>(t + 1, n_kv);
+                const size_t n_written_fit =
+                    g_slha_tiles_written[layer->layer_id].load(std::memory_order_acquire);
+                int64_t kmax = std::min<int64_t>(t + 1, n_kv);
+                if (n_written_fit > 0 && static_cast<int64_t>(n_written_fit) < kmax) {
+                    kmax = static_cast<int64_t>(n_written_fit);
+                }
+                const double t_frac = n_token > 0
+                    ? static_cast<double>(t) / static_cast<double>(n_token)
+                    : 0.0;
                 for (int64_t k = 0; k < kmax; ++k) {
-                    fit_acc.add(baseline_vec[k], slha_vec[k]);
+                    fit_acc.add(baseline_vec[k], slha_vec[k],
+                                static_cast<int>(h), t_frac);
+                }
+                if (kmax > 0) {
+                    fit_acc.n_vectors += 1;
                 }
             }
 
@@ -1076,7 +1091,12 @@ void slha_shadow_score(
                 }
             }
         }
-        if (do_scale_fit && fit_acc.n > 0.0) {
+        // Merge even when no pair was accumulated, so the exclusion counters
+        // (non-finite / near-zero) are never silently dropped. n_callbacks is
+        // counted once per op invocation, not once per worker thread.
+        if (do_scale_fit && (fit_acc.n > 0.0 || fit_acc.n_nonfinite > 0 ||
+                             fit_acc.n_robust_excluded > 0)) {
+            fit_acc.n_callbacks = (ith == 0) ? 1 : 0;
             slha_scale_fit::merge_layer(layer->layer_id, fit_acc);
         }
         return;
@@ -1159,17 +1179,6 @@ void slha_shadow_score(
     const int64_t start = ith * per_thread;
     const int64_t end = std::min(start + per_thread, total);
 
-    // Safety-initialize the thread's portion of dst to zero (defined memory).
-    {
-        const int64_t n = ggml_nelements(dst);
-        const int64_t i0 = (n * ith) / nth;
-        const int64_t i1 = (n * (ith + 1)) / nth;
-        float * out = static_cast<float *>(dst->data);
-        for (int64_t i = i0; i < i1; ++i) {
-            out[i] = 0.0f;
-        }
-    }
-
     // Load the number of tiles written for this layer. n_kv from kq->ne[0] is
     // padded to at least 256 by llama_kv_cache::get_n_kv, but only n_written
     // tiles actually exist. We only validate and score positions with tiles.
@@ -1181,6 +1190,19 @@ void slha_shadow_score(
         const int64_t t = r / n_head;
         const int64_t h = r % n_head;
         const int64_t kv_head = h / gqa_factor;
+
+        // Safety-initialize this vector's dst row to zero (defined memory).
+        // Zeroing is done per vector, inside the same partition that writes the
+        // scores, because the vector enumeration here (t-major, h-minor) does not
+        // match dst's memory order (h-major). Zeroing by a flat element range
+        // instead would let one thread blank rows another thread is concurrently
+        // writing — the vector partition tiles dst exactly, so this is race-free
+        // and still leaves padding positions [n_check, n_kv) at zero.
+        float * dst_head = static_cast<float *>(dst->data)
+            + s * static_cast<ptrdiff_t>(dst_stream_stride)
+            + t * static_cast<ptrdiff_t>(dst_token_stride)
+            + h * static_cast<ptrdiff_t>(dst_head_stride);
+        std::fill(dst_head, dst_head + n_kv, 0.0f);
 
         // n_stream == 1 is enforced above, so s must be 0.
         // Defensively handle s > 0 as inactive stream (counted, not replaced).
@@ -1319,11 +1341,8 @@ void slha_shadow_score(
                 }
             }
 
-            // Write validated scores to dst (first n_check positions)
-            float * dst_head = static_cast<float *>(dst->data)
-                + s * static_cast<ptrdiff_t>(dst_stream_stride)
-                + t * static_cast<ptrdiff_t>(dst_token_stride)
-                + h * static_cast<ptrdiff_t>(dst_head_stride);
+            // Write validated scores to dst (first n_check positions; the rest of
+            // the row was zeroed above and stays zero as padding).
             std::memcpy(dst_head, temp_scores.data(), n_check * sizeof(float));
             if (ith == 0 && idx == start && g_diag_call_count < 100) {
                 slha_diag_score(dst_head, static_cast<int64_t>(n_kv),

@@ -552,6 +552,239 @@ divergences. Absolute PPLs are not comparable to the 12-chunk PR #58 numbers, bu
 within-experiment deltas are. The root cause is not proven: the
 temperature-mismatch hypothesis needs an end-to-end scale experiment, and
 super-additivity means single-layer screening understates joint damage.
+That end-to-end scale experiment was subsequently run and **rejected** the
+temperature hypothesis — see
+[Research: score-temperature (magnitude) calibration](#research-score-temperature-magnitude-calibration)
+below.
+
+## Research: score-temperature (magnitude) calibration
+
+PR #60 left one mechanism hypothesis open: that the direct compressed-score
+degradation is primarily a **layer-dependent score-magnitude mismatch**,
+equivalent to an incorrect softmax temperature. This section tests it end to end
+and **rejects it**. Production score mathematics are unchanged; scaling is a
+strict, default-off (`a = 1.0`) experimental knob.
+
+Provenance: llama.cpp `fdb1db877c526ec90f668eca1b858da5dba85560` (tag b9860),
+Qwen2.5-1.5B-Instruct Q8_0, WikiText-2 raw test, mixed codec, weights from the
+PR #59 pipeline. Full data, per-layer tables and hashes:
+[`results/score_temperature_calibration.json`](results/score_temperature_calibration.json).
+
+### The knob, and exactly what it is
+
+The op replaces logits after the raw `kq = Q·Kᵀ` (`llama-graph.cpp:2451`) and
+**before** `soft_max_ext` (`:2500`). For Qwen2.5 there is no logit softcap, no
+`kq_b`, no ALiBi and no sinks, and `kq_scale = 1/√128`, so
+
+```
+baseline:  P = softmax( kq_scale · (Q·Kᵀ) + mask )
+replace:   P̂ = softmax( kq_scale ·  S_SLHA + mask )
+scaled:    P̃ = softmax( (kq_scale · a_layer) · S_SLHA + mask )
+```
+
+`a_layer` multiplies the **effective inverse temperature**, applied exactly once
+to the raw score; the `1/√head_dim` factor is applied afterwards by
+`soft_max_ext` and is never applied twice. Because softmax is shift-invariant per
+row, `a·s = a·(s − s̄_row) + (a−1)·s̄_row` and the row-constant term is discarded —
+so scaling the raw score *is* scaling the row-centred logit, and a global sweep
+probes the softmax-relevant temperature directly.
+
+### Determinism had to be fixed first
+
+The replacement path contained a data race: `dst` was zero-initialised by flat
+element range but written by vector range, and a ggml custom op has no internal
+barrier, so one worker could blank rows another had already filled. Three
+**numerically identical** replacement configurations returned
+13.4196 / 13.4068 /
+13.4237 — a spread of 0.0169 PPL.
+After the fix they return bit-identical values. Every measurement below was taken
+with the fixed binary, so differences between configurations are signal, not noise.
+
+| identity-equivalent configuration | PPL (4 chunks) |
+| --- | ---: |
+| id_replace_noscale | 13.4162 |
+| id_replace_g1p0 | 13.4162 |
+| id_replace_file1p0 | 13.4162 |
+
+The pass-through custom-op control and the SLHA-off baseline both give
+9.3852 — the op itself is inert. Unscaled replacement gives
+13.4162, a gap of **4.0310 (42.95%)**.
+
+### Offline fit: the magnitudes are already calibrated
+
+Shadow mode streams sufficient statistics over causally-unmasked positions
+(`k ≤ t`, clamped to written tiles). The pair count per layer matches the analytic
+prediction Σ(t+1)·heads·chunks **exactly**, proving no vector was skipped and that
+`t` is the true token position.
+
+| estimator | min | median | max |
+| --- | ---: | ---: | ---: |
+| OLS through origin | 0.9828 | 0.9968 | 1.0036 |
+| robust median-ratio | 0.9886 | 0.9886 | 1.0116 |
+| variance matching | 0.9999 | 1.0097 | 1.0260 |
+| slope with free intercept | 0.9963 | 1.0002 | 1.0079 |
+| Pearson r(b,s) | 0.9795 | 0.9908 | 1.0000 |
+
+Fitting with a free intercept — the softmax-relevant form, since a constant
+per-row offset cancels — puts every layer within
+**0.79%** of identity, tighter than the
+through-origin fit. So the near-unit scale is not an artifact of forcing the fit
+through the origin. Applying the best-fit scale removes only
+**0.38%** of the score's squared error
+(pair-weighted; 1.00% equally
+weighted across layers, at most 5.88% for
+any single layer).
+
+The fit is not dominated by a degenerate subpopulation: each of the 12 heads
+carries exactly 1/12 of the samples with per-head scales inside a ~3% band,
+position-bucket counts follow the causal prediction with per-bucket scales ≈ 1.0,
+near-zero scores carry a vanishing share of the OLS denominator, and there are no
+non-finite pairs. Two caveats are recorded rather than glossed: a **pooled**
+cross-layer OLS is meaningless here because layer 0 alone carries
+99.91% of Σs², and the robust estimator is quantised to
+its 0.01-dex histogram bin (≈2.3%), so its digits beyond ~1% are not meaningful.
+
+**Per-layer structure is not resolved.** The split-half disagreement (max 0.0256) is AS LARGE AS or LARGER than the entire per-layer spread of the fitted scale (0.0208), so the apparent per-layer structure is NOT resolved: the per-layer scales are consistent with all layers sharing a scale of ~1.0 plus estimation noise. This makes the fitted per-layer scale files perturbations of the identity rather than a genuine search over per-layer temperatures, and it is why they are reported alongside, not instead of, the direct global sweep. Rank correlation between the two disjoint halves is 0.354.
+
+### End-to-end: no temperature recovers the gap
+
+Every measured point, at 4 chunks. `recovered_gap = (unscaled − config) / (unscaled − pass-through)`.
+
+| global scale a | PPL | recovered gap |
+| ---: | ---: | ---: |
+| 0.40 | 269.9862 | -6364.92% |
+| 0.50 | 69.4502 | -1390.08% |
+| 0.60 | 26.8259 | -332.66% |
+| 0.70 | 17.6512 | -105.06% |
+| 0.80 | 14.6611 | -30.88% |
+| 0.90 | 13.8585 | -10.97% |
+| 0.92 | 13.7724 | -8.84% |
+| 0.94 | 13.7056 | -7.18% |
+| 0.96 | 13.5451 | -3.20% |
+| 0.98 | 13.4530 | -0.91% |
+| 0.99 | 13.5311 | -2.85% |
+| 1.00 | 13.4162 | 0.00% |
+| 1.01 | 13.6068 | -4.73% |
+| 1.02 | 13.4988 | -2.05% |
+| 1.04 | 13.5626 | -3.63% |
+| 1.06 | 13.4889 | -1.80% |
+| 1.08 | 13.4590 | -1.06% |
+| 1.10 | 13.5629 | -3.64% |
+| 1.20 | 13.8681 | -11.21% |
+| 1.30 | 14.0534 | -15.81% |
+| 1.50 | 15.2022 | -44.31% |
+| 1.75 | 17.2626 | -95.42% |
+| 2.00 | 19.8388 | -159.33% |
+
+A clean U-curve with its minimum at **a ≈ 1.0**. Both directions are worse:
+sharpening degrades steadily, flattening degrades catastrophically (a = 0.40 →
+269.99),
+which is what rank-preservation predicts: flattening destroys the selectivity the
+model depends on while buying nothing back.
+
+**Resolution floor.** The binary is deterministic, yet PPL(a) is not smooth at
+fine scale: a least-squares quadratic through the local window
+[0.90, 1.10] leaves a residual roughness of
+**0.0584 PPL RMS** (max 0.1143). That is not
+measurement noise — identical configurations give bit-identical results — but genuine
+chaotic sensitivity of the forward pass to tiny attention perturbations. It sets the
+resolution for any recovered-gap claim at about
+**1.45%** of the gap. The smooth
+component of the curve has its minimum at a = 1.037 with curvature
+d²PPL/da² ≈ 40.4; no measured point recovers any of the gap.
+
+| fitted-scale strategy | PPL | recovered gap | manifest |
+| --- | ---: | ---: | --- |
+| `sc_robust_0_6` | 13.4196 | -0.08% | 26239a1bcb0c |
+| `sc_robust_all` | 13.4434 | -0.67% | 12799dc02ca2 |
+| `sc_global_robust` | 13.4766 | -1.50% | 5858defc1dfa |
+| `sc_ols_0_13` | 13.4821 | -1.63% | 34c2920dc7f3 |
+| `sc_ols_all` | 13.5006 | -2.09% | 820c9a847428 |
+| `sc_ols_0_20` | 13.5125 | -2.39% | f910a38c8a09 |
+| `sc_ols_0_6` | 13.5192 | -2.56% | 6a95ebf3689e |
+| `sc_var_all` | 13.5216 | -2.61% | ae9af62c6611 |
+| `sc_global_ols` | 13.5497 | -3.31% | b4c6fa1ba027 |
+
+### Twelve-chunk validation (3 repetitions each)
+
+| configuration | mean PPL | sample stdev | spread | recovered gap | reps |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `v_passthrough` | 11.8644 | 0.0000 | 0.0000 | — | 3 |
+| `v_replace_noscale` | 16.8855 | 0.0000 | 0.0000 | 0.00% | 3 |
+| `v_replace_g1p0` | 16.8855 | 0.0000 | 0.0000 | 0.00% | 3 |
+| `v_best_global` | 16.8855 | 0.0000 | 0.0000 | 0.00% | 3 |
+| `v_best_perlayer` | 16.9073 | 0.0000 | 0.0000 | -0.43% | 3 |
+| `v_best_early` | 16.9138 | 0.0000 | 0.0000 | -0.56% | 3 |
+
+### Why this excludes the whole family, not just the points tested
+
+Softmax normalises over one `(layer, head, query)` row, so a per-layer, per-head,
+per-query-row or context-length-dependent positive scale is **constant within the
+normalisation group**. Every such scale is exactly rank-preserving, and the global
+sweep measures the family's mean directly. The residual bounds its spread:
+attributing **100%** of each layer's score residual to per-row gain jitter — the
+most generous possible magnitude hypothesis — gives σ_a ≈ 0.070, which
+priced against the measured sweep curvature
+(d²PPL/da² ≈ 40.4) costs only
+≈ 0.100 PPL, about
+2.5% of the gap.
+Explaining the whole gap would need a jitter several times larger than the one
+actually measured. The scale family is excluded numerically, not merely unsampled.
+
+### Conclusion
+
+Per-layer and global multiplicative calibration recovered less than 1% of the PPL gap, while fitted scales remained close to identity and scaling removed less than approximately 1% of raw-score error. No positive rescaling that is constant within a softmax row -- per-layer, per-head, per-query-row, or context-length-dependent -- can close the gap: every such rescaling is exactly rank-preserving, the measured optimum of the global sweep sits at a ~ 1.0, and even attributing 100% of the score residual to per-row gain jitter prices that whole family at only a few percent of the gap. The quality gap is therefore dominated by score distortion that is NOT constant within a softmax row. This experiment does not further decompose that residual into reordering versus order-preserving gap error.
+
+Twelve-chunk validation repeats were **bit-identical** (sample stdev 0.0000 across
+three repetitions of every configuration), and determinism was confirmed on the
+genuinely scaled write path as well, not only on the `a = 1.0` path that skips the
+scaling loop.
+
+What this does **not** establish: it does not decompose the residual into
+reordering versus order-preserving gap error. A monotone nonlinear magnitude map
+is non-scalar, order-preserving, changes the softmax distribution, and is
+invisible to every statistic computed here; a per-**key** magnitude error is
+likewise not row-constant and therefore does change ranking. The `top1`/`top5`
+figures quoted in PR #60 and reproduced by the shadow metrics are computed over
+the full `n_kv` row including causally-masked keys, so they are not clean
+attention-relevant rank-agreement numbers and are not used as load-bearing
+evidence here.
+
+### Recommended next experiments
+
+After a negative scaling result the next diagnostic should target the score
+*ordering* and per-key magnitude, not another temperature sweep:
+- joint Q/K projection training (optimize the compressed projection for score ordering)
+- pairwise ranking loss on score pairs rather than L2 on score values
+- top-k preservation loss during projection training
+- per-head projection calibration
+- residual correction of SLHA scores (learned low-rank correction term)
+- hybrid exact top-k plus compressed tail scoring
+
+None of these are implemented in this PR.
+
+### Experimental interface
+
+`SLHA_SCORE_SCALE` (`"0.75"` or `"layer:0=0.91,5=0.72"`) and
+`SLHA_SCORE_SCALE_FILE` (JSON `{"global":…,"layers":{…}}`) set the per-layer
+scale; default `1.0` (no-op). Strict and fail-closed: only finite strictly
+positive scales; zero, negative, NaN, ±Inf, malformed, duplicate/out-of-range
+layer ids, and — in per-layer mode — any selected layer lacking a scale are
+rejected and mark the run invalid. `SLHA_SCORE_SCALE_SUMMARY` reports the
+requested and resolved scales, a manifest SHA-256, `scaled_vectors`/
+`scaled_logits`, `invalid_scale` and `scale_manifest_valid`.
+`SLHA_SCALE_FIT_JSON=<path>` (shadow mode) writes the offline per-layer fit.
+
+### Limitations
+
+Screening ran at 4 chunks because this host is materially slower than the PR #58
+host; every control used the same chunk count, so within-experiment deltas are
+consistent, but absolute PPLs are not comparable to the 12-chunk PR #58 numbers.
+The offline fit is off-policy — it estimates scales on baseline-conditioned
+states with no cross-layer error compounding — so only the end-to-end sweep is
+on-policy; that is why the sweep, not the fit, carries the conclusion. The
+per-layer scale files tested are magnitude-fitted perturbations of the identity
+(all within ~3%), not a PPL-optimised search of the 28-dimensional scale space.
 
 ## Earlier round-trip results
 
@@ -613,7 +846,8 @@ cargo +1.89.0 check --locked --workspace --all-targets --all-features
 ```
 
 The production-linked tests (strict-replacement counters, calibration validator,
-and trainer atomicity):
+trainer atomicity, experimental score-scale parsing, and the offline
+score-scale fit mathematics):
 
 ```bash
 make -C integration/llama.cpp/tests clean
