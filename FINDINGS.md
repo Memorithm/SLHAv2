@@ -6,12 +6,17 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 
 > **Cadre.** Mesures sur données **synthétiques**, projections `Z` (sign-LSH)
 > **aléatoires** ; sauf au §7.7, la base bas-rang est une PCA (non entraînée
-> conjointement à un modèle). Pas de vrai LLM, pas de compteurs `perf` (sandbox).
-> Ces résultats valident la **mécanique**, pas (encore) la qualité sur un modèle réel.
-> **Exception : le §5 ci-dessous** — premières mesures sur **activations réelles**
-> (GPT-2), qui ont corrigé une conclusion synthétique.
+> conjointement à un modèle). Pas de compteurs `perf` (sandbox).
+> Ces résultats valident la **mécanique**, pas la qualité sur un modèle réel.
+> **Exceptions : le §5** — mesures sur **activations réelles** (GPT-2), qui ont
+> corrigé une conclusion synthétique — et le **§5bis** — perplexité de bout en
+> bout sur un **LLM réel** (Qwen2.5-1.5B via llama.cpp), qui prononce le
+> **NO-GO** du critère F sur le chemin de remplacement de score.
 
 ## Tableau de bord
+
+**Proxies hors-LLM** (données synthétiques, graines fixes — mécanique, pas
+qualité sur modèle réel) :
 
 | Question | Résultat mesuré | Réf. |
 |---|---|---|
@@ -24,7 +29,15 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
 | Débit SIMD (vs scalaire) ? | x86 : AVX2 **×11,5**, AVX-512 **×14,1** ; ARM : NEON **×5,7** (Jetson Thor) | §7.4 |
 | Projection apprise vs PCA (Q≠K) ? | WARM **0,16 → 0,86** | §7.7 |
 | Cache KV élastique sous budget (Soft-Paging) ? | pager **½** des tuiles HOT→WARM : sortie à **cos 0,9995** | §4 |
-| **Premier chiffre RÉEL** (GPT-2 c6, held-out) ? | NO-GO **0,834** → **0,966** après 2 correctifs | **§5** |
+
+**Mesures sur LLM réel** (les seules qui engagent le critère F de
+`docs/SUCCESS_CRITERIA.md`) :
+
+| Question | Résultat mesuré | Réf. |
+|---|---|---|
+| Proxy couche-isolée (GPT-2 c6, held-out) ? | NO-GO **0,834** → **0,966** après 2 correctifs (plafond du sous-espace : 0,971) | **§5** |
+| **Δ-perplexité réelle** du remplacement de score compressé (Qwen2.5-1.5B, llama.cpp, 12 chunks) ? | **NO-GO : 11,8644 → 16,8855, soit +42,3 %** vs cible ≤ 1 % | **§5bis** |
+| D'où vient le déficit ? (diagnostic par oracle, non déployable) | **65,92 %** = classement des clés ; top-16 seul = 98,42 % de ce bénéfice | **§5bis** |
 
 ## 1. Ce qui est validé
 
@@ -37,10 +50,13 @@ mesures ont **réellement** établi. Toutes les valeurs sont reproductibles
   désormais implémentée de bout en bout (`ccos::ElasticKvCache`, §4) : sous un
   budget en octets, pager **la moitié** des tuiles (les plus faibles `σ_E`)
   HOT→WARM laisse la **sortie d'attention** à **cos ≈ 0,9995** vs tout-HOT.
-- **La sortie d'attention est robuste** — le résultat le plus important. Même
+- **La sortie d'attention est robuste** *sur ce proxy hors-LLM*. Même
   quand le ranking des scores plafonne (Spearman 0,79–0,90), la sortie
   `softmax·V` reste à **cosinus 0,95–0,997** : le softmax absorbe l'erreur de
   score. C'est le proxy le plus proche de la perplexité accessible hors LLM.
+  ⚠️ **L'extrapolation ne tient pas** : en perplexité réelle (Qwen2.5-1.5B via
+  llama.cpp) l'erreur de score n'est pas absorbée — **+42,3 %** de Δ-PPL,
+  NO-GO. Voir §5bis.
 - **L'argument « mur de bande passante » tient au niveau kernel.** 128 o/token
   contre 256 o pour une clé bf16 → **~2,5× plus de tokens/s** à débit GB/s
   comparable (sur Xeon AVX2 ; **~1,3× sur CPU scalaire**).
@@ -178,14 +194,58 @@ ou une projection non-linéaire). Détail et tableau : `docs/TURBOQUANT.md`
 §3quater. Le cosinus (0,984) étant déjà excellent, l'enjeu du KL de 0,055 se
 tranche en Phase 2 (llama.cpp), pas par plus de réglage linéaire.
 
+## 5bis. Perplexité réelle (Qwen2.5-1.5B via llama.cpp) — **NO-GO du critère F**
+
+La mesure que le §6 appelait de ses vœux a été faite. Une opération GGML custom
+insérée à la couture Q·Kᵀ de llama.cpp remplace les scores d'attention réels
+par les scores reconstruits depuis les tuiles SLHA compressées (« llama » dans
+les noms de branches = llama.cpp, le moteur ; le modèle est
+**Qwen2.5-1.5B-Instruct q8_0**). Perplexité WikiText-2, validation gelée à
+12 chunks, contrôles d'identité exacts, déterminisme prouvé (3 exécutions par
+configuration, écart-type 0,0).
+
+| Configuration (12 chunks) | PPL |
+|---|---:|
+| Pass-through (modèle inchangé) | 11,8644 |
+| Remplacement SLHA strict | **16,8855 (+42,3 %)** |
+
+**Verdict : NO-GO** au regard du critère F pré-enregistré (≤ 1 % HOT,
+`docs/SUCCESS_CRITERIA.md` §1 et §5). Aucune réduction mémoire n'est en jeu sur
+ce chemin (les tuiles vivent à côté du cache KV) et le débit régresse (≈ 3,1×
+plus lent, implémentation CPU de mesure).
+
+**Ce chiffre réfute l'extrapolation du proxy cosinus.** Le §1 conclut « le
+softmax absorbe l'erreur de score » sur la foi du cosinus de sortie 0,95–0,997
+hors-LLM ; en perplexité de bout en bout, l'erreur de score n'est **pas**
+absorbée. C'est le §4 en action une seconde fois : le proxy était nécessaire,
+pas suffisant.
+
+**Diagnostic causal (oracles de transplantation de rang — instruments de
+mesure, non déployables).** À classement de clés corrigé (Oracle A), la PPL
+retombe à 13,5756 : **65,92 %** du déficit vient du mauvais **classement des
+clés**, pas de la forme des scores. Corriger le seul top-1 atteint 79,93 % de
+ce bénéfice, le top-16 en atteint **98,42 %**. Injecter les valeurs exactes
+dans le mauvais ordre (Oracle B) **aggrave** la PPL (19,6719) : l'interaction
+classement × géométrie est forte, la décomposition n'est pas additive. Les
+oracles lisent la ligne Q·K exacte que le cache compressé existe pour éviter de
+calculer — **aucune fraction des 65,92 % n'est convertie en gain déployable à
+ce jour**.
+
+Source versionnée : `integration/llama.cpp/results/rank_transplant_oracle.json`
+(clés `validation_12chunk.*`), branche `research/llama-rank-transplant-oracle`
+(head `f0d3930`) ; protocole et débit dans le `integration/llama.cpp/README.md`
+de cette branche.
+
 ## 6. Prochaines étapes (hors périmètre sandbox)
 
 1. **Entraîner conjointement** `W_down`/`W_up` avec un vrai modèle (le §7.7 en
    établit le principe sur données synthétiques).
 2. **Validation matérielle réelle** : `perf stat` (cache misses) et perplexité
-   sur un modèle + jeu de données réels.
+   sur un modèle + jeu de données réels. *Perplexité : faite — NO-GO, §5bis.*
 3. Intégration dans une vraie pile d'inférence pour mesurer le gain **de bout en
-   bout** (et non au seul niveau kernel).
+   bout** (et non au seul niveau kernel). *Faite pour la qualité (llama.cpp,
+   §5bis) ; le gain mémoire/débit de bout en bout reste non mesuré — le chemin
+   actuel ne compresse pas physiquement le cache KV.*
 4. **Balayer les couches** (le §5 ne mesure que la couche 6 de GPT-2) : une
    commande par couche via `dump_activations.py --layer N`.
 
