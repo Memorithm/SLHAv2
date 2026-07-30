@@ -33,6 +33,10 @@ path = "src/lib.rs"
 # Dedicated self-audit CLI: `cargo run --bin slha-audit -- [--json|--pretty]`.
 # Reuses the in-crate `audit` + `json` modules (no extra deps).
 [[bin]]
+name = "slha-train-rank"
+path = "src/bin/slha_train_rank.rs"
+
+[[bin]]
 name = "slha-audit"
 path = "src/bin/slha_audit.rs"
 

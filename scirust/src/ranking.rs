@@ -366,14 +366,28 @@ pub fn row_weights(
         scale * l
     };
 
+    // Scale-invariant score reconstruction.
+    //
+    // The raw attention logits reach ~1e4 on this model, so an unnormalised
+    // squared error is ~1e8 and its gradient overflows f32 within a single step.
+    // It would also make the hybrid weights meaningless: a 1e8-scale L2 term
+    // dwarfs the pairwise and listwise terms, whose gradients are bounded by a
+    // sigmoid and a softmax respectively. The residual is therefore normalised
+    // by the row's baseline RMS, which is treated as a CONSTANT (it is a
+    // property of the labels, not of the trained scores, so it contributes no
+    // gradient). This preserves the objective's minimiser -- the scale factor is
+    // strictly positive -- while putting all three components on one scale.
     let add_l2 = |scale: f32, w: &mut Vec<f32>| -> f32 {
+        let nf = n as f32;
+        let ms = baseline.iter().map(|v| v * v).sum::<f32>() / nf;
+        let norm = ms.max(1e-12);
         let mut l = 0.0f32;
         for j in 0..n {
             let r = scores[j] - baseline[j];
-            l += r * r;
-            w[j] += scale * 2.0 * r;
+            l += r * r / norm;
+            w[j] += scale * 2.0 * r / (norm * nf);
         }
-        scale * l
+        scale * l / nf
     };
 
     match cfg.objective.clone() {
