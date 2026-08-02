@@ -513,3 +513,73 @@ fn per_row_normalisation_would_change_relative_row_weighting() {
          (shared {ratio_shared}, per-row {ratio_per_row})"
     );
 }
+
+// FidelityOptimizer tests ---------------------------------------------------
+#[test]
+fn test_topk_preservation_perfect_fidelity_at_full_k() {
+    use scirust::learned::{gen_keys, LearnedModel};
+    use scirust::ranking::FidelityOptimizer;
+
+    let d = 160;
+    let mut rng = Rng::new(42);
+    let mut query = vec![0.0f32; d];
+    rng.fill_gaussian(&mut query);
+
+    let keys = gen_keys(123, 10, d, 20, 0.9, 0.02);
+
+    // Fit a model
+    let model = LearnedModel::fit(&keys, d, 123, false);
+
+    // When k equals N (10), all scores must be preserved exactly
+    let exact_scores: Vec<f32> = keys
+        .iter()
+        .map(|k| scirust::metrics::dot(&query, k))
+        .collect();
+    let hybrid_scores =
+        FidelityOptimizer::compute_scores_with_topk_preservation(&query, &keys, &model, 10);
+
+    for i in 0..10 {
+        assert!((exact_scores[i] - hybrid_scores[i]).abs() < 1e-4);
+    }
+
+    let ppl_proxy =
+        FidelityOptimizer::calculate_perplexity_proxy(&hybrid_scores, &exact_scores, 1.0);
+    assert!(ppl_proxy.abs() < 1e-6);
+}
+
+#[test]
+fn test_topk_preservation_improves_perplexity_proxy() {
+    use scirust::learned::{gen_keys, LearnedModel};
+    use scirust::ranking::FidelityOptimizer;
+
+    let d = 160;
+    let mut rng = Rng::new(42);
+    let mut query = vec![0.0f32; d];
+    rng.fill_gaussian(&mut query);
+
+    let keys = gen_keys(123, 15, d, 20, 0.9, 0.02);
+
+    let model = LearnedModel::fit(&keys, d, 123, false);
+    let exact_scores: Vec<f32> = keys
+        .iter()
+        .map(|k| scirust::metrics::dot(&query, k))
+        .collect();
+
+    // 1. Fully quantized scores (without preservation)
+    let quantized_scores =
+        FidelityOptimizer::compute_scores_with_residual_correction(&query, &keys, &model);
+    let ppl_no_preservation =
+        FidelityOptimizer::calculate_perplexity_proxy(&quantized_scores, &exact_scores, 1.0);
+
+    // 2. Hybrid scores preserving Top-3 keys
+    let preserved_scores =
+        FidelityOptimizer::compute_scores_with_topk_preservation(&query, &keys, &model, 3);
+    let ppl_with_preservation =
+        FidelityOptimizer::calculate_perplexity_proxy(&preserved_scores, &exact_scores, 1.0);
+
+    // Top-K preservation should yield better or equal perplexity proxy (smaller KL)
+    assert!(
+        ppl_with_preservation <= ppl_no_preservation,
+        "top-k preservation should yield better or equal ppl than pure quantized: {ppl_with_preservation} vs {ppl_no_preservation}"
+    );
+}
