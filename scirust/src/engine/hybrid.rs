@@ -155,10 +155,16 @@ impl CpuSimdEngine {
 
     #[inline(always)]
     fn vector_dot_product(query: &[f32], quant_key: &[u8], scale: f32) -> f32 {
+        let dim = query.len();
+        // Memory safety guard: ensure dimension is valid, non-zero, and aligned
+        if dim == 0 || dim % 16 != 0 || quant_key.len() < dim / 2 {
+            return Self::vector_dot_product_scalar(query, quant_key, scale);
+        }
+
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx512f") {
-                // SAFETY: avx512f feature is explicitly checked before running the unsafe path.
+                // SAFETY: avx512f feature is explicitly checked and dimensions are guaranteed to be multiples of 16.
                 unsafe { Self::vector_dot_product_avx512(query, quant_key, scale) }
             } else {
                 Self::vector_dot_product_scalar(query, quant_key, scale)
@@ -167,7 +173,7 @@ impl CpuSimdEngine {
 
         #[cfg(target_arch = "aarch64")]
         {
-            // SAFETY: Neon features are statically guaranteed and safe to call on aarch64 targets.
+            // SAFETY: Neon features are statically guaranteed on aarch64 and dimensions are aligned.
             unsafe { Self::vector_dot_product_neon(query, quant_key, scale) }
         }
 
@@ -293,6 +299,14 @@ impl CpuSimdEngine {
 // ── CUDA engine integration conditionally compiled ────────────────────────
 
 #[cfg(feature = "cuda")]
+extern "C" {
+    fn cudaHostRegister(ptr: *mut std::ffi::c_void, size: usize, flags: u32) -> i32;
+}
+
+#[cfg(feature = "cuda")]
+const CUDA_HOST_REGISTER_DEVICEMAP: u32 = 0x02;
+
+#[cfg(feature = "cuda")]
 pub struct GpuEngine {
     device: std::sync::Arc<cudarc::driver::CudaDevice>,
 }
@@ -301,16 +315,14 @@ pub struct GpuEngine {
 impl GpuEngine {
     /// Initialize a new GpuEngine and load the PTX module.
     pub fn new() -> Result<Self, EngineError> {
-        let dev =
-            cudarc::driver::CudaDevice::new(0).map_err(|e| EngineError::GpuError(e.to_string()))?;
+        use cudarc::nvrtc::Ptx;
+
+        let dev = cudarc::driver::CudaDevice::new(0)
+            .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
 
         // Load the PTX kernel module
-        dev.load_ptx(
-            cudarc::driver::Ptx::from_src(FUSED_GEMM_PTX),
-            "fused_gemm",
-            &["stub"],
-        )
-        .map_err(|e| EngineError::GpuError(e.to_string()))?;
+        dev.load_ptx(Ptx::from_src(FUSED_GEMM_PTX), "fused_gemm", &["stub"])
+            .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
 
         Ok(Self { device: dev })
     }
@@ -319,16 +331,16 @@ impl GpuEngine {
     pub fn register_pinned_memory(&self, buffer: &mut [u8]) -> Result<(), EngineError> {
         // SAFETY: The pointer and length represent a valid mutable slice allocated by Rust.
         unsafe {
-            let res = cudarc::driver::sys::cudaHostRegister(
+            let res = cudaHostRegister(
                 buffer.as_mut_ptr() as *mut std::ffi::c_void,
                 buffer.len(),
-                cudarc::driver::sys::cudaHostRegisterFlags_CUDA_HOST_REGISTER_DEVICEMAP,
+                CUDA_HOST_REGISTER_DEVICEMAP,
             );
-            if res == cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+            if res == 0 {
                 Ok(())
             } else {
                 Err(EngineError::GpuError(format!(
-                    "cudaHostRegister failed with code {res:?}"
+                    "cudaHostRegister failed with code {res}"
                 )))
             }
         }
@@ -336,6 +348,8 @@ impl GpuEngine {
 
     /// Launch the PTX stub/gemm kernel on the device.
     pub fn launch_kernel(&self, param: u64) -> Result<(), EngineError> {
+        use cudarc::driver::LaunchAsync;
+
         let func = self
             .device
             .get_func("fused_gemm", "stub")
@@ -350,7 +364,7 @@ impl GpuEngine {
         // SAFETY: The kernel launch parameters match the PTX stub parameters.
         unsafe {
             func.launch(cfg, (param,))
-                .map_err(|e| EngineError::GpuError(e.to_string()))?;
+                .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
         }
 
         Ok(())
