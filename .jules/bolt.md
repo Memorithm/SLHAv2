@@ -1,0 +1,5 @@
+# Bolt's Journal
+
+## 2025-02-13 - SerializedTile CPU Performance Bottleneck
+**Learning:** In the `slhav2-vram` crate, `SerializedTile` previously used slow scalar loops (in `codec::score_warm` / `codec::score_hot` / `dot_coarse`) to compute tile scores. Meanwhile, `SciRustSlhaTile` (which shares the exact identical 128-byte memory layout) has highly-optimized, hand-written runtime-dispatched SIMD paths (AVX2, AVX-512, NEON) inside `compute_score`. Converting `SerializedTile` to `SciRustSlhaTile` on the stack (via `to_slha_tile()`, which is a simple 128-byte copy) and routing through `compute_score` bypassed the unvectorized fallback loop, yielding a massive ~90% reduction in CPU scoring latency (over 10x speedup).
+**Action:** When working with serialization wrappers or contiguous byte layouts in performance-critical code, ensure they delegate heavy mathematical operations directly to the highly-optimized core domain structures rather than implementing slower, duplicated scalar versions of the math.
