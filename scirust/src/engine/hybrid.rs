@@ -142,12 +142,7 @@ impl CpuSimdEngine {
     /// - Quantized inputs are treated as paired 4-bit INT4 (packed in `u8` bytes).
     /// - Scale factor scales the dequantized values.
     /// - Dimension must be a multiple of the SIMD register width.
-    pub fn dequant_and_fma(
-        query: &[f32],
-        quant_keys: &[u8],
-        scale: f32,
-        out_scores: &mut [f32],
-    ) {
+    pub fn dequant_and_fma(query: &[f32], quant_keys: &[u8], scale: f32, out_scores: &mut [f32]) {
         let dim = query.len();
         let num_keys = quant_keys.len() / (dim / 2);
 
@@ -306,8 +301,8 @@ pub struct GpuEngine {
 impl GpuEngine {
     /// Initialize a new GpuEngine and load the PTX module.
     pub fn new() -> Result<Self, EngineError> {
-        let dev = cudarc::driver::CudaDevice::new(0)
-            .map_err(|e| EngineError::GpuError(e.to_string()))?;
+        let dev =
+            cudarc::driver::CudaDevice::new(0).map_err(|e| EngineError::GpuError(e.to_string()))?;
 
         // Load the PTX kernel module
         dev.load_ptx(
@@ -378,12 +373,16 @@ impl GpuEngine {
 
     /// Pinned host registration stub.
     pub fn register_pinned_memory(&self, _buffer: &mut [u8]) -> Result<(), EngineError> {
-        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
+        Err(EngineError::GpuError(
+            "CUDA support is disabled".to_string(),
+        ))
     }
 
     /// Launch kernel stub.
     pub fn launch_kernel(&self, _param: u64) -> Result<(), EngineError> {
-        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
+        Err(EngineError::GpuError(
+            "CUDA support is disabled".to_string(),
+        ))
     }
 }
 

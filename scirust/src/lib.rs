@@ -27,8 +27,8 @@
 pub mod adapter;
 pub mod attention;
 pub mod audit;
-pub mod engine;
 pub mod ccos;
+pub mod engine;
 pub mod eventlog;
 pub mod exec_binding;
 pub mod incoherence;

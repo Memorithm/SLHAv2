@@ -607,11 +607,8 @@ impl FidelityOptimizer {
 
         // 2. Identify top-k indices based on true scores
         true_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let topk_indices: std::collections::HashSet<usize> = true_scores
-            .iter()
-            .take(k)
-            .map(|&(idx, _)| idx)
-            .collect();
+        let topk_indices: std::collections::HashSet<usize> =
+            true_scores.iter().take(k).map(|&(idx, _)| idx).collect();
 
         // 3. Compute hybrid scores
         let qc = model.query_coarse(query);
@@ -659,11 +656,7 @@ impl FidelityOptimizer {
     /// Measures the KL-divergence / cross-entropy of the evaluated attention distribution (from `scores`)
     /// against the reference/target attention distribution (from `target_scores`).
     /// A lower score indicates higher fidelity and lower perplexity degradation.
-    pub fn calculate_perplexity_proxy(
-        scores: &[f32],
-        target_scores: &[f32],
-        scale: f32,
-    ) -> f32 {
+    pub fn calculate_perplexity_proxy(scores: &[f32], target_scores: &[f32], scale: f32) -> f32 {
         let n = scores.len();
         if n == 0 {
             return 0.0;
