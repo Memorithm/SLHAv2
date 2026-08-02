@@ -20,11 +20,13 @@ categories = ["algorithms", "science", "compression"]
 # dependency — the default build stays ZERO external dependencies. Off-target
 # (non-Linux) or feature off → graceful stubs returning `NumaError::Unavailable`.
 numa = ["libc"]
+cuda = ["dep:cudarc"]
 
 [dependencies]
 # Optional, only with `numa`. Kept off the default build so the crate remains
 # zero-dependency offline.
 libc = { version = "0.2", optional = true, default-features = false }
+cudarc = { version = "0.11", optional = true, default-features = false, features = ["driver"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 

@@ -574,3 +574,114 @@ pub fn train_ranking(rows: &[Row<'_>], init_p: Vec<f32>, cfg: &TrainConfig) -> (
     }
     (p, hist)
 }
+
+/// Dynamic Top-K preservation and residual correction algorithms for hybrid attention.
+///
+/// Implements Pure Rust algorithms to optimize and restore attention fidelity.
+/// Offers a clear API to recalculate attention perplexity before and after dequantization/correction.
+pub struct FidelityOptimizer;
+
+impl FidelityOptimizer {
+    /// Computes attention scores with dynamic Top-K preservation.
+    ///
+    /// Identifies the top-`k` exact (highest float) scores, and preserves them exactly,
+    /// while using the compressed SLHA scores for all other keys in the sequence.
+    /// This hybrid attention path guarantees that the most critical keys suffer 0% quantization loss.
+    pub fn compute_scores_with_topk_preservation(
+        query: &[f32],
+        keys: &[Vec<f32>],
+        model: &crate::learned::LearnedModel,
+        k: usize,
+    ) -> Vec<f32> {
+        let n = keys.len();
+        if n == 0 {
+            return Vec::new();
+        }
+
+        // 1. Calculate true floating-point scores
+        let mut true_scores: Vec<(usize, f32)> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (i, crate::metrics::dot(query, key)))
+            .collect();
+
+        // 2. Identify top-k indices based on true scores
+        true_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let topk_indices: std::collections::HashSet<usize> = true_scores
+            .iter()
+            .take(k)
+            .map(|&(idx, _)| idx)
+            .collect();
+
+        // 3. Compute hybrid scores
+        let qc = model.query_coarse(query);
+        let qs = model.sign_bits(query);
+        let mut final_scores = vec![0.0f32; n];
+
+        for i in 0..n {
+            if topk_indices.contains(&i) {
+                // Preserve exact floating point score
+                final_scores[i] = crate::metrics::dot(query, &keys[i]);
+            } else {
+                // Use compressed/quantized SLHA score
+                let tile = model.encode(&keys[i], i as u32, false);
+                final_scores[i] = tile.compute_score(&qc, &qs);
+            }
+        }
+
+        final_scores
+    }
+
+    /// Computes attention scores using SLHA quantized latent and a residual correction term.
+    ///
+    /// Combines the coarse (quantized) score with the 1-bit sign-LSH residual correction
+    /// weighted by the dynamic lambda factor.
+    pub fn compute_scores_with_residual_correction(
+        query: &[f32],
+        keys: &[Vec<f32>],
+        model: &crate::learned::LearnedModel,
+    ) -> Vec<f32> {
+        let n = keys.len();
+        let qc = model.query_coarse(query);
+        let qs = model.sign_bits(query);
+        let mut final_scores = vec![0.0f32; n];
+
+        for i in 0..n {
+            let tile = model.encode(&keys[i], i as u32, false);
+            final_scores[i] = tile.compute_score(&qc, &qs);
+        }
+
+        final_scores
+    }
+
+    /// Computes a perplexity/cross-entropy proxy score of the attention distribution.
+    ///
+    /// Measures the KL-divergence / cross-entropy of the evaluated attention distribution (from `scores`)
+    /// against the reference/target attention distribution (from `target_scores`).
+    /// A lower score indicates higher fidelity and lower perplexity degradation.
+    pub fn calculate_perplexity_proxy(
+        scores: &[f32],
+        target_scores: &[f32],
+        scale: f32,
+    ) -> f32 {
+        let n = scores.len();
+        if n == 0 {
+            return 0.0;
+        }
+
+        let mut p_est = vec![0.0f32; n];
+        let mut p_true = vec![0.0f32; n];
+
+        softmax_into(scores, scale, &mut p_est);
+        softmax_into(target_scores, scale, &mut p_true);
+
+        let mut kl_divergence = 0.0f32;
+        for i in 0..n {
+            let pt = p_true[i].max(1e-30);
+            let pe = p_est[i].max(1e-30);
+            kl_divergence += pt * (pt / pe).ln();
+        }
+
+        kl_divergence
+    }
+}

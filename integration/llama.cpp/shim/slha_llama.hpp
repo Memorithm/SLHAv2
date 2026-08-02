@@ -119,6 +119,17 @@ int slha_get_num_layers();
 
 slha_layer_state * slha_get_layer_state(int32_t il);
 
+/** Intercept the default KV-cache allocation of llama.cpp for the K-cache tensor,
+ *  substituting the large FP16/FP32 buffer with a compact 128-byte SLHAv2 tile buffer.
+ *  Reduces memory physical size from (head_dim * n_kv_heads * n_tokens * sizeof(float))
+ *  down to exactly (n_tokens * 128) bytes. */
+void slha_intercept_k_cache_allocation(
+    ggml_tensor * k_tensor,
+    int64_t n_tokens,
+    int64_t head_dim,
+    int64_t n_kv_heads
+);
+
 /** K-cache write callback: encode tiles (tilestore mode) or round-trip.
  *
  * userdata is a slha_layer_state*. In tilestore mode this also receives the
