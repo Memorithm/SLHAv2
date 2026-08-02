@@ -102,25 +102,16 @@ impl SerializedTile {
     }
 
     pub fn score(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
-        let latent = self.latent();
-        let scale = self.scale();
-        let gscales = self.group_scales();
-        let flags = self.flags();
-        if self.is_warm() {
-            codec::score_warm(q_coarse, latent, scale, gscales, flags)
-        } else {
-            let residual = self.residual();
-            codec::score_hot(
-                q_coarse,
-                q_sign,
-                latent,
-                &residual,
-                scale,
-                self.dynamic_lambda(),
-                gscales,
-                flags,
-            )
-        }
+        // OPTIMIZATION: Convert to the identical SciRustSlhaTile representation to leverage
+        // highly-optimized hardware-accelerated CPU SIMD execution paths (AVX2, AVX-512, NEON)
+        // instead of executing the slow scalar fallback loop.
+        let q_coarse_arr: &[f32; codec::D_C] = q_coarse
+            .try_into()
+            .expect("q_coarse slice must be exactly D_C elements");
+        let q_sign_arr: &[u64; codec::RESIDUAL_WORDS] = q_sign
+            .try_into()
+            .expect("q_sign slice must be exactly RESIDUAL_WORDS elements");
+        self.to_slha_tile().compute_score(q_coarse_arr, q_sign_arr)
     }
 
     pub fn to_slha_tile(&self) -> SciRustSlhaTile {

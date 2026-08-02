@@ -157,7 +157,7 @@ impl CpuSimdEngine {
     fn vector_dot_product(query: &[f32], quant_key: &[u8], scale: f32) -> f32 {
         let dim = query.len();
         // Memory safety guard: ensure dimension is valid, non-zero, and aligned
-        if dim == 0 || dim % 16 != 0 || quant_key.len() < dim / 2 {
+        if dim == 0 || !dim.is_multiple_of(16) || quant_key.len() < dim / 2 {
             return Self::vector_dot_product_scalar(query, quant_key, scale);
         }
 
