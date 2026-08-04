@@ -1,0 +1,57 @@
+diff --git a/scirust/src/attention/slha_v2.rs b/scirust/src/attention/slha_v2.rs
+index cfa9f4d..579a203 100644
+--- a/scirust/src/attention/slha_v2.rs
++++ b/scirust/src/attention/slha_v2.rs
+@@ -2882,48 +2882,52 @@ mod tests {
+             if !std::is_x86_feature_detected!("avx2") {
+                 eprintln!("avx2 unavailable — skipping equivalence check");
+                 return;
+             }
+             use crate::scenario::{build_tile, generate, Projection};
+             let proj = Projection::new(9);
+             let (q, toks) = generate(123, 64, 0.4);
+             let q_sign = proj.sign_bits(&q);
+             for (i, t) in toks.iter().enumerate() {
+                 // Alternate HOT / WARM to cover both branches.
+                 let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
+                 let s = tile.compute_score_scalar(&q, &q_sign);
++                // SAFETY: guarded by the is_x86_feature_detected!("avx2") early
++                // return above; slices are the fixed D_C/RESIDUAL_WORDS sizes.
+                 let a = unsafe { tile.compute_score_avx2(&q, &q_sign) };
+                 assert!(
+                     (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                     "tile {i}: scalar {s} vs avx2 {a}"
+                 );
+             }
+         }
+     }
+ 
+     #[test]
+     fn avx512_path_matches_scalar() {
+         #[cfg(target_arch = "x86_64")]
+         {
+             if !std::is_x86_feature_detected!("avx512f") {
+                 eprintln!("avx512f unavailable — skipping equivalence check");
+                 return;
+             }
+             use crate::scenario::{build_tile, generate, Projection};
+             let proj = Projection::new(9);
+             let (q, toks) = generate(123, 64, 0.4);
+             let q_sign = proj.sign_bits(&q);
+             for (i, t) in toks.iter().enumerate() {
+                 let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
+                 let s = tile.compute_score_scalar(&q, &q_sign);
++                // SAFETY: guarded by the is_x86_feature_detected!("avx512f")
++                // early return above; slices are the fixed expected sizes.
+                 let a = unsafe { tile.compute_score_avx512(&q, &q_sign) };
+                 assert!(
+                     (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
+                     "tile {i}: scalar {s} vs avx512 {a}"
+                 );
+             }
+         }
+     }
+ 
+     #[test]
+     #[cfg(target_arch = "aarch64")]
+     fn neon_path_matches_scalar() {
