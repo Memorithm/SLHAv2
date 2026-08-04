@@ -99,9 +99,8 @@ fn ffi_status(f: impl FnOnce() -> Result<(), FfiError>) -> i32 {
     }
 }
 
-#[allow(clippy::manual_is_multiple_of)]
 fn pointer_is_aligned<T>(pointer: *const T) -> bool {
-    (pointer as usize) % align_of::<T>() == 0
+    (pointer as usize).is_multiple_of(align_of::<T>())
 }
 
 /// Opaque process-wide handle for the currently stateless SLHA context.
@@ -122,6 +121,49 @@ pub struct SlhaModel {
     inner: LearnedModel,
 }
 
+/// Registry of live model handles (the `Box::into_raw` pointers handed to C).
+///
+/// This is the trust anchor for the C ABI: a pointer is only ever
+/// dereferenced if it is a **known, registered** handle. A forged/aligned
+/// garbage pointer is rejected by the registry lookup *before* any read,
+/// which fixes the old deref-then-check-magic ordering (an attacker-controlled
+/// address could be read/written/`Box::from_raw`-freed before the magic check
+/// ran). `slha_weights_release` removes the handle *before* reconstructing
+/// the `Box`, so a double release fails with `SLHA_ERR_INVALID_HANDLE` instead
+/// of a double-free.
+use std::sync::OnceLock;
+use std::sync::RwLock;
+fn model_registry() -> &'static RwLock<std::collections::HashSet<usize>> {
+    static REGISTRY: OnceLock<RwLock<std::collections::HashSet<usize>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| RwLock::new(std::collections::HashSet::new()))
+}
+
+fn register_model(pointer: *mut SlhaModel) {
+    if let Ok(mut registry) = model_registry().write() {
+        registry.insert(pointer as usize);
+    }
+}
+
+fn unregister_model(pointer: *mut SlhaModel) -> bool {
+    let mut registry = match model_registry().write() {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    registry.remove(&(pointer as usize))
+}
+
+fn is_registered(pointer: usize) -> bool {
+    match model_registry().read() {
+        Ok(r) => r.contains(&pointer),
+        Err(_) => false,
+    }
+}
+
+/// Upper bound on `n_tiles` in [`slha_score_tiles`]: 1M tiles ≈ 128 MB, far
+/// above any real batch. Rejects absurd caller-supplied counts instead of
+/// letting them drive an out-of-bounds read/write of arbitrary length.
+pub const MAX_TILES: usize = 1 << 20;
+
 unsafe fn model_ref<'a>(model: *const SlhaModel) -> Result<&'a SlhaModel, FfiError> {
     if model.is_null() {
         return Err(ffi_error(SLHA_ERR_NULL, "model handle is NULL"));
@@ -134,9 +176,21 @@ unsafe fn model_ref<'a>(model: *const SlhaModel) -> Result<&'a SlhaModel, FfiErr
         ));
     }
 
-    // SAFETY: the caller promises a live handle created by slha_weights_load.
+    // Registry lookup BEFORE any dereference: only a handle returned by
+    // `slha_weights_load` (and not yet released) is ever read.
+    if !is_registered(model as usize) {
+        return Err(ffi_error(
+            SLHA_ERR_INVALID_HANDLE,
+            "model handle is not a live SLHA handle",
+        ));
+    }
+
+    // SAFETY: the registry guarantees this pointer was produced by
+    // `Box::into_raw` in `slha_weights_load` and has not been released.
     let model = unsafe { &*model };
 
+    // Belt-and-suspenders: the magic still guards against a corrupt handle
+    // (e.g. a use-after-realloc of a stale but re-registered pointer).
     if model.magic != MODEL_MAGIC {
         return Err(ffi_error(
             SLHA_ERR_INVALID_HANDLE,
@@ -419,10 +473,12 @@ pub unsafe extern "C" fn slha_weights_load(path: *const c_char) -> *mut SlhaMode
 
         let inner = weights::load(path).map_err(|error| ffi_error(SLHA_ERR_IO, error))?;
 
-        Ok(Box::into_raw(Box::new(SlhaModel {
+        let handle = Box::into_raw(Box::new(SlhaModel {
             magic: MODEL_MAGIC,
             inner,
-        })))
+        }));
+        register_model(handle);
+        Ok(handle)
     }));
 
     match result {
@@ -542,6 +598,18 @@ pub unsafe extern "C" fn slha_score_tiles(
             return Err(ffi_error(
                 SLHA_ERR_NULL,
                 "slha_score_tiles received a NULL pointer",
+            ));
+        }
+
+        // Bound the caller-supplied tile count: an absurd `n_tiles` would
+        // otherwise drive an out-of-bounds read of `tiles` and write of
+        // `scores_out` of arbitrary length.
+        if n_tiles > MAX_TILES {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                format!(
+                    "slha_score_tiles: n_tiles={n_tiles} exceeds the {MAX_TILES}-tile safety bound"
+                ),
             ));
         }
 
@@ -763,14 +831,25 @@ pub unsafe extern "C" fn slha_weights_release(model: *mut SlhaModel) -> i32 {
     }
 
     ffi_status(|| {
-        // SAFETY: validate the handle before ownership is reconstructed.
-        let _validated_magic = unsafe { model_ref(model)?.magic };
+        // Validate the handle via the registry (deref happens only after the
+        // registry confirms the pointer is a live, owned handle).
+        unsafe {
+            model_ref(model)?;
+        }
 
-        // SAFETY: the pointer is aligned and points to a live SlhaModel.
-        unsafe { (*model).magic = 0 };
+        // Remove from the registry BEFORE reconstructing the Box: a second
+        // release of the same pointer now fails the registry lookup instead of
+        // double-freeing.
+        if !unregister_model(model) {
+            return Err(ffi_error(
+                SLHA_ERR_INVALID_HANDLE,
+                "model handle is not registered (already released?)",
+            ));
+        }
 
-        // SAFETY: the pointer was allocated by Box::into_raw and has not been
-        // previously released.
+        // The registry removal guarantees the pointer is an unreleased
+        // `Box::into_raw` handle, so `Box::from_raw` is sound. Wrapped in
+        // catch_unwind (via ffi_status) for defense-in-depth.
         unsafe { drop(Box::from_raw(model)) };
         Ok(())
     })
@@ -1986,5 +2065,56 @@ mod tests {
         for thread in threads {
             thread.join().expect("parallel temp model thread panicked");
         }
+    }
+
+    #[test]
+    fn double_release_fails_with_invalid_handle() {
+        let temp = TempModel::new(256, 0x3000);
+        let handle = temp.handle();
+        // Forget the RAII guard: the manual releases below are the only ones
+        // that should touch this handle.
+        std::mem::forget(temp);
+        // First release succeeds.
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        // The registry has removed it; a second release must fail cleanly
+        // instead of double-freeing.
+        assert_eq!(
+            unsafe { slha_weights_release(handle) },
+            SLHA_ERR_INVALID_HANDLE
+        );
+        // The compatibility wrapper must not crash on the stale handle either.
+        unsafe { slha_weights_free(handle) };
+    }
+
+    #[test]
+    fn forged_handle_is_rejected_before_deref() {
+        // A pointer that is aligned but NOT a registered handle must be
+        // rejected by the registry lookup before any read — no crash, no
+        // arbitrary-address read.
+        let forged = SlhaModel {
+            magic: MODEL_MAGIC,
+            inner: temp_model(256, 0x3001),
+        };
+        let rc = unsafe { slha_model_dim(&forged) };
+        assert_eq!(rc, 0, "forged handle must be rejected");
+        assert!(!last_error().is_empty(), "rejection must set the error");
+    }
+
+    #[test]
+    fn absurd_tile_count_is_rejected() {
+        let temp = TempModel::new(256, 0x3002);
+        let _handle = temp.handle();
+        let tile = zero_tile();
+        let qc = [0.0f32; D_C];
+        let qs = [0u64; RESIDUAL_WORDS];
+        let mut score = 0.0f32;
+        let rc =
+            unsafe { slha_score_tiles(&tile, MAX_TILES + 1, qc.as_ptr(), qs.as_ptr(), &mut score) };
+        assert_eq!(rc, SLHA_ERR_DIMENSION, "oversized n_tiles must be rejected");
+    }
+
+    fn temp_model(d: usize, seed: u64) -> LearnedModel {
+        let keys = gen_keys(seed, 1, d, d, 0.9, 0.02);
+        LearnedModel::fit_with(&keys, d, seed, false, false)
     }
 }

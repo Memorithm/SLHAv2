@@ -2,7 +2,10 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 pub use scirust::attention::slha_v2::{
-    FLAG_HOT, FLAG_NF4, FLAG_WARM, GROUP_DIM, NF4_CODEBOOK, N_GROUPS,
+    FLAG_HOT, FLAG_MIX3, FLAG_MIXED, FLAG_NF4, FLAG_TQ3, FLAG_TQ3_NOCORR, FLAG_WARM, GROUP_DIM,
+    MIX3_CODES_OFF, MIX3_CODE_BYTES, MIX3_CORR_BYTES, MIX3_CORR_OFF, MIXED_DIMS, MIXED_HI_DIMS,
+    MIXED_LO_DIMS, MIXED_LO_GROUPS, NF4_CODEBOOK, N_GROUPS, TQ3_CODE_BYTES, TQ3_CORRECTION,
+    TQ3_CORR_BYTES, TQ3_HALF_RANGE,
 };
 pub use scirust::{D_C, D_S, LATENT_BYTES, RESIDUAL_WORDS};
 
@@ -152,7 +155,67 @@ pub fn dot_coarse(
     sum
 }
 
+/// Error for a tile whose flag combination selects no supported codec.
+///
+/// The vram codecs implement uniform INT4, NF4, MIXED, TQ3 and MIX3 — the
+/// full scirust set. Any other flag combination (e.g. two mutually exclusive
+/// codec flags set together) is rejected instead of being silently decoded
+/// as INT4 (the old behaviour, which produced wrong scores for unsupported
+/// combos).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecError {
+    pub flags: u16,
+}
+
+impl core::fmt::Display for CodecError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "unsupported tile codec flag combination {:#06x} (supported: INT4/NF4/MIXED/TQ3/MIX3)",
+            self.flags
+        )
+    }
+}
+
+impl std::error::Error for CodecError {}
+
+/// Validate a tile's flag combination selects exactly one supported codec.
+///
+/// Returns `Ok(())` for a valid INT4/NF4/MIXED/TQ3/MIX3 tile (HOT or WARM,
+/// with or without `FLAG_TQ3_NOCORR`), else `Err(CodecError)`.
+pub fn validate_codec(flags: u16) -> Result<(), CodecError> {
+    let codecs = [
+        (FLAG_MIXED, "MIXED"),
+        (FLAG_TQ3, "TQ3"),
+        (FLAG_MIX3, "MIX3"),
+        (FLAG_NF4, "NF4"),
+    ];
+    let selected = codecs
+        .iter()
+        .filter(|(mask, _)| has_flag(flags, *mask))
+        .count();
+    if selected > 1 {
+        return Err(CodecError { flags });
+    }
+    // `FLAG_TQ3_NOCORR` is only meaningful with TQ3 or MIX3.
+    if has_flag(flags, FLAG_TQ3_NOCORR)
+        && !(has_flag(flags, FLAG_TQ3) || has_flag(flags, FLAG_MIX3))
+    {
+        return Err(CodecError { flags });
+    }
+    Ok(())
+}
+
 pub fn dequant_at(latent: &[u8], d: usize, scale: f32, group_scales: &[u8], flags: u16) -> f32 {
+    if has_flag(flags, FLAG_MIXED) {
+        return dequant_mixed(latent, d, scale, group_scales);
+    }
+    if has_flag(flags, FLAG_TQ3) {
+        return dequant_tq3(latent, d, scale, group_scales, flags);
+    }
+    if has_flag(flags, FLAG_MIX3) {
+        return dequant_mix3(latent, d, scale, group_scales, flags);
+    }
     if has_flag(flags, FLAG_NF4) {
         dequant_nf4(latent, d, scale, group_scales)
     } else {
@@ -174,6 +237,84 @@ fn dequant_nf4(latent: &[u8], d: usize, scale: f32, group_scales: &[u8]) -> f32 
     let level = NF4_CODEBOOK[nib as usize];
     let gs = effective_scale(scale, group_scales[d / GROUP_DIM]);
     level * gs
+}
+
+/// Mixed-precision layout: dims `0..MIXED_HI_DIMS` are signed bytes
+/// (zero-point 128) scaled by `group_scales[0]`; dims
+/// `MIXED_HI_DIMS..MIXED_DIMS` are nibbles in `GROUP_DIM`-wide groups scaled
+/// by `group_scales[1..]`; the dropped tail decodes to 0. Mirrors
+/// `scirust`'s `dequant_at_mixed`.
+fn dequant_mixed(latent: &[u8], d: usize, scale: f32, group_scales: &[u8]) -> f32 {
+    if d < MIXED_HI_DIMS {
+        let level = latent[d] as i32 - 128;
+        level as f32 * (scale * group_scales[0] as f32 / 255.0)
+    } else if d < MIXED_DIMS {
+        let ld = d - MIXED_HI_DIMS;
+        let byte = latent[MIXED_HI_DIMS + (ld >> 1)];
+        let nib = ext_nibble(byte, (ld & 1) != 0);
+        let g = 1 + ld / GROUP_DIM;
+        (nib as i32 - 8) as f32 * (scale * group_scales[g] as f32 / 255.0)
+    } else {
+        0.0
+    }
+}
+
+/// TQ3 layout: dim `d`'s 3-bit code is bits `[3d, 3d+3)` of the code plane;
+/// its correction sign is bit `d` of the correction plane. Decoded level =
+/// `(code − 3.5) ± TQ3_CORRECTION`, times the dim's group scale. With
+/// `FLAG_TQ3_NOCORR` the correction plane is ignored. Mirrors `scirust`'s
+/// `dequant_at_tq3`.
+fn dequant_tq3(latent: &[u8], d: usize, scale: f32, group_scales: &[u8], flags: u16) -> f32 {
+    let bit = 3 * d;
+    let byte = bit >> 3;
+    let shift = bit & 7;
+    let lo = u16::from(latent[byte]);
+    let hi = if byte + 1 < TQ3_CODE_BYTES {
+        u16::from(latent[byte + 1]) << 8
+    } else {
+        0
+    };
+    let code = ((lo | hi) >> shift) & 0x7;
+    let mut level = code as f32 - TQ3_HALF_RANGE;
+    if !has_flag(flags, FLAG_TQ3_NOCORR) {
+        let corr = (latent[TQ3_CODE_BYTES + (d >> 3)] >> (d & 7)) & 1;
+        let sign = if corr == 1 { 1.0 } else { -1.0 };
+        level += sign * TQ3_CORRECTION;
+    }
+    level * effective_scale(scale, group_scales[d / GROUP_DIM])
+}
+
+/// MIX3 layout: dims `0..MIXED_HI_DIMS` decode like the mixed head; dims
+/// `MIXED_HI_DIMS..MIXED_DIMS` decode like a TQ3 body at
+/// [`MIX3_CODES_OFF`]/[`MIX3_CORR_OFF`]; the tail decodes to 0. Mirrors
+/// `scirust`'s `dequant_at_mix3`.
+fn dequant_mix3(latent: &[u8], d: usize, scale: f32, group_scales: &[u8], flags: u16) -> f32 {
+    if d < MIXED_HI_DIMS {
+        let level = latent[d] as i32 - 128;
+        return level as f32 * (scale * group_scales[0] as f32 / 255.0);
+    }
+    if d >= MIXED_DIMS {
+        return 0.0;
+    }
+    let ld = d - MIXED_HI_DIMS;
+    let bit = 3 * ld;
+    let byte = MIX3_CODES_OFF + (bit >> 3);
+    let shift = bit & 7;
+    let lo = u16::from(latent[byte]);
+    let hi = if byte + 1 < MIX3_CORR_OFF {
+        u16::from(latent[byte + 1]) << 8
+    } else {
+        0
+    };
+    let code = ((lo | hi) >> shift) & 0x7;
+    let mut level = code as f32 - TQ3_HALF_RANGE;
+    if !has_flag(flags, FLAG_TQ3_NOCORR) {
+        let corr = (latent[MIX3_CORR_OFF + (ld >> 3)] >> (ld & 7)) & 1;
+        let sign = if corr == 1 { 1.0 } else { -1.0 };
+        level += sign * TQ3_CORRECTION;
+    }
+    let g = 1 + ld / GROUP_DIM;
+    level * (scale * group_scales[g] as f32 / 255.0)
 }
 
 #[cfg(test)]

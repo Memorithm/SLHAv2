@@ -31,6 +31,14 @@ fn validate_finite(values: &[f32], name: &str) -> PyResult<()> {
 }
 
 fn validate_tile(tile: &SciRustSlhaTile) -> PyResult<()> {
+    // Defense-in-depth: validation must never let a Rust panic cross the
+    // PyO3 boundary. The checks below are pure today, but wrapping the whole
+    // body guarantees a future check that panics becomes a RuntimeError.
+    catch_unwind(AssertUnwindSafe(|| validate_tile_inner(tile)))
+        .map_err(|_| runtime_error("panic caught while validating tile"))?
+}
+
+fn validate_tile_inner(tile: &SciRustSlhaTile) -> PyResult<()> {
     let unknown = tile.flags & !KNOWN_FLAGS;
 
     if unknown != 0 {

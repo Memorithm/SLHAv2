@@ -265,7 +265,8 @@ pub fn from_bytes(bytes: &[u8]) -> Result<LearnedModel, String> {
         projection.push(value);
     }
 
-    Ok(LearnedModel::from_projection_with(projection, d, seed, rht))
+    LearnedModel::try_from_projection_with(projection, d, seed, rht)
+        .map_err(|e| format!("weights: {e}"))
 }
 
 /// Write a fitted projection to `path`.
@@ -278,8 +279,31 @@ pub fn save(path: &str, model: &LearnedModel, seed: u64, rht: bool) -> io::Resul
     std::fs::write(path, bytes)
 }
 
+/// Maximum accepted `.slhw` file size (256 MiB). A d=1M projection is 512 MB,
+/// so this cap is above any sane trained model but well below OOM territory —
+/// it rejects hostile or corrupt files before they are read into memory.
+const MAX_SLHW_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Load and validate a projection from `path`.
+///
+/// Rejects non-regular files (FIFOs, device nodes — which would otherwise
+/// block the read forever) and files larger than the 256 MiB safety cap
+/// before reading, so an untrusted path cannot cause an unbounded allocation.
 pub fn load(path: &str) -> Result<LearnedModel, String> {
+    let meta =
+        std::fs::metadata(path).map_err(|error| format!("weights: cannot stat {path}: {error}"))?;
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "weights: {path} is not a regular file (refusing to read a FIFO/device)"
+        ));
+    }
+    if meta.len() > MAX_SLHW_BYTES {
+        return Err(format!(
+            "weights: {path} is {} bytes, above the {MAX_SLHW_BYTES}-byte safety cap",
+            meta.len()
+        ));
+    }
+
     let bytes =
         std::fs::read(path).map_err(|error| format!("weights: cannot read {path}: {error}"))?;
 

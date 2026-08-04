@@ -346,3 +346,239 @@ fn test_slha_tile_to_serialized_parity() {
         "SciRustSlhaTile→SerializedTile parity: {got} vs {expected}, diff {diff}"
     );
 }
+
+/// Signature of a scirust per-codec quantizer.
+type QuantizeFn = fn(
+    &[f32; scirust::D_C],
+) -> (
+    [u8; scirust::LATENT_BYTES],
+    f32,
+    [u8; scirust::attention::slha_v2::N_GROUPS],
+);
+
+/// Build a real codec tile through scirust's quantizer, then verify the vram
+/// serialized decode matches the scirust scalar score exactly.
+fn codec_tile_parity(quantize: QuantizeFn, codec_flag: u16, warm: bool, nocorr: bool) {
+    use scirust::attention::slha_v2::{FLAG_TQ3_NOCORR, FLAG_WARM, LATENT_BYTES};
+    // A steep, GPT-2-like latent spectrum — the motivating input for the
+    // mixed/TQ3/MIX3 codecs.
+    let mut v = [0.0f32; scirust::D_C];
+    let mut rng = scirust::rng::Rng::new(0xC0DEC);
+    for (d, x) in v.iter_mut().enumerate() {
+        let amp = 37.0 * ((d + 1) as f32).powf(-0.9);
+        *x = amp * rng.next_gaussian();
+    }
+
+    let (packed, global, gs) = quantize(&v);
+    let mut flags = codec_flag;
+    if warm {
+        flags |= FLAG_WARM;
+    }
+    if nocorr {
+        flags |= FLAG_TQ3_NOCORR;
+    }
+
+    // Reference: scirust scalar score on the same tile.
+    let residual = [0xDEAD_BEEF_CAFE_FACEu64, 0x1234, 0xCAFE, 0xFACE];
+    let mut ref_t = SciRustSlhaTile {
+        latent_kv: packed,
+        residual_bitmap: residual,
+        scale: global,
+        dynamic_lambda: 0.37,
+        residual_sigma: 0.0,
+        token_id: 0,
+        position: 0,
+        head_id: 0,
+        flags,
+        group_scales: gs,
+    };
+    if nocorr {
+        // CCOS masks the plane when paging it out; emulate that too.
+        let n = ref_t.separable_corr_bytes();
+        ref_t.latent_kv[LATENT_BYTES - n..].fill(0);
+    }
+    let q = q_coarse_all(0.01);
+    let qs = q_sign_all(0xDEAD_BEEF_CAFE_FACE);
+    let expected = ref_t.compute_score_scalar(&q, &qs);
+
+    // Serialized round-trip.
+    let mut stile = SerializedTile::zeroed();
+    stile.latent_mut().copy_from_slice(&ref_t.latent_kv);
+    stile.set_residual(&residual);
+    stile.set_scale(ref_t.scale);
+    stile.set_dynamic_lambda(ref_t.dynamic_lambda);
+    stile.set_group_scales(&ref_t.group_scales);
+    stile.set_flags(flags);
+    let got = stile.score(&q, &qs);
+
+    let diff = (got - expected).abs();
+    assert!(
+        diff < 1e-4,
+        "codec {:#06x} warm={warm} nocorr={nocorr} parity: {got} vs {expected}, diff {diff}",
+        codec_flag
+    );
+}
+
+#[test]
+fn test_mixed_codec_hot_parity() {
+    codec_tile_parity(
+        scirust::attention::slha_v2::quantize_latent_mixed,
+        codec::FLAG_MIXED,
+        false,
+        false,
+    );
+}
+
+#[test]
+fn test_mixed_codec_warm_parity() {
+    codec_tile_parity(
+        scirust::attention::slha_v2::quantize_latent_mixed,
+        codec::FLAG_MIXED,
+        true,
+        false,
+    );
+}
+
+#[test]
+fn test_tq3_codec_hot_parity() {
+    codec_tile_parity(
+        scirust::attention::slha_v2::quantize_latent_tq3,
+        codec::FLAG_TQ3,
+        false,
+        false,
+    );
+}
+
+#[test]
+fn test_tq3_codec_nocorr_parity() {
+    codec_tile_parity(
+        scirust::attention::slha_v2::quantize_latent_tq3,
+        codec::FLAG_TQ3,
+        false,
+        true,
+    );
+}
+
+#[test]
+fn test_mix3_codec_hot_parity() {
+    codec_tile_parity(
+        scirust::attention::slha_v2::quantize_latent_mix3,
+        codec::FLAG_MIX3,
+        false,
+        false,
+    );
+}
+
+#[test]
+fn test_mix3_codec_nocorr_parity() {
+    codec_tile_parity(
+        scirust::attention::slha_v2::quantize_latent_mix3,
+        codec::FLAG_MIX3,
+        false,
+        true,
+    );
+}
+
+#[test]
+fn test_unknown_codec_combination_is_rejected_not_misdecoded() {
+    // Two mutually-exclusive codec flags set together must be rejected, not
+    // silently decoded (the old behaviour would have fallen through to INT4
+    // and produced a wrong score).
+    let stile = {
+        let mut t = SerializedTile::zeroed();
+        t.latent_mut().copy_from_slice(&fill_latent_seq());
+        t.set_scale(1.0);
+        t.set_group_scales(&[128u8; 8]);
+        t.set_flags(codec::FLAG_NF4 | codec::FLAG_MIXED);
+        t
+    };
+    let q = q_coarse_all(1.0);
+    let qs = q_sign_all(0);
+    assert!(
+        stile.try_score(&q, &qs).is_err(),
+        "NF4|MIXED must be rejected"
+    );
+
+    // NOCORR without a TQ3/MIX3 codec is also invalid.
+    let mut t2 = SerializedTile::zeroed();
+    t2.set_flags(codec::FLAG_TQ3_NOCORR);
+    assert!(codec::validate_codec(t2.flags()).is_err());
+}
+
+#[test]
+fn test_pipeline_copy_glue_cpu_engine() {
+    // The pipeline glue (copy_tiles_to_gpu / copy_scores_from_gpu) must round-
+    // trip through a CPU engine and preserve scores exactly.
+    use slhav2_vram::pipeline::{copy_scores_from_gpu, copy_tiles_to_gpu};
+
+    let engine = CpuEngine::new();
+    let mut tiles_dev = engine.allocate(16 * codec::TILE_BYTES).unwrap();
+
+    let mut tiles: Vec<SerializedTile> = (0..4)
+        .map(|i| {
+            let mut t = SerializedTile::zeroed();
+            t.latent_mut()
+                .copy_from_slice(&fill_latent(0x80 | (i as u8)));
+            t.set_scale(1.0 + i as f32 * 0.25);
+            t.set_group_scales(&[200u8; 8]);
+            t
+        })
+        .collect();
+    tiles[1].set_flags(codec::FLAG_WARM);
+
+    copy_tiles_to_gpu(&engine, &tiles, &mut tiles_dev, 0).unwrap();
+
+    let q = q_coarse_all(0.01);
+    let qs = q_sign_all(0);
+
+    // Score via the CPU backend on the device allocation.
+    let mut scores = vec![0.0f32; tiles.len()];
+    {
+        let mut dev_tiles: Vec<SerializedTile> = tiles_dev
+            .data()
+            .chunks_exact(codec::TILE_BYTES)
+            .map(SerializedTile::from_bytes)
+            .collect();
+        dev_tiles.truncate(tiles.len());
+        score_tiles_cpu(ScoringInput {
+            engine: &engine,
+            tiles: &dev_tiles,
+            q_coarse: &q,
+            q_sign: &qs,
+            scores: &mut scores,
+        });
+    }
+
+    // copy_scores_from_gpu returns the same values.
+    let mut scores_dev = engine.allocate(tiles.len() * 4).unwrap();
+    let mut bytes = vec![0u8; tiles.len() * 4];
+    for (i, s) in scores.iter().enumerate() {
+        bytes[i * 4..i * 4 + 4].copy_from_slice(&s.to_le_bytes());
+    }
+    engine.copy_to_device(&bytes, &mut scores_dev, 0).unwrap();
+    let round = copy_scores_from_gpu(&engine, &scores_dev, 0, tiles.len()).unwrap();
+    for (a, b) in scores.iter().zip(round.iter()) {
+        assert!((a - b).abs() < 1e-6, "score copy round-trip: {a} vs {b}");
+    }
+}
+
+#[test]
+fn test_pipeline_copy_overflow_rejected() {
+    // The checked byte-count arithmetic must reject an absurd tile count
+    // rather than silently overflowing (guarded by `expect`, which panics with
+    // a clear message).
+    use slhav2_vram::pipeline::{copy_scores_from_gpu, copy_tiles_to_gpu};
+
+    let engine = CpuEngine::new();
+    let mut tiles_dev = engine.allocate(128).unwrap();
+    let huge: Vec<SerializedTile> = Vec::new();
+    // Empty slice: no overflow, no-op success.
+    copy_tiles_to_gpu(&engine, &huge, &mut tiles_dev, 0).unwrap();
+
+    // An absurd score count must panic (overflow) rather than allocate.
+    let scores_dev = engine.allocate(4).unwrap();
+    let result = std::panic::catch_unwind(|| {
+        copy_scores_from_gpu(&engine, &scores_dev, 0, usize::MAX / 2 + 1)
+    });
+    assert!(result.is_err(), "overflowing score count must panic");
+}

@@ -8,6 +8,8 @@
 //! CUDA hardware integration tests.
 //! Requires: `SLHAV2_REQUIRE_CUDA=1 cargo test --features cuda -- --ignored --nocapture --test-threads=1`
 
+use std::rc::Rc;
+
 use scirust::SciRustSlhaTile;
 
 use slhav2_vram::backends::cuda::{CudaAllocation, CudaEngine, CudaModule};
@@ -70,7 +72,7 @@ fn make_tile_from_scirust(st: &SciRustSlhaTile) -> SerializedTile {
 
 fn score_tiles_gpu(
     engine: &CudaEngine,
-    module: &CudaModule,
+    module: &Rc<CudaModule>,
     tiles: &[SerializedTile],
     q_coarse: &[f32],
     q_sign: &[u64],
@@ -431,7 +433,9 @@ fn test_cuda_real_backing_arena() {
     let mut slices = Vec::new();
     for _ in 0..1000 {
         let s = arena.allocate(128).expect("arena suballocation");
-        assert_eq!(s.offset % 256, 0, "offset not 256-byte aligned");
+        // Offsets are aligned to the tile's natural 128-byte alignment (the
+        // arena's ALIGN), so 128-byte tiles pack back-to-back.
+        assert_eq!(s.offset % 128, 0, "offset not 128-byte aligned");
         slices.push(s);
     }
 

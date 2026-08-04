@@ -101,7 +101,28 @@ impl SerializedTile {
             .copy_from_slice(&scales[..len]);
     }
 
+    /// Score this tile against a query, validating the codec flags first.
+    ///
+    /// Returns `Err(CodecError)` for an unsupported flag combination (see
+    /// [`codec::validate_codec`]) instead of silently decoding as INT4.
+    pub fn try_score(&self, q_coarse: &[f32], q_sign: &[u64]) -> Result<f32, codec::CodecError> {
+        codec::validate_codec(self.flags())?;
+        Ok(self.score_unchecked(q_coarse, q_sign))
+    }
+
+    /// Score this tile against a query.
+    ///
+    /// # Panics
+    ///
+    /// Panics with a descriptive message if the tile's flags select an
+    /// unsupported codec combination. Prefer [`Self::try_score`] when handling
+    /// untrusted tiles.
     pub fn score(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
+        codec::validate_codec(self.flags()).unwrap_or_else(|e| panic!("cannot score tile: {e}"));
+        self.score_unchecked(q_coarse, q_sign)
+    }
+
+    fn score_unchecked(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
         let latent = self.latent();
         let scale = self.scale();
         let gscales = self.group_scales();

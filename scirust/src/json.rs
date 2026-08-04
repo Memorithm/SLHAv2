@@ -97,6 +97,13 @@ impl Json {
             }
             Json::Str(s) => write_escaped(out, s),
             Json::Arr(a) => {
+                // Serializer depth cap: mirror the parser's limit so a deeply
+                // nested value built from untrusted data cannot recurse
+                // unbounded on the way out either.
+                if level >= MAX_DEPTH {
+                    out.push_str("[...]");
+                    return;
+                }
                 if a.is_empty() {
                     out.push_str("[]");
                     return;
@@ -113,6 +120,10 @@ impl Json {
                 out.push(']');
             }
             Json::Obj(m) => {
+                if level >= MAX_DEPTH {
+                    out.push_str("{...}");
+                    return;
+                }
                 if m.is_empty() {
                     out.push_str("{}");
                     return;
@@ -438,6 +449,10 @@ impl<'a> Parser<'a> {
     fn object(&mut self) -> Result<Json, String> {
         self.i += 1; // {
         let mut m = Vec::new();
+        // O(1) duplicate-key detection (the old `m.iter().any(...)` was O(n²)
+        // and a hostile object with many single-char keys could burn unbounded
+        // CPU inside the 256 KiB frame cap).
+        let mut seen = std::collections::HashSet::new();
         self.ws();
         if self.peek() == Some(b'}') {
             self.i += 1;
@@ -451,7 +466,7 @@ impl<'a> Parser<'a> {
             let key_offset = self.i;
             let k = self.string()?;
 
-            if m.iter().any(|(existing, _)| existing == &k) {
+            if !seen.insert(k.clone()) {
                 return Err(format!("duplicate object key '{}' at byte {key_offset}", k));
             }
 

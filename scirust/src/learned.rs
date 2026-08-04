@@ -193,7 +193,26 @@ impl LearnedModel {
     /// As [`Self::from_projection`], optionally enabling incoherence
     /// processing (plan axis A2).
     pub fn from_projection_with(p: Vec<f32>, d: usize, seed: u64, rht: bool) -> Self {
-        assert_eq!(p.len(), D_C * d, "projection must be D_C×d");
+        Self::try_from_projection_with(p, d, seed, rht).expect("learned: projection must be D_C×d")
+    }
+
+    /// Fallible variant of [`Self::from_projection_with`].
+    ///
+    /// Returns an error instead of panicking when the projection length does
+    /// not match `D_C·d` — the C-ABI load path uses this so a corrupted model
+    /// surfaces as an error rather than a panic across the FFI boundary.
+    pub fn try_from_projection_with(
+        p: Vec<f32>,
+        d: usize,
+        seed: u64,
+        rht: bool,
+    ) -> Result<Self, String> {
+        if p.len() != D_C * d {
+            return Err(format!(
+                "projection must be D_C×d: got {} elements for d={d} (D_C={D_C})",
+                p.len()
+            ));
+        }
         let rht_obj = if rht {
             Some(HadamardIncoherence::new(
                 d,
@@ -206,7 +225,7 @@ impl LearnedModel {
         let mut rng = Rng::new(seed);
         let mut z = vec![0.0f32; D_S * d_pad];
         rng.fill_gaussian(&mut z);
-        LearnedModel {
+        Ok(LearnedModel {
             d,
             d_pad,
             evec: p,
@@ -215,7 +234,7 @@ impl LearnedModel {
             rht: rht_obj,
             captured_energy: f32::NAN, // not the projector of a single covariance
             whiten: false,
-        }
+        })
     }
 
     /// The projection matrix `P` (`D_C × d`, row-major) — e.g. to warm-start

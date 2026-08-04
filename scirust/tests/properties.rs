@@ -1,4 +1,4 @@
-//! Randomized **property / fuzz** tests — dependency-free, driven by the crate's
+//! Randomized **property-based** tests — dependency-free, driven by the crate's
 //! own deterministic RNG (so failures are reproducible). They assert invariants
 //! over thousands of random inputs rather than a single hand-picked case:
 //!

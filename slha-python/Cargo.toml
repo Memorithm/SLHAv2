@@ -19,7 +19,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
-pyo3 = { version = "0.23" }
+# pyo3 0.24 fixes RUSTSEC-2025-0020 (PyString::from_object buffer overflow).
+# RUSTSEC-2026-0176/0177 require pyo3 >= 0.29; the APIs they affect (PyList/
+# PyTuple iterators, PyCFunction::new_closure) are NOT used by this binding.
+# Tracked for an eventual upgrade to 0.29.
+pyo3 = { version = "0.24" }
 
 [build-dependencies]
-pyo3-build-config = "0.23"
+pyo3-build-config = "0.24"
