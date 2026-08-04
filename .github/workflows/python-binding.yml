@@ -1,0 +1,26 @@
+name: Python binding wheel
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel-runtime:
+    name: PyO3 wheel build + runtime test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Build, install, and exercise the wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet "maturin>=1.0,<2.0"
+          cd slha-python
+          python3 -m maturin build --release --out "$RUNNER_TEMP/wheels"
+          python3 -m pip install --quiet --force-reinstall "$RUNNER_TEMP"/wheels/*.whl
+          python3 -X faulthandler -u tests/test_binding.py
