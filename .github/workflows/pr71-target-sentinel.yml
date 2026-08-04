@@ -1,0 +1,34 @@
+name: PR71 target sentinel
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    branches:
+      - ci/pr71-merge-resolver-v4
+
+permissions:
+  contents: write
+
+jobs:
+  sentinel:
+    if: ${{ github.event.pull_request.head.ref == 'fix/pr71-merged-master-v3' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fix/pr71-merged-master-v3
+          persist-credentials: true
+      - name: Publish sentinel
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'pull_request_target=%s\nhead=%s\nbase=%s\n' \
+            "$GITHUB_RUN_ID" \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${{ github.event.pull_request.base.sha }}" \
+            > .pr71-target-sentinel.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .pr71-target-sentinel.txt
+          git commit -m "ci: confirm trusted PR71 resolver trigger [target-sentinel]" || exit 0
+          git push origin HEAD:fix/pr71-merged-master-v3
