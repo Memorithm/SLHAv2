@@ -1,0 +1,38 @@
+[package]
+name = "slhav2-vram"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Hardware-agnostic VRAM management and SLHAv2 tile scoring on GPU."
+<<<<<<< HEAD
+# Aligned with the rest of the workspace: PolyForm Noncommercial 1.0.0 (free
+# for noncommercial/personal use) + a paid commercial license for CCOS
+# deployments. The older `MIT OR Apache-2.0` applied only to versions published
+# before the dual-license change (see LICENSING.md §3).
+=======
+>>>>>>> origin/master
+license = "PolyForm-Noncommercial-1.0.0"
+
+[lib]
+name = "slhav2_vram"
+path = "src/lib.rs"
+
+[dependencies]
+scirust = { version = "0.2", path = "../scirust" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[features]
+default = []
+cuda = ["libc"]
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "score"
+harness = false
+
+[profile.bench]
+debug = 1

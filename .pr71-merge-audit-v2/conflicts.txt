@@ -1,0 +1,10 @@
+Cargo.lock
+integration/llama.cpp/README.md
+integration/llama.cpp/build_and_roundtrip.sh
+integration/llama.cpp/shim/slha_llama.cpp
+integration/llama.cpp/shim/slha_llama.hpp
+scirust/src/attention/slha_v2.rs
+slha-c/src/lib.rs
+slha-python/Cargo.toml
+slhav2-vram/Cargo.toml
+slhav2-vram/src/mem/tile.rs

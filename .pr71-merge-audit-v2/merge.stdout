@@ -1,0 +1,24 @@
+Auto-merging .github/workflows/ci.yml
+Auto-merging Cargo.lock
+CONFLICT (content): Merge conflict in Cargo.lock
+Auto-merging README.md
+Auto-merging integration/llama.cpp/README.md
+CONFLICT (content): Merge conflict in integration/llama.cpp/README.md
+Auto-merging integration/llama.cpp/build_and_roundtrip.sh
+CONFLICT (content): Merge conflict in integration/llama.cpp/build_and_roundtrip.sh
+Auto-merging integration/llama.cpp/shim/slha_llama.cpp
+CONFLICT (content): Merge conflict in integration/llama.cpp/shim/slha_llama.cpp
+Auto-merging integration/llama.cpp/shim/slha_llama.hpp
+CONFLICT (content): Merge conflict in integration/llama.cpp/shim/slha_llama.hpp
+CONFLICT (modify/delete): scirust/src/attention/slha_v2.rs deleted in HEAD and modified in origin/master.  Version origin/master of scirust/src/attention/slha_v2.rs left in tree.
+Auto-merging slha-c/include/slha.h
+Auto-merging slha-c/src/lib.rs
+CONFLICT (content): Merge conflict in slha-c/src/lib.rs
+Auto-merging slha-python/Cargo.toml
+CONFLICT (content): Merge conflict in slha-python/Cargo.toml
+Auto-merging slha-python/src/lib.rs
+Auto-merging slhav2-vram/Cargo.toml
+CONFLICT (content): Merge conflict in slhav2-vram/Cargo.toml
+Auto-merging slhav2-vram/src/mem/tile.rs
+CONFLICT (content): Merge conflict in slhav2-vram/src/mem/tile.rs
+Automatic merge failed; fix conflicts and then commit the result.
