@@ -52,15 +52,15 @@ jobs:
         # bench graph must compile without excluding `slha-python`.
         run: cargo --locked bench --workspace --all-features --no-run
       - name: Python binding (maturin wheel + runtime test)
-  # Cargo-only checks cannot expose ABI/runtime faults in a PyO3
-  # extension. Build the actual wheel, install it, and exercise all
-  # codecs, scoring, strided buffers, validation errors and audit.
-  run: |
-    python3 -m pip install --quiet "maturin>=1.0,<2.0"
-    cd slha-python
-    python3 -m maturin build --release --out "$RUNNER_TEMP/wheels"
-    python3 -m pip install --quiet --force-reinstall "$RUNNER_TEMP"/wheels/*.whl
-    python3 -X faulthandler -u tests/test_binding.py
+        # Cargo-only checks cannot expose ABI/runtime faults in a PyO3
+        # extension. Build the actual wheel, install it, and exercise all
+        # codecs, scoring, strided buffers, validation errors and audit.
+        run: |
+          python3 -m pip install --quiet "maturin>=1.0,<2.0"
+          cd slha-python
+          python3 -m maturin build --release --out "$RUNNER_TEMP/wheels"
+          python3 -m pip install --quiet --force-reinstall "$RUNNER_TEMP"/wheels/*.whl
+          python3 -X faulthandler -u tests/test_binding.py
       - name: AArch64 cross-check (NEON path + C-ABI crate)
         # Type-check scirust (NEON kernel path), slha-c (C-ABI, the crate that
         # broke on aarch64 because of `*mut i8` vs `*mut c_char`) and slha-mcp
