@@ -1,0 +1,64 @@
+name: PR71 Python crash diagnostic
+
+on:
+  push:
+    branches:
+      - feat/llama-compressed-score-quality-gate
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Build and install wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet "maturin>=1.0,<2.0"
+          cd slha-python
+          python3 -m maturin build --release --out "$RUNNER_TEMP/wheels"
+          python3 -m pip install --quiet --force-reinstall "$RUNNER_TEMP"/wheels/*.whl
+      - name: Run instrumented binding calls
+        shell: bash
+        run: |
+          python3 -X faulthandler -u - <<'PY'
+          from array import array
+          import faulthandler
+          import json
+          import math
+
+          faulthandler.enable()
+          print("checkpoint: before import", flush=True)
+          import slha_core
+          print("checkpoint: after import", flush=True)
+          print("constants", slha_core.D_C, slha_core.D_S, flush=True)
+
+          latent = array("f", [(((i * 17 + 11) % 43) - 21) / (2.0 + i % 7) for i in range(slha_core.D_C)])
+          query = array("f", [((i * 7 + 3) % 29 - 14) / 9.0 for i in range(slha_core.D_C)])
+          signs = array("Q", [0, 1, 2, 3])
+
+          for codec in ("int4", "grouped", "nf4", "mixed", "tq3", "mix3"):
+              print(f"checkpoint: {codec}: before compress", flush=True)
+              tile = slha_core.compress_latent(latent, codec, token_id=17, position=23, head_id=4)
+              print(f"checkpoint: {codec}: after compress", flush=True)
+              decoded = tile.dequantize()
+              print(f"checkpoint: {codec}: after dequantize {len(decoded)}", flush=True)
+              score = tile.compute_score(query, signs)
+              print(f"checkpoint: {codec}: after score {score}", flush=True)
+              print(f"checkpoint: {codec}: repr {tile!r}", flush=True)
+
+          backing = array("f", [float(i - 128) / 13.0 for i in range(slha_core.D_C * 2)])
+          strided = memoryview(backing)[::2]
+          print("checkpoint: before strided compress", flush=True)
+          tile = slha_core.compress_latent(strided, "grouped")
+          print("checkpoint: after strided compress", flush=True)
+          print("checkpoint: before audit", flush=True)
+          report = json.loads(slha_core.run_audit())
+          print("checkpoint: audit", report["verdict"], flush=True)
+          PY
