@@ -36,12 +36,11 @@ jobs:
             echo "Unexpected clean merge; continuing with policy adjustments."
           fi
 
-          # Preserve the current master integration/research surface. The PR's
-          # fused-QK path is measured NO-GO and is split out rather than allowed
-          # to overwrite calibration/oracle/ranking work already on master.
+          # Resolve actual conflicts in favor of the current master integration
+          # where PR #71's fused-QK NO-GO experiment would otherwise overwrite
+          # calibration, oracle and ranking functionality already merged.
           git checkout --ours -- \
             Cargo.lock \
-            docs/INTEGRATION.md \
             integration/llama.cpp/README.md \
             integration/llama.cpp/build_and_roundtrip.sh \
             integration/llama.cpp/shim/slha_llama.cpp \
@@ -49,16 +48,18 @@ jobs:
             slha-python/Cargo.toml
           git add \
             Cargo.lock \
-            docs/INTEGRATION.md \
             integration/llama.cpp/README.md \
             integration/llama.cpp/build_and_roundtrip.sh \
             integration/llama.cpp/shim/slha_llama.cpp \
             integration/llama.cpp/shim/slha_llama.hpp \
             slha-python/Cargo.toml
 
+          # This file merged automatically, but its PR text claims fused-QK is
+          # present. Restore master because that path is intentionally split out.
+          git restore --source=HEAD --staged --worktree docs/INTEGRATION.md
+
           # The monolithic module was deliberately replaced by the modular
-          # directory implementation on the PR branch. The current master SIMD
-          # optimization is retained below in SerializedTile::score_unchecked.
+          # directory implementation on the PR branch.
           git rm -f scirust/src/attention/slha_v2.rs
 
           # Keep the clarified license comment from the PR.
@@ -66,8 +67,7 @@ jobs:
           git add slhav2-vram/Cargo.toml
 
           # The slha-c conflict is test-only: retain both independently added
-          # test suites with a union merge, while production code has already
-          # merged normally above the test module.
+          # suites with a union merge. Production changes merged normally.
           git show :2:slha-c/src/lib.rs > /tmp/slha-c-ours.rs
           git show :1:slha-c/src/lib.rs > /tmp/slha-c-base.rs
           git show :3:slha-c/src/lib.rs > /tmp/slha-c-theirs.rs
@@ -121,11 +121,8 @@ jobs:
           git add slhav2-vram/src/mem/tile.rs
 
           # Remove the fused-QK patch from this remediation/installer branch.
-          # It remains reachable in the original PR history for a dedicated
-          # research branch, but is not presented as merge-ready production.
           git rm -f integration/llama.cpp/patches/0002-slha-fused-qk.patch
 
-          # Ensure every conflict is explicitly resolved before regeneration.
           unresolved="$(git diff --name-only --diff-filter=U)"
           if [ -n "$unresolved" ]; then
             printf 'Unresolved files:\n%s\n' "$unresolved"
@@ -163,10 +160,8 @@ jobs:
             echo "- unresolved_conflicts: 0"
           } > .pr71-resolution/STATUS.md
 
-          # The one-shot resolver is not part of the deliverable tree.
           git rm -f .github/workflows/pr71-resolve.yml
           git add -A
-
           if [ "$validation_rc" -eq 0 ]; then
             git commit -m "fix: rebase PR 71 remediation and installer onto master [pr71-resolution]"
           else
