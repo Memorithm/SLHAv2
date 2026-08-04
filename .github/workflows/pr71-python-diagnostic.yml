@@ -2,8 +2,7 @@ name: PR71 Python crash diagnostic
 
 on:
   push:
-    branches:
-      - feat/llama-compressed-score-quality-gate
+  pull_request:
 
 permissions:
   contents: read
