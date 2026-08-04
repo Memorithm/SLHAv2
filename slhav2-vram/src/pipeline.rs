@@ -73,7 +73,7 @@ pub fn copy_scores_from_gpu<E: DeviceEngine>(
 /// Construction is hardware-bound (requires a live `cuda::CudaEngine`, a
 /// loaded module kernel and a device arena of `capacity_bytes`); see the CUDA
 /// integration tests for a full usage example.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 pub struct GpuScoringPipeline {
     engine: crate::backends::cuda::CudaEngine,
     kernel: crate::backends::cuda::CudaFunction,
@@ -100,7 +100,7 @@ pub struct GpuScoringPipeline {
     q_sign_buf: Vec<u8>,
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 impl GpuScoringPipeline {
     /// Create a pipeline with a persistent device arena of `capacity_bytes`.
     pub fn new(
