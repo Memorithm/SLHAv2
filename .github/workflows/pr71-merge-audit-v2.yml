@@ -1,0 +1,53 @@
+name: PR71 merge audit v2
+
+on:
+  push:
+    branches:
+      - audit/pr71-merge-conflicts-v2
+
+permissions:
+  contents: write
+
+jobs:
+  audit:
+    if: ${{ !contains(github.event.head_commit.message, '[merge-audit-v2]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Capture three-way merge conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin master
+          rm -rf .pr71-merge-audit-v2
+          mkdir -p .pr71-merge-audit-v2/base .pr71-merge-audit-v2/pr .pr71-merge-audit-v2/master .pr71-merge-audit-v2/merged
+
+          set +e
+          git merge --no-commit --no-ff origin/master >.pr71-merge-audit-v2/merge.stdout 2>.pr71-merge-audit-v2/merge.stderr
+          merge_rc=$?
+          set -e
+          printf '%s\n' "$merge_rc" > .pr71-merge-audit-v2/merge.exit
+          git status --porcelain=v1 > .pr71-merge-audit-v2/status.txt
+          git diff --name-only --diff-filter=U > .pr71-merge-audit-v2/conflicts.txt
+
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            safe="${path//\//__}"
+            git show ":1:$path" > ".pr71-merge-audit-v2/base/$safe" 2>/dev/null || true
+            git show ":2:$path" > ".pr71-merge-audit-v2/pr/$safe" 2>/dev/null || true
+            git show ":3:$path" > ".pr71-merge-audit-v2/master/$safe" 2>/dev/null || true
+            if [ -f "$path" ]; then
+              cp "$path" ".pr71-merge-audit-v2/merged/$safe"
+            fi
+          done < .pr71-merge-audit-v2/conflicts.txt
+
+          git merge --abort || true
+          git rm .github/workflows/pr71-merge-audit-v2.yml
+          git add .pr71-merge-audit-v2
+          git commit -m "chore: capture PR 71 merge conflicts [merge-audit-v2]"
+          git push origin HEAD:audit/pr71-merge-conflicts-v2
