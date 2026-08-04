@@ -1,0 +1,244 @@
+name: PR71 trusted merge resolver v4
+
+on:
+  pull_request:
+    branches:
+      - ci/pr71-merge-resolver-v4
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    if: ${{ github.event.pull_request.head.ref == 'fix/pr71-merged-master-v3' && !contains(github.event.pull_request.head.sha, 'never') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: fix/pr71-merged-master-v3
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt,clippy
+      - name: Resolve audited merge
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin master
+
+          merge_rc=0
+          git merge --no-commit --no-ff origin/master || merge_rc=$?
+          test "$merge_rc" -eq 1
+
+          cat > /tmp/expected-conflicts.txt <<'EOF'
+          Cargo.lock
+          integration/llama.cpp/README.md
+          integration/llama.cpp/build_and_roundtrip.sh
+          integration/llama.cpp/shim/slha_llama.cpp
+          integration/llama.cpp/shim/slha_llama.hpp
+          scirust/src/attention/slha_v2.rs
+          slha-c/src/lib.rs
+          slha-python/Cargo.toml
+          slhav2-vram/Cargo.toml
+          slhav2-vram/src/mem/tile.rs
+          EOF
+          git diff --name-only --diff-filter=U | sort > /tmp/actual-conflicts.txt
+          sort -o /tmp/expected-conflicts.txt /tmp/expected-conflicts.txt
+          diff -u /tmp/expected-conflicts.txt /tmp/actual-conflicts.txt
+
+          git checkout --theirs -- \
+            Cargo.lock \
+            integration/llama.cpp/README.md \
+            integration/llama.cpp/build_and_roundtrip.sh \
+            integration/llama.cpp/shim/slha_llama.cpp \
+            integration/llama.cpp/shim/slha_llama.hpp \
+            slha-python/Cargo.toml
+          git rm scirust/src/attention/slha_v2.rs
+          git checkout --ours -- slhav2-vram/Cargo.toml
+          git checkout --ours -- slhav2-vram/src/mem/tile.rs
+          git checkout --theirs -- slha-c/src/lib.rs
+          git checkout origin/master -- slha-c/include/slha.h
+          git rm -f integration/llama.cpp/patches/0002-slha-fused-qk.patch
+          git rm -f .github/workflows/pr71-merge-resolve-v3.yml
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def once(text, old, new, label):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f"{label}: expected 1 match, got {n}")
+              return text.replace(old, new, 1)
+
+          tile_path = Path("slhav2-vram/src/mem/tile.rs")
+          tile = tile_path.read_text()
+          pattern = re.compile(
+              r"    fn score_unchecked\(&self, q_coarse: &\[f32\], q_sign: &\[u64\]\) -> f32 \{.*?\n    \}\n\n    pub fn to_slha_tile",
+              re.S,
+          )
+          replacement = '''    fn score_unchecked(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
+              let q_coarse: &[f32; codec::D_C] = q_coarse
+                  .try_into()
+                  .expect("q_coarse slice must be exactly D_C elements");
+              let q_sign: &[u64; codec::RESIDUAL_WORDS] = q_sign
+                  .try_into()
+                  .expect("q_sign slice must be exactly RESIDUAL_WORDS elements");
+              self.to_slha_tile().compute_score(q_coarse, q_sign)
+          }
+
+          pub fn to_slha_tile'''
+          tile, n = pattern.subn(replacement, tile, count=1)
+          if n != 1:
+              raise SystemExit(f"tile merge: expected 1 match, got {n}")
+          tile_path.write_text(tile)
+
+          c_path = Path("slha-c/src/lib.rs")
+          c = c_path.read_text()
+          c = once(c, "use std::cell::RefCell;\n", "use std::cell::RefCell;\nuse std::collections::HashSet;\n", "HashSet import")
+          c = once(c, "use std::panic::{catch_unwind, AssertUnwindSafe};\n", "use std::panic::{catch_unwind, AssertUnwindSafe};\nuse std::sync::{OnceLock, RwLock};\n", "sync imports")
+
+          c = once(c, '''pub struct SlhaModel {
+              magic: u64,
+              inner: LearnedModel,
+          }
+          ''', '''pub struct SlhaModel {
+              magic: u64,
+              inner: LearnedModel,
+          }
+
+          /// Registry of live handles returned to C. Membership is checked
+          /// before raw-pointer dereference and removed before deallocation.
+          fn model_registry() -> &'static RwLock<HashSet<usize>> {
+              static REGISTRY: OnceLock<RwLock<HashSet<usize>>> = OnceLock::new();
+              REGISTRY.get_or_init(|| RwLock::new(HashSet::new()))
+          }
+
+          fn register_model(pointer: *mut SlhaModel) {
+              model_registry()
+                  .write()
+                  .unwrap_or_else(|poisoned| poisoned.into_inner())
+                  .insert(pointer as usize);
+          }
+
+          fn unregister_model(pointer: *mut SlhaModel) -> bool {
+              model_registry()
+                  .write()
+                  .unwrap_or_else(|poisoned| poisoned.into_inner())
+                  .remove(&(pointer as usize))
+          }
+
+          fn is_registered(pointer: *const SlhaModel) -> bool {
+              model_registry()
+                  .read()
+                  .unwrap_or_else(|poisoned| poisoned.into_inner())
+                  .contains(&(pointer as usize))
+          }
+
+          /// Defensive upper bound for caller-controlled batch lengths.
+          pub const MAX_TILES: usize = 1 << 20;
+          ''', "registry insertion")
+
+          c = once(c, '''    // SAFETY: the caller promises a live handle created by slha_weights_load.
+              let model = unsafe { &*model };
+
+              if model.magic != MODEL_MAGIC {
+          ''', '''    if !is_registered(model) {
+                  return Err(ffi_error(
+                      SLHA_ERR_INVALID_HANDLE,
+                      "model handle is not a live SLHA handle",
+                  ));
+              }
+
+              // SAFETY: registry membership proves provenance from Box::into_raw
+              // and that release has not removed the handle.
+              let model = unsafe { &*model };
+
+              if model.magic != MODEL_MAGIC {
+          ''', "model_ref hardening")
+
+          c = once(c, '''        Ok(Box::into_raw(Box::new(SlhaModel {
+                      magic: MODEL_MAGIC,
+                      inner,
+                  })))
+          ''', '''        let handle = Box::into_raw(Box::new(SlhaModel {
+                      magic: MODEL_MAGIC,
+                      inner,
+                  }));
+                  register_model(handle);
+                  Ok(handle)
+          ''', "model registration")
+
+          c = once(c, '''        // SAFETY: the caller promises a live handle.
+                  let _model = unsafe { model_ref(model)? };
+
+                  if n_tiles == 0 {
+          ''', '''        // SAFETY: the caller promises a live handle.
+                  let _model = unsafe { model_ref(model)? };
+
+                  if n_tiles > MAX_TILES {
+                      return Err(ffi_error(
+                          SLHA_ERR_DIMENSION,
+                          format!("n_tiles={n_tiles} exceeds the safety bound {MAX_TILES}"),
+                      ));
+                  }
+
+                  if n_tiles == 0 {
+          ''', "batch bound")
+
+          c = once(c, '''    ffi_status(|| {
+                  // SAFETY: validate the handle before ownership is reconstructed.
+                  let _validated_magic = unsafe { model_ref(model)?.magic };
+
+                  // SAFETY: the pointer is aligned and points to a live SlhaModel.
+                  unsafe { (*model).magic = 0 };
+
+                  // SAFETY: the pointer was allocated by Box::into_raw and has not been
+                  // previously released.
+                  unsafe { drop(Box::from_raw(model)) };
+                  Ok(())
+              })
+          ''', '''    ffi_status(|| {
+                  // SAFETY: registry membership is checked before dereference.
+                  unsafe { model_ref(model)? };
+
+                  if !unregister_model(model) {
+                      return Err(ffi_error(
+                          SLHA_ERR_INVALID_HANDLE,
+                          "model handle is not registered (already released?)",
+                      ));
+                  }
+
+                  // SAFETY: successful registry removal proves this pointer was
+                  // produced by Box::into_raw and has not already been released.
+                  unsafe { drop(Box::from_raw(model)) };
+                  Ok(())
+              })
+          ''', "release hardening")
+          c_path.write_text(c)
+          PY
+
+          git add -A
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          cargo generate-lockfile
+          cargo fmt --all
+          cargo check --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test -p slha-c --locked
+          cargo test -p slhav2-vram --locked
+          cargo test -p slha-python --locked
+
+          mkdir -p .pr71-merge-v4
+          {
+            echo "head_before_merge=0cac9267a976adc92c12c325fd88ecfc0f1622fe"
+            echo "master_merged=$(git rev-parse origin/master)"
+            echo "conflicts_resolved=10"
+            echo "focused_validation=success"
+          } > .pr71-merge-v4/success.txt
+          git add -A
+          git commit -m "merge: integrate master into PR 71 remediation [pr71-merge-v4]"
+          git push origin HEAD:fix/pr71-merged-master-v3
