@@ -1,0 +1,39 @@
+name: PR71 semantic diffs
+
+on:
+  push:
+    branches:
+      - audit/pr71-merge-conflicts-v2
+
+permissions:
+  contents: write
+
+jobs:
+  report:
+    if: ${{ !contains(github.event.head_commit.message, '[semantic-diffs]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Extract focused diffs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin master feat/llama-compressed-score-quality-gate
+          rm -rf .pr71-semantic-diffs
+          mkdir -p .pr71-semantic-diffs
+          base=a4544a0176fd9e9098046a43def5b3d94e6e5512
+          pr=3edc4c2ac6a3d3307c49e364793b8c17e7e8dd3e
+          master=70c3a4f8b20a00bc43ce8e923398392793d717d6
+          git diff --no-ext-diff --unified=12 "$base" "$pr" -- slha-c/src/lib.rs > .pr71-semantic-diffs/slha-c-pr.patch
+          git diff --no-ext-diff --unified=12 "$base" "$master" -- slha-c/src/lib.rs > .pr71-semantic-diffs/slha-c-master.patch
+          git diff --no-ext-diff --unified=12 "$base" "$master" -- scirust/src/attention/slha_v2.rs > .pr71-semantic-diffs/slha-v2-master.patch
+          git diff --no-ext-diff --unified=8 "$base" "$pr" -- integration/llama.cpp/shim/slha_llama.cpp integration/llama.cpp/shim/slha_llama.hpp > .pr71-semantic-diffs/llama-pr.patch
+          git rm .github/workflows/pr71-semantic-diffs.yml
+          git add .pr71-semantic-diffs
+          git commit -m "chore: extract PR 71 semantic diffs [semantic-diffs]"
+          git push origin HEAD:audit/pr71-merge-conflicts-v2
