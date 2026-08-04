@@ -72,7 +72,8 @@ pub fn copy_scores_from_gpu<E: DeviceEngine>(
 ///
 /// Construction is hardware-bound (requires a live `cuda::CudaEngine`, a
 /// loaded module kernel and a device arena of `capacity_bytes`); see the CUDA
-/// integration tests for a full usage example.
+/// integration tests for a full usage example. The type is absent when
+/// `build.rs` cannot generate PTX, even if the Cargo feature is enabled.
 #[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 pub struct GpuScoringPipeline {
     engine: crate::backends::cuda::CudaEngine,
