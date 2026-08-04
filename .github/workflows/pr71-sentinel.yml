@@ -1,0 +1,26 @@
+name: PR71 Actions sentinel
+
+on:
+  push:
+    branches:
+      - fix/pr71-rebased-audit-installer
+
+permissions:
+  contents: write
+
+jobs:
+  sentinel:
+    if: ${{ !contains(github.event.head_commit.message, '[pr71-sentinel]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Publish sentinel
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p .pr71-resolution
+          printf 'actions_sentinel=ok\nsource=%s\n' "$GITHUB_SHA" > .pr71-resolution/SENTINEL.txt
+          git add .pr71-resolution/SENTINEL.txt
+          git commit -m "ci: confirm PR 71 Actions execution [pr71-sentinel]"
+          git push
