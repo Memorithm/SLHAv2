@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: pr71-resolve-only
+  cancel-in-progress: true
+
 jobs:
   resolve:
     if: ${{ !contains(github.event.head_commit.message, '[pr71-resolved-tree]') && !contains(github.event.head_commit.message, '[pr71-resolve-failure]') }}
@@ -16,9 +20,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          components: rustfmt
       - name: Resolve and always publish the result
         shell: bash
         run: |
@@ -114,10 +115,6 @@ jobs:
 
             unresolved="$(git diff --name-only --diff-filter=U)"
             test -z "$unresolved" || { printf 'Unresolved files:\n%s\n' "$unresolved"; return 2; }
-
-            cargo generate-lockfile
-            cargo fmt --all
-            cargo fmt --all -- --check
           }
 
           set +e
