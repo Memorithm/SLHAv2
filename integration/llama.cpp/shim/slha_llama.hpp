@@ -19,6 +19,7 @@ enum slha_kv_mode : int {
     SLHA_KV_ROUNDTRIP = 2,
     SLHA_KV_COLLECT = 3,
     SLHA_KV_SCORE_DIAG = 4,
+    SLHA_KV_FUSED = 5,
 };
 
 struct slha_layer_state {
@@ -73,7 +74,13 @@ void slha_flush_collected_activations(const char * output_dir);
 
 // Score-diagnostic callback for ggml_map_custom2.
 // Called from llama-graph.cpp after ggml_mul_mat(k, q).
-// Compares QK^T scores with SLHA scores from tiles and logs statistics.
+// In SCORE_DIAG mode: copies the true QK^T scores through and logs cos/KL
+//   statistics vs SLHA scores computed from tiles (side branch, no effect on
+//   attention).
+// In FUSED mode: REPLACES the QK^T scores in dst with SLHA scores computed
+//   from the encoded tiles (the attention output then uses SLHA scores).
+//   Slots without a tile fall back to the true score so attention is never
+//   broken during warmup.
 // `a` = kq scores tensor, `b` = q tensor, userdata = slha_layer_state.
 void slha_score_diag_callback(
     ggml_tensor * dst,
@@ -84,11 +91,13 @@ void slha_score_diag_callback(
     void * userdata
 );
 
-// Build the score-diagnostic node and attach it to the graph.
-// Returns the original kq tensor unchanged; the diagnostic node is a
-// side-branch that does not affect the attention output.
+// Build the fused-QK node and attach it to the graph.
+// In SCORE_DIAG mode: returns the original kq tensor unchanged (diagnostic is
+//   a side-branch). In FUSED mode: returns the kq tensor whose scores have
+//   been replaced by SLHA scores, so the caller must use the return value as
+//   the attention input.
 // Called from build_attn_mha in llama-graph.cpp.
-ggml_tensor * slha_build_score_diag(
+ggml_tensor * slha_build_fused_qk(
     ggml_context * ctx,
     ggml_tensor * kq,
     ggml_tensor * k,

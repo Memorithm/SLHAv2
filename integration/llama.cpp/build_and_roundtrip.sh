@@ -157,17 +157,28 @@ elif [ "$MODE" = "collect" ]; then
 elif [ "$MODE" = "scorediag" ]; then
     export SLHA_KV_MODE=scorediag
     export SLHA_WEIGHTS_DIR="$WORK/weights"
+elif [ "$MODE" = "fused" ]; then
+    export SLHA_KV_MODE=fused
+    export SLHA_WEIGHTS_DIR="$WORK/weights"
 else
     unset SLHA_KV_MODE
 fi
 
-if [ "$MODE" = "roundtrip" ] || [ "$MODE" = "scorediag" ]; then
+if [ "$MODE" = "roundtrip" ] || [ "$MODE" = "scorediag" ] || [ "$MODE" = "fused" ]; then
     OUTPUT_FILE="$WORK/${MODE}_${SLHA_CODEC:-mixed}_ppl.txt"
 else
     OUTPUT_FILE="$WORK/${MODE}_ppl.txt"
 fi
+# Fused and scorediag operate on the standard (non-flash) attention path —
+# the SLHA custom node is a GGML op on that path. Flash attention must be
+# disabled explicitly (`-fa off`) or the fused/diag callback never runs.
+FA_ARGS=""
+if [ "$MODE" = "fused" ] || [ "$MODE" = "scorediag" ]; then
+    FA_ARGS="-fa off"
+fi
+
 llama.cpp/build/bin/llama-perplexity \
-    -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" \
+    -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" $FA_ARGS \
     2>&1 | tee "$OUTPUT_FILE" | grep -E "Final estimate|PPL"
 
 echo

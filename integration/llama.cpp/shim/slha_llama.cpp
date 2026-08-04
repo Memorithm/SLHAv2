@@ -109,6 +109,7 @@ slha_kv_mode slha_kv_mode_from_env() {
     if (mode_str == "roundtrip") return SLHA_KV_ROUNDTRIP;
     if (mode_str == "collect") return SLHA_KV_COLLECT;
     if (mode_str == "scorediag") return SLHA_KV_SCORE_DIAG;
+    if (mode_str == "fused") return SLHA_KV_FUSED;
     std::cerr << "[SLHA] unknown SLHA_KV_MODE='" << mode_str << "', falling back to off\n";
     return SLHA_KV_OFF;
 }
@@ -124,9 +125,10 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
         std::cout << "[SLHA] passthrough mode enabled (no compression)\n";
         state.initialized = true; std::atexit(slha_global_shutdown); return 0;
     }
-    if (mode == SLHA_KV_ROUNDTRIP || mode == SLHA_KV_COLLECT || mode == SLHA_KV_SCORE_DIAG) {
+    if (mode == SLHA_KV_ROUNDTRIP || mode == SLHA_KV_COLLECT || mode == SLHA_KV_SCORE_DIAG
+        || mode == SLHA_KV_FUSED) {
         if (state.weights_dir.empty()) {
-            std::cerr << "[SLHA] roundtrip/collect/scorediag mode requires weights_dir\n"; return -1;
+            std::cerr << "[SLHA] roundtrip/collect/scorediag/fused mode requires weights_dir\n"; return -1;
         }
         state.num_layers = 128;
         state.layers.resize(state.num_layers);
@@ -139,7 +141,8 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
             state.layers[i].codec = slha_codec_from_env();
         }
         std::string mode_name = (mode == SLHA_KV_ROUNDTRIP) ? "roundtrip" :
-                                (mode == SLHA_KV_COLLECT) ? "collect" : "scorediag";
+                                (mode == SLHA_KV_COLLECT) ? "collect" :
+                                (mode == SLHA_KV_FUSED) ? "fused" : "scorediag";
         std::cout << "[SLHA] " << mode_name << " mode enabled, weights_dir=" << state.weights_dir << "\n";
         state.initialized = true; std::atexit(slha_global_shutdown); return 0;
     }
@@ -197,15 +200,17 @@ void slha_k_transform(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth
         std::lock_guard<std::mutex> lock(*layer->collect_mutex);
         if (layer->n_embd_gqa == 0) {
             layer->n_embd_gqa = n_embd_gqa;
-            if (layer->mode == SLHA_KV_SCORE_DIAG || layer->mode == SLHA_KV_COLLECT) {
+            if (layer->mode == SLHA_KV_SCORE_DIAG || layer->mode == SLHA_KV_COLLECT
+                || layer->mode == SLHA_KV_FUSED) {
                 std::cout << "[SLHA] layer " << layer->layer_id
                           << " dim=" << n_embd_gqa << " mode=" << (int)layer->mode << "\n";
             }
-            if (layer->mode == SLHA_KV_SCORE_DIAG) {
+            if (layer->mode == SLHA_KV_SCORE_DIAG || layer->mode == SLHA_KV_FUSED) {
                 layer->tile_capacity = 8192;
                 layer->tile_buffer.resize(layer->tile_capacity * slha_tile_size());
             }
-            if ((layer->mode == SLHA_KV_ROUNDTRIP || layer->mode == SLHA_KV_SCORE_DIAG) && !layer->model_handle) {
+            if ((layer->mode == SLHA_KV_ROUNDTRIP || layer->mode == SLHA_KV_SCORE_DIAG
+                 || layer->mode == SLHA_KV_FUSED) && !layer->model_handle) {
                 auto & state = get_global_state();
                 slha_load_layer_model(layer, state.weights_dir);
             }
@@ -238,8 +243,10 @@ void slha_k_transform(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth
     const uint8_t * src_base = static_cast<const uint8_t *>(a->data);
     uint8_t * dst_base = static_cast<uint8_t *>(dst->data);
 
-    // MODE: SCORE_DIAG — encode K to tiles, pass K through
-    if (layer->mode == SLHA_KV_SCORE_DIAG && layer->model_handle) {
+    // MODE: SCORE_DIAG / FUSED — encode K to tiles, pass K through
+    // FUSED differs from SCORE_DIAG only in what the attention callback does
+    // with the tiles (replace QK vs diagnose); the encoding is identical.
+    if ((layer->mode == SLHA_KV_SCORE_DIAG || layer->mode == SLHA_KV_FUSED) && layer->model_handle) {
         auto * model = static_cast<SlhaModel *>(layer->model_handle);
         const size_t tile_sz = slha_tile_size();
         for (int64_t t = token_start; t < token_end; ++t) {
@@ -322,13 +329,18 @@ void slha_score_diag_callback(
     if (ith != 0) return;
 
     auto * layer = static_cast<slha_layer_state *>(userdata);
+    const bool fused = layer && layer->mode == SLHA_KV_FUSED;
     if (!layer || !layer->model_handle || ggml_nbytes(a) == 0) {
         std::memcpy(dst->data, a->data, ggml_nbytes(a));
         return;
     }
 
-    // Copy true scores through to output (diagnostic does not modify attention)
-    std::memcpy(dst->data, a->data, ggml_nbytes(a));
+    // SCORE_DIAG: copy the true scores through (diagnostic does not modify
+    // attention). FUSED: do NOT pre-copy — the SLHA scores replace them
+    // below, with per-slot fallback to the true score.
+    if (!fused) {
+        std::memcpy(dst->data, a->data, ggml_nbytes(a));
+    }
 
     const int64_t n_kv          = a->ne[0];
     const int64_t n_tokens_mul  = a->ne[1];
@@ -368,6 +380,11 @@ void slha_score_diag_callback(
     static std::mutex log_mutex;
     const int64_t call_no = g_total_calls.fetch_add(1, std::memory_order_relaxed) + 1;
 
+    // Diagnostic metrics run always in SCORE_DIAG mode; in FUSED mode they are
+    // opt-in (SLHA_FUSED_DIAG=1) so the fused path does not pay the cos/KL
+    // cost when only perplexity matters.
+    const bool do_diag = !fused || (std::getenv("SLHA_FUSED_DIAG") != nullptr);
+
     double sum_cos = 0.0, sum_kl = 0.0;
     int64_t n_comparisons = 0;
     int64_t n_rows = 0;
@@ -401,18 +418,44 @@ void slha_score_diag_callback(
 
                 // Score all tiles
                 size_t n_scored = 0;
+                float * dst_data = static_cast<float *>(dst->data);
                 for (int64_t kv = 0; kv < n_kv; ++kv) {
-                    if (kv >= static_cast<int64_t>(layer->tile_capacity)) {
-                        slha_scores[static_cast<size_t>(kv)] = 0.0f;
+                    float score = 0.0f;
+                    bool have = false;
+                    if (kv < static_cast<int64_t>(layer->tile_capacity)) {
+                        auto * tile = reinterpret_cast<const SciRustSlhaTile *>(
+                            layer->tile_buffer.data() + static_cast<size_t>(kv) * tile_sz);
+                        int rc2 = slha_process_tile(tile, q_coarse.data(), q_sign.data(), &score);
+                        if (rc2 == SLHA_OK) have = true;
+                    }
+                    if (!have) {
+                        // Fallback: no tile for this slot (warmup / encode
+                        // failure) — use the true score so attention is never
+                        // broken. In FUSED mode this slot simply keeps the
+                        // baseline behaviour for that position.
+                        const size_t idx = static_cast<size_t>(
+                            kv + t * n_kv + h * n_kv * n_tokens_mul + s * n_kv * n_tokens_mul * n_head);
+                        score = kq_data[idx];
+                        if (fused) {
+                            dst_data[idx] = score;
+                        }
+                        slha_scores[static_cast<size_t>(kv)] = score;
                         continue;
                     }
-                    auto * tile = reinterpret_cast<const SciRustSlhaTile *>(
-                        layer->tile_buffer.data() + static_cast<size_t>(kv) * tile_sz);
-                    rc = slha_process_tile(tile, q_coarse.data(), q_sign.data(), &slha_scores[static_cast<size_t>(kv)]);
-                    if (rc != SLHA_OK) slha_scores[static_cast<size_t>(kv)] = 0.0f;
-                    else n_scored++;
+                    slha_scores[static_cast<size_t>(kv)] = score;
+                    if (fused) {
+                        const size_t idx = static_cast<size_t>(
+                            kv + t * n_kv + h * n_kv * n_tokens_mul + s * n_kv * n_tokens_mul * n_head);
+                        dst_data[idx] = score;
+                    }
+                    n_scored++;
                 }
-                if (n_scored == 0) continue;
+                if (n_scored == 0 && !fused) continue;
+
+                // Diagnostic metrics (SCORE_DIAG always; FUSED only when
+                // SLHA_FUSED_DIAG=1) — compares the SLHA scores with the true
+                // QK^T scores that would have been used.
+                if (!do_diag) continue;
 
                 // Read true scores from kq tensor
                 // kq layout: [n_kv, n_tokens_mul, n_head, n_stream]
@@ -467,7 +510,7 @@ void slha_score_diag_callback(
 
         {
             std::lock_guard<std::mutex> lock(log_mutex);
-            std::cout << "[SLHA] score_diag"
+            std::cout << "[SLHA] " << (fused ? "fused_qk" : "score_diag")
                       << " layer=" << layer->layer_id
                       << " call=" << call_no
                       << " rows=" << n_rows
@@ -481,18 +524,28 @@ void slha_score_diag_callback(
     }
 }
 
-ggml_tensor * slha_build_score_diag(
+ggml_tensor * slha_build_fused_qk(
     ggml_context * ctx, ggml_tensor * kq, ggml_tensor * k, ggml_tensor * q,
     int il, struct ggml_cgraph * gf)
 {
     (void)k; // unused — needed for graph dependency
     auto * layer = slha_get_layer_state(il);
-    if (!layer || layer->mode != SLHA_KV_SCORE_DIAG) return kq;
+    if (!layer) return kq;
+    if (layer->mode != SLHA_KV_SCORE_DIAG && layer->mode != SLHA_KV_FUSED) return kq;
 
-    ggml_tensor * diag = ggml_map_custom2(ctx, kq, q, slha_score_diag_callback, 1, layer);
-    ggml_set_name(diag, "kq_slha_diag");
-    ggml_build_forward_expand(gf, diag);
-    return kq;
+    ggml_tensor * node = ggml_map_custom2(ctx, kq, q, slha_score_diag_callback, 1, layer);
+    ggml_set_name(node, layer->mode == SLHA_KV_FUSED ? "kq_slha_fused" : "kq_slha_diag");
+
+    // SCORE_DIAG is a side branch: the node must be expanded explicitly or the
+    // graph scheduler would never run it (nothing downstream depends on it).
+    // FUSED replaces kq: the softmax below consumes the returned node, so it
+    // is already a dependency of the graph output and must NOT be expanded
+    // separately (doing so would double-add it).
+    if (layer->mode == SLHA_KV_SCORE_DIAG) {
+        ggml_build_forward_expand(gf, node);
+        return kq;
+    }
+    return node;
 }
 
 void slha_flush_collected_activations(const char * output_dir) {
