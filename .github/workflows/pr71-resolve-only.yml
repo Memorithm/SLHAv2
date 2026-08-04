@@ -1,0 +1,162 @@
+name: PR71 resolve only
+
+on:
+  push:
+    branches:
+      - fix/pr71-rebased-audit-installer
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    if: ${{ !contains(github.event.head_commit.message, '[pr71-resolved-tree]') && !contains(github.event.head_commit.message, '[pr71-resolve-failure]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt
+      - name: Resolve and always publish the result
+        shell: bash
+        run: |
+          set -u
+          start_sha="$(git rev-parse HEAD)"
+          log=/tmp/pr71-resolve-only.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          resolve_tree() {
+            set -euxo pipefail
+            git fetch origin feat/llama-compressed-score-quality-gate:refs/remotes/origin/pr71
+
+            set +e
+            git merge --no-commit --no-ff refs/remotes/origin/pr71
+            merge_rc=$?
+            set -e
+            test "$merge_rc" -ne 0
+
+            git checkout --ours -- \
+              Cargo.lock \
+              integration/llama.cpp/README.md \
+              integration/llama.cpp/build_and_roundtrip.sh \
+              integration/llama.cpp/shim/slha_llama.cpp \
+              integration/llama.cpp/shim/slha_llama.hpp \
+              slha-python/Cargo.toml
+            git add \
+              Cargo.lock \
+              integration/llama.cpp/README.md \
+              integration/llama.cpp/build_and_roundtrip.sh \
+              integration/llama.cpp/shim/slha_llama.cpp \
+              integration/llama.cpp/shim/slha_llama.hpp \
+              slha-python/Cargo.toml
+
+            git restore --source=HEAD --staged --worktree docs/INTEGRATION.md
+            git rm -f scirust/src/attention/slha_v2.rs
+
+            git checkout --theirs -- slhav2-vram/Cargo.toml
+            git add slhav2-vram/Cargo.toml
+
+            git show :2:slha-c/src/lib.rs > /tmp/slha-c-master.rs
+            git show :1:slha-c/src/lib.rs > /tmp/slha-c-base.rs
+            git show :3:slha-c/src/lib.rs > /tmp/slha-c-pr71.rs
+            git merge-file --union /tmp/slha-c-master.rs /tmp/slha-c-base.rs /tmp/slha-c-pr71.rs || true
+            cp /tmp/slha-c-master.rs slha-c/src/lib.rs
+            git add slha-c/src/lib.rs
+
+            git checkout --theirs -- slhav2-vram/src/mem/tile.rs
+            python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("slhav2-vram/src/mem/tile.rs")
+          text = path.read_text()
+          old = '''    fn score_unchecked(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
+              let latent = self.latent();
+              let scale = self.scale();
+              let gscales = self.group_scales();
+              let flags = self.flags();
+              if self.is_warm() {
+                  codec::score_warm(q_coarse, latent, scale, gscales, flags)
+              } else {
+                  let residual = self.residual();
+                  codec::score_hot(
+                      q_coarse,
+                      q_sign,
+                      latent,
+                      &residual,
+                      scale,
+                      self.dynamic_lambda(),
+                      gscales,
+                      flags,
+                  )
+              }
+          }
+          '''
+          new = '''    fn score_unchecked(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
+              let q_coarse: &[f32; codec::D_C] = q_coarse
+                  .try_into()
+                  .expect("q_coarse slice must be exactly D_C elements");
+              let q_sign: &[u64; codec::RESIDUAL_WORDS] = q_sign
+                  .try_into()
+                  .expect("q_sign slice must be exactly RESIDUAL_WORDS elements");
+              self.to_slha_tile().compute_score(q_coarse, q_sign)
+          }
+          '''
+          if old not in text:
+              raise SystemExit("score_unchecked anchor not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+            git add slhav2-vram/src/mem/tile.rs
+
+            git rm -f integration/llama.cpp/patches/0002-slha-fused-qk.patch
+
+            unresolved="$(git diff --name-only --diff-filter=U)"
+            test -z "$unresolved" || { printf 'Unresolved files:\n%s\n' "$unresolved"; return 2; }
+
+            cargo generate-lockfile
+            cargo fmt --all
+            cargo fmt --all -- --check
+          }
+
+          set +e
+          resolve_tree >"$log" 2>&1
+          rc=$?
+          set -e
+
+          if [ "$rc" -ne 0 ]; then
+            git merge --abort >/dev/null 2>&1 || true
+            git reset --hard "$start_sha"
+            mkdir -p .pr71-resolution
+            cp "$log" .pr71-resolution/resolve-only.log
+            {
+              echo "# PR 71 tree resolution failure"
+              echo
+              echo "- exit_code: $rc"
+              echo "- source: a3b3272e8a6bab3bd11234913c8de7a49c80e603"
+              echo "- start: $start_sha"
+            } > .pr71-resolution/STATUS.md
+            git add .pr71-resolution
+            git commit -m "ci: record PR 71 tree resolution failure [pr71-resolve-failure]"
+            git push origin HEAD:fix/pr71-rebased-audit-installer
+            exit 0
+          fi
+
+          mkdir -p .pr71-resolution
+          cp "$log" .pr71-resolution/resolve-only.log
+          {
+            echo "# PR 71 resolved tree"
+            echo
+            echo "- resolution_exit_code: 0"
+            echo "- source: a3b3272e8a6bab3bd11234913c8de7a49c80e603"
+            echo "- base: 70c3a4f8b20a00bc43ce8e923398392793d717d6"
+            echo "- unresolved_conflicts: 0"
+            echo "- fused_qk_split_out: true"
+            echo "- validation_pending: true"
+          } > .pr71-resolution/STATUS.md
+          git rm -f .github/workflows/pr71-resolve-only.yml
+          git rm -f .pr71-resolution/SENTINEL.txt 2>/dev/null || true
+          git add -A
+          git commit -m "fix: resolve PR 71 tree onto master [pr71-resolved-tree]"
+          git push origin HEAD:fix/pr71-rebased-audit-installer
