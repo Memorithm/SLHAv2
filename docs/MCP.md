@@ -16,6 +16,17 @@ cargo build --release -p slha-mcp
 # Le binaire est à : target/release/slha-mcp
 ```
 
+### Auto-enregistrement (recommandé)
+
+Après une [installation augmentée](AUTO_INSTALL.md) (`./install.sh --auto`), le
+serveur est **déjà enregistré** auprès de votre agent — aucune étape manuelle.
+Pour enregistrer manuellement :
+
+```bash
+./scripts/register_mcp.sh          # enregistre auprès de l'agent détecté
+./scripts/register_mcp.sh --stdout # imprime la config, n'écrit rien
+```
+
 ### Claude Code (CLI)
 
 ```bash

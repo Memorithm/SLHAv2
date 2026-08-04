@@ -51,6 +51,17 @@ jobs:
         # Normal Cargo targets link Python normally, so the complete workspace
         # bench graph must compile without excluding `slha-python`.
         run: cargo --locked bench --workspace --all-features --no-run
+      - name: Python binding test (maturin wheel + test_binding.py)
+        # The Python-side binding test is a standalone script, not part of
+        # `cargo test`. Build the wheel with maturin and run it so the pyo3
+        # surface is actually exercised in CI.
+        run: |
+          python3 -m pip install --quiet "maturin>=1.0,<2.0"
+          cd slha-python
+          python3 -m maturin build --release --out "$RUNNER_TEMP/wheels"
+          python3 -m pip install --quiet --force-reinstall "$RUNNER_TEMP"/wheels/*.whl
+          python3 tests/test_binding.py
+          cd ..
       - name: AArch64 cross-check (NEON path + C-ABI crate)
         # Type-check scirust (NEON kernel path), slha-c (C-ABI, the crate that
         # broke on aarch64 because of `*mut i8` vs `*mut c_char`) and slha-mcp
