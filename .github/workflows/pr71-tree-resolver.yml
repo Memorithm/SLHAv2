@@ -1,0 +1,58 @@
+name: PR71 tree resolver
+
+on:
+  push:
+    branches:
+      - fix/pr71-ci-repair
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Attempt merge resolution
+        run: |
+          mkdir -p .pr71-resolution
+          set +e
+          (
+            set -euxo pipefail
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git fetch origin feat/llama-compressed-score-quality-gate:refs/remotes/origin/pr71
+            git merge --no-commit --no-ff refs/remotes/origin/pr71 || true
+            git checkout --ours -- Cargo.lock integration/llama.cpp/README.md integration/llama.cpp/build_and_roundtrip.sh integration/llama.cpp/shim/slha_llama.cpp integration/llama.cpp/shim/slha_llama.hpp slha-c/src/lib.rs slha-python/Cargo.toml slhav2-vram/Cargo.toml slhav2-vram/src/mem/tile.rs
+            git add Cargo.lock integration/llama.cpp/README.md integration/llama.cpp/build_and_roundtrip.sh integration/llama.cpp/shim/slha_llama.cpp integration/llama.cpp/shim/slha_llama.hpp slha-c/src/lib.rs slha-python/Cargo.toml slhav2-vram/Cargo.toml slhav2-vram/src/mem/tile.rs
+            git rm -f scirust/src/attention/slha_v2.rs
+            git restore --source=HEAD --staged --worktree docs/INTEGRATION.md
+            git rm -f integration/llama.cpp/patches/0002-slha-fused-qk.patch
+            test -z "$(git diff --name-only --diff-filter=U)"
+          ) > .pr71-resolution/resolve.log 2>&1
+          echo "$?" > .pr71-resolution/resolve.rc
+          exit 0
+      - name: Publish resolved tree or failure report
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rc="$(cat .pr71-resolution/resolve.rc)"
+          if [ "$rc" -ne 0 ]; then
+            cp .pr71-resolution/resolve.log /tmp/pr71-resolve.log
+            git merge --abort >/dev/null 2>&1 || true
+            git reset --hard "$GITHUB_SHA"
+            mkdir -p .pr71-resolution
+            cp /tmp/pr71-resolve.log .pr71-resolution/resolve.log
+            printf '# PR 71 tree resolution failure\n\n- exit_code: %s\n- state_preserved: true\n' "$rc" > .pr71-resolution/STATUS.md
+            git add .pr71-resolution
+            git commit -m "ci: record PR 71 resolution failure [pr71-tree-report]"
+          else
+            printf '# PR 71 resolved tree\n\n- resolution_exit_code: 0\n- unresolved_conflicts: 0\n- fused_qk_split_out: true\n- validation_pending: true\n' > .pr71-resolution/STATUS.md
+            git rm -f .github/workflows/pr71-tree-resolver.yml
+            git add -A
+            git commit -m "fix: resolve PR 71 tree onto master [pr71-tree-report]"
+          fi
+          git push origin HEAD:fix/pr71-ci-repair
