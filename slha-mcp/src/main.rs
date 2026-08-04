@@ -216,7 +216,8 @@ fn handle_initialize(id: Json, params: Option<&Json>, lifecycle: &mut Lifecycle)
     }
 
     let params = match params {
-        Some(Json::Obj(_)) => params.expect("matched Some"),
+        // Bind in the pattern: no panic path, however unreachable.
+        Some(p @ Json::Obj(_)) => p,
         _ => {
             return err_response(id, -32602, "initialize params must be an object");
         }
@@ -238,7 +239,8 @@ fn handle_initialize(id: Json, params: Option<&Json>, lifecycle: &mut Lifecycle)
     }
 
     let client_info = match params.get("clientInfo") {
-        Some(Json::Obj(_)) => params.get("clientInfo").expect("matched Some"),
+        // Bind in the pattern instead of re-fetching and expecting.
+        Some(ci @ Json::Obj(_)) => ci,
         _ => {
             return err_response(id, -32602, "initialize requires a clientInfo object");
         }
@@ -632,7 +634,8 @@ fn validate_object_fields(value: &Json, allowed: &[&str], context: &str) -> Resu
 
 fn handle_tool_call(id: Json, params: Option<&Json>) -> Json {
     let params = match params {
-        Some(Json::Obj(_)) => params.expect("matched Some"),
+        // Bind in the pattern: no panic path, however unreachable.
+        Some(p @ Json::Obj(_)) => p,
         Some(_) => {
             return err_response(id, -32602, "tools/call params must be an object");
         }
@@ -651,7 +654,7 @@ fn handle_tool_call(id: Json, params: Option<&Json>) -> Json {
 
     let arguments = match params.get("arguments") {
         None => Json::Obj(vec![]),
-        Some(Json::Obj(_)) => params.get("arguments").expect("matched Some").clone(),
+        Some(a @ Json::Obj(_)) => a.clone(),
         Some(_) => {
             return err_response(id, -32602, "tool arguments must be an object");
         }

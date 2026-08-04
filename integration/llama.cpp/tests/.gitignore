@@ -1,0 +1,8 @@
+replace_strict_tests
+calibration_tests
+layer_mask_tests
+score_scale_tests
+scale_fit_tests
+score_oracle_tests
+calib_test_tmp
+*.o

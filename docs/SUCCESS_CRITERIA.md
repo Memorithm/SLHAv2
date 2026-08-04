@@ -15,7 +15,7 @@
 
 | # | Critère | Cible (GO) | État HOT / WARM / COLD |
 |---|---|---|---|
-| **F** | **Fidélité** — Δ-perplexité relative vs FP16, sur le contexte cible | **≤ 1 % (HOT)**, **≤ 3 % (WARM)** ; COLD = borne documentée, non gated | à mesurer (Phase 2) |
+| **F** | **Fidélité** — Δ-perplexité relative vs FP16, sur le contexte cible | **≤ 1 % (HOT)**, **≤ 3 % (WARM)** ; COLD = borne documentée, non gated | **mesuré : NO-GO** (+42,3 % sur le chemin remplacement de score, Qwen2.5-1.5B) — verdict §5 |
 | **M** | **Mémoire** — empreinte du cache KV vs baseline FP16 | **≥ 2× de réduction** à fidélité égale (HOT = 128 o/tuile) | proxy mesuré : ~2× moins d'octets/token |
 | **D** | **Débit** — tokens/s de bout en bout, contexte long (≥ 32 K) | **≥ 1× (aucune régression)** vs FP16 ; l'avantage bande passante est un bonus, pas le critère | proxy mesuré : ~2,5× (Xeon AVX2), ~1,3× (scalaire) |
 
@@ -108,6 +108,47 @@ Reproductible, graines fixes ; synthèse et tableaux dans
 
 Ces résultats valident la **mécanique** et cadrent les cibles ci-dessus ; ils ne
 remplacent pas la mesure de perplexité sur un modèle réel (Phase 2).
+
+---
+
+## 5. Verdict au 30 juillet 2026 — critère F : **NO-GO** sur le chemin mesuré
+
+La Phase 2 a produit son premier chiffre de perplexité réel. Le chemin mesuré
+est le **remplacement direct des scores d'attention** par les scores
+reconstruits depuis les tuiles SLHA compressées, dans llama.cpp (opération GGML
+custom à la couture Q·Kᵀ), sur **Qwen2.5-1.5B-Instruct (q8_0)** — « llama »
+dans les noms de branches désigne llama.cpp, le moteur, pas le modèle —
+perplexité WikiText-2, validation gelée à 12 chunks (27/27), déterminisme
+prouvé (3 exécutions par configuration, écart-type 0,0).
+
+| Mesure (12 chunks) | PPL |
+|---|---:|
+| Contrôle pass-through (modèle inchangé) | 11,8644 |
+| Remplacement SLHA strict | 16,8855 |
+
+Δ-perplexité relative : **+42,32 %** — contre une cible F de **≤ 1 % (HOT)**.
+
+**Statut : NO-GO.** Le critère F, pré-enregistré ci-dessus comme seul critère
+décisif, n'est pas atteint sur ce chemin. Les deux autres critères n'y changent
+rien : **M n'est pas en jeu** (les tuiles compressées vivent *à côté* du cache
+KV de llama.cpp ; aucune réduction mémoire n'est revendiquée par cette
+intégration) et **D est en régression** (≈ 3,1× plus lent par passe —
+implémentation CPU de mesure, non optimisée). M et D ne rachètent jamais un
+échec de F (§1).
+
+Source versionnée (dans l'arbre depuis le rapatriement des résultats de la
+branche `research/llama-rank-transplant-oracle`, commits `de14212`/`f0d3930`) :
+`integration/llama.cpp/results/rank_transplant_oracle.json`, clé
+`validation_12chunk.endpoints` ; débit : section « Research: rank-transplant
+oracle » du `integration/llama.cpp/README.md`.
+
+**Ce que le NO-GO ne dit pas.** Le diagnostic causal mesuré par le même
+artefact (oracles de transplantation de rang) attribue **65,92 %** du déficit au
+mauvais **classement des clés** (Oracle A : PPL 13,5756), et corriger le seul
+top-16 atteint **98,42 %** de ce bénéfice. C'est une *direction de correction*,
+pas une récupération : les oracles lisent la ligne Q·K exacte que le cache
+compressé existe précisément pour éviter de calculer. **Aucune fraction de ces
+65,92 % n'est convertie en gain déployable à ce jour.**
 
 ---
 

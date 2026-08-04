@@ -20,18 +20,25 @@
 // These are numeric kernels: indexing parallel arrays and matvec rows by
 // position reads closer to the math than iterator-chain rewrites would.
 #![allow(clippy::needless_range_loop)]
+// Every unsafe block must state its precondition. This is a permanent gate
+// (clippy runs with -D warnings in CI), not a one-time audit pass.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod adapter;
 pub mod attention;
 pub mod audit;
 pub mod ccos;
+pub mod engine;
 pub mod eventlog;
+pub mod exec_binding;
 pub mod incoherence;
 pub mod json;
 pub mod learned;
 pub mod linalg;
 pub mod metrics;
+pub mod norm_manifest;
 pub mod numa;
+pub mod ranking;
 pub mod residual;
 pub mod rng;
 pub mod rope;

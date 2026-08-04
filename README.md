@@ -20,19 +20,6 @@ processeur (caches L1/L2/L3) plutôt que de dépendre d'un GPU.
 > l'objectif du projet — **à valider sur un modèle réel** : aucune mesure de bout
 > en bout n'existe encore (voir les *Réserves d'honnêteté* plus bas).
 
----
-
-## Relation avec le contrat mémoire CCOS d'OpenClaw
-
-SLHA v2 est un **noyau de compression de KV-cache** ; son
-`scirust/src/ccos.rs` (`ElasticKvCache`, arena KV Soft-Paging) est un artefact
-**différent** du serveur mémoire CCOS — il ne partage que le nom « CCOS ». Le
-serveur `slha-mcp` expose des outils `slha.*`
-(audit / explain / compress / score / benchmark), **pas**
-`ccos.recall` / `get` / `sync`. OpenClaw atteint le vrai serveur mémoire CCOS
-via `mcporter` (serverName `ccos`) sur
-[Memorithm/CCOS](https://github.com/Memorithm/CCOS). Ne pas renommer
-`serverInfo.name` en `ccos` (cela casserait le routage mcporter).
 
 ## Comment ça marche (en 30 secondes)
 
@@ -91,25 +78,6 @@ cargo test --locked -p scirust -p slha-mcp -p slha-c
 
 **Prérequis :** Git et Rust doivent être installés au préalable.
 L’installeur local ne télécharge aucun script et ne supprime aucun répertoire.
-
-### Installation augmentée — auto-détection et branchement agent
-
-Pour que l'installation **détecte elle-même** votre environnement (agent IA,
-moteur LLM, GPU, toolchains) et **branche automatiquement le serveur MCP**
-auprès de votre agent :
-
-```bash
-./install.sh --auto --yes        # détecte + construit + teste + branche l'agent
-./install.sh --detect            # juste le rapport d'environnement (rien d'autre)
-```
-
-`--auto` détecte l'agent (Claude Code / Claude Desktop / Cursor), le moteur
-LLM local (Ollama / vLLM / llama.cpp) et ses modèles, la GPU NVIDIA + version
-CUDA, le CPU/RAM, puis s'enregistre auprès de l'agent détecté — l'agent dispose
-alors des outils `slha.*` sans aucune commande manuelle. L'enregistrement est
-best-effort : si aucun agent n'est utilisable, l'installation réussit quand
-même et explique quoi faire. Détails et drapeaux (`--with-cuda`, `--skip-*`,
-`--register-mcp`, …) : [`docs/AUTO_INSTALL.md`](docs/AUTO_INSTALL.md).
 
 ---
 
@@ -237,7 +205,7 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 
 ## État du projet
 
-- ✅ **Mécanisme validé** : suite workspace complète couvrant le noyau, l’auto-audit, CCOS, l’ABI C, le serveur MCP et le binding Python ; tests unitaires, intégration, propriétés (property-based), doctests et parité SIMD ≡ scalaire par ISA ; Clippy `-D warnings` et CI
+- ✅ **Mécanisme validé** : suite workspace complète couvrant le noyau, l’auto-audit, CCOS, l’ABI C, le serveur MCP et le binding Python ; tests unitaires, intégration, property/fuzz et doctests ; Clippy `-D warnings` et CI
 - ✅ **Performance** : x86 **AVX2 ~×11,5 / AVX-512 ~×14,1** (banc Xeon partagé) ; ARM **NEON ~×5,7** (Jetson Thor AGX 128) — vs scalaire. _Ratios **indicatifs**, dépendants du CPU et de l'auto-vectorisation ; mesurez les vôtres : `cargo run --example cycles --release`._
 - ✅ **Multi-plateforme** : x86_64 (AVX2/AVX-512/VPOPCNTDQ) + ARM AArch64 (NEON, **mesuré sur Jetson Thor** ; `sve2` détecté) — kit `examples/platform_report`
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)

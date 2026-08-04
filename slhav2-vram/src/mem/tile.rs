@@ -123,25 +123,13 @@ impl SerializedTile {
     }
 
     fn score_unchecked(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
-        let latent = self.latent();
-        let scale = self.scale();
-        let gscales = self.group_scales();
-        let flags = self.flags();
-        if self.is_warm() {
-            codec::score_warm(q_coarse, latent, scale, gscales, flags)
-        } else {
-            let residual = self.residual();
-            codec::score_hot(
-                q_coarse,
-                q_sign,
-                latent,
-                &residual,
-                scale,
-                self.dynamic_lambda(),
-                gscales,
-                flags,
-            )
-        }
+        let q_coarse: &[f32; codec::D_C] = q_coarse
+            .try_into()
+            .expect("q_coarse slice must be exactly D_C elements");
+        let q_sign: &[u64; codec::RESIDUAL_WORDS] = q_sign
+            .try_into()
+            .expect("q_sign slice must be exactly RESIDUAL_WORDS elements");
+        self.to_slha_tile().compute_score(q_coarse, q_sign)
     }
 
     pub fn to_slha_tile(&self) -> SciRustSlhaTile {

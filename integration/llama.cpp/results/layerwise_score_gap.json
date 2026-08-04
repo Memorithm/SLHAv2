@@ -1,0 +1,1326 @@
+{
+  "experiment": "layerwise SLHA compressed-score quality degradation diagnosis",
+  "note": "diagnostic milestone; the production score mathematics are unchanged",
+  "provenance": {
+    "slha_repo_commit": "23e27c098329db9eb2873e3b697596fb10c4e25b",
+    "llama_cpp_commit": "fdb1db877c526ec90f668eca1b858da5dba85560",
+    "measurement_branch": "research/llama-score-gap-layerwise",
+    "model": "Qwen2.5-1.5B-Instruct Q8_0",
+    "model_sha256": "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8",
+    "dataset_test_sha256": "136677b69515d194d28d42728ac1ba29850b67cd30715bbb7a4a023815ab01d5",
+    "calibration_manifest_sha256": "b940977bf3528597aa5caed1aad4bd6c4fe5dd302482dda89e393dd67a4288e7",
+    "weight_manifest_sha256": "fc3c229f0215bf66175d6ae7cdeb3e351ff8b2c2894a15ba10ac897e7cb94248",
+    "weights_from_pipeline": "PR #59 fail-closed calibration + atomic training (valid=true, sanitized=false, rejected_rows=0)",
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+    "cores": 4,
+    "gcc": "13.3.0",
+    "cmake": "3.28.3",
+    "rustc": "1.94.1",
+    "screening_protocol": {
+      "chunks": 4,
+      "n_ctx": 512,
+      "batch_size": 512,
+      "parallel": 1,
+      "threads": 4,
+      "flash_attn": "off",
+      "codec": "mixed",
+      "note": "reduced from 12 chunks because this session's host was materially slower; the pass-through control uses the same 4 chunks so deltas are consistent"
+    },
+    "primary_baseline": "B pass-through custom-operation control (SLHA_SCORE_LAYERS=none)",
+    "runs_per_config": "one (screening, as permitted)",
+    "diagnostic_instrumentation_out_of_tree_sha256": {
+      "slha_score_diag.hpp": "4e1ad8f62221cdbac7c24fe10b8327ff37481b158e1f17e36234b02f5151ca36",
+      "slha_score_diag.cpp": "bc090d6c16b7da24a048936430c8562e9aa993698aba007101be45620c92f7f7",
+      "slha_llama_diag.cpp": "76b6ab7723c009d28bf475a1774e8fe820411251c82886c121806493afda1548"
+    }
+  },
+  "controls": {
+    "A_unpatched_baseline": {
+      "runs": [
+        9.3852
+      ],
+      "mean": 9.3852,
+      "sd": 0.0,
+      "min": 9.3852,
+      "max": 9.3852,
+      "spread": 0.0,
+      "n": 1
+    },
+    "B_passthrough": {
+      "runs": [
+        9.3852
+      ],
+      "mean": 9.3852,
+      "sd": 0.0,
+      "min": 9.3852,
+      "max": 9.3852,
+      "spread": 0.0,
+      "n": 1
+    },
+    "C_all_replace": {
+      "runs": [
+        13.5421
+      ],
+      "mean": 13.5421,
+      "sd": 0.0,
+      "min": 13.5421,
+      "max": 13.5421,
+      "spread": 0.0,
+      "n": 1
+    }
+  },
+  "single_layer": [
+    {
+      "layer": 0,
+      "ppl": 9.6378,
+      "ppl_std": 0.85041,
+      "abs_delta_vs_passthrough": 0.25260000000000105,
+      "rel_delta_vs_passthrough": 0.026914716788134622,
+      "seconds_per_pass": 24.24,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "0",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 19.7147,
+        "rel_l2": 0.0233209,
+        "cosine": 0.999524,
+        "top1": 0.555827,
+        "top5": 0.625977,
+        "max_abs_err": 728.406,
+        "mismatch_frac": 0.7565611203511556
+      }
+    },
+    {
+      "layer": 1,
+      "ppl": 9.4119,
+      "ppl_std": 0.83315,
+      "abs_delta_vs_passthrough": 0.026699999999999946,
+      "rel_delta_vs_passthrough": 0.0028449047436389153,
+      "seconds_per_pass": 9.27,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "1",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 3.04078,
+        "rel_l2": 0.143815,
+        "cosine": 0.997962,
+        "top1": 0.685628,
+        "top5": 0.768945,
+        "max_abs_err": 28.8706,
+        "mismatch_frac": 0.9137333234151205
+      }
+    },
+    {
+      "layer": 2,
+      "ppl": 9.4951,
+      "ppl_std": 0.84216,
+      "abs_delta_vs_passthrough": 0.10990000000000144,
+      "rel_delta_vs_passthrough": 0.011709926266888446,
+      "seconds_per_pass": 23.31,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "2",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.41665,
+        "rel_l2": 0.540106,
+        "cosine": 0.993109,
+        "top1": 0.495199,
+        "top5": 0.745182,
+        "max_abs_err": 63.1256,
+        "mismatch_frac": 0.9914663632710775
+      }
+    },
+    {
+      "layer": 3,
+      "ppl": 9.3201,
+      "ppl_std": 0.81972,
+      "abs_delta_vs_passthrough": -0.06509999999999927,
+      "rel_delta_vs_passthrough": -0.006936453138984707,
+      "seconds_per_pass": 20.19,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "3",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.46199,
+        "rel_l2": 1.31256,
+        "cosine": 0.981551,
+        "top1": 0.508708,
+        "top5": 0.720671,
+        "max_abs_err": 69.9089,
+        "mismatch_frac": 0.9906485875447592
+      }
+    },
+    {
+      "layer": 4,
+      "ppl": 9.4416,
+      "ppl_std": 0.83735,
+      "abs_delta_vs_passthrough": 0.056400000000000006,
+      "rel_delta_vs_passthrough": 0.006009461705664239,
+      "seconds_per_pass": 9.24,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "4",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.93941,
+        "rel_l2": 0.088099,
+        "cosine": 0.99759,
+        "top1": 0.890869,
+        "top5": 0.767839,
+        "max_abs_err": 45.441,
+        "mismatch_frac": 0.9882319768269857
+      }
+    },
+    {
+      "layer": 5,
+      "ppl": 9.962,
+      "ppl_std": 0.8801,
+      "abs_delta_vs_passthrough": 0.5768000000000004,
+      "rel_delta_vs_passthrough": 0.06145846652175771,
+      "seconds_per_pass": 9.21,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "5",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.30351,
+        "rel_l2": 0.296586,
+        "cosine": 0.994119,
+        "top1": 0.515706,
+        "top5": 0.694548,
+        "max_abs_err": 83.782,
+        "mismatch_frac": 0.9922771453857422
+      }
+    },
+    {
+      "layer": 6,
+      "ppl": 9.4861,
+      "ppl_std": 0.84156,
+      "abs_delta_vs_passthrough": 0.1009000000000011,
+      "rel_delta_vs_passthrough": 0.010750969611729224,
+      "seconds_per_pass": 12.57,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "6",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.61715,
+        "rel_l2": 0.598538,
+        "cosine": 0.996106,
+        "top1": 0.704671,
+        "top5": 0.787744,
+        "max_abs_err": 60.2105,
+        "mismatch_frac": 0.9887684186299642
+      }
+    },
+    {
+      "layer": 7,
+      "ppl": 9.4588,
+      "ppl_std": 0.83716,
+      "abs_delta_vs_passthrough": 0.07360000000000078,
+      "rel_delta_vs_passthrough": 0.007842134424412988,
+      "seconds_per_pass": 9.27,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "7",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 3.92179,
+        "rel_l2": 0.190825,
+        "cosine": 0.99683,
+        "top1": 0.772705,
+        "top5": 0.810579,
+        "max_abs_err": 45.3874,
+        "mismatch_frac": 0.9849441846211752
+      }
+    },
+    {
+      "layer": 8,
+      "ppl": 9.5067,
+      "ppl_std": 0.84439,
+      "abs_delta_vs_passthrough": 0.12150000000000105,
+      "rel_delta_vs_passthrough": 0.012945914844649135,
+      "seconds_per_pass": 9.55,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "8",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.40453,
+        "rel_l2": 0.271706,
+        "cosine": 0.995092,
+        "top1": 0.654541,
+        "top5": 0.779183,
+        "max_abs_err": 54.2676,
+        "mismatch_frac": 0.9910484949747721
+      }
+    },
+    {
+      "layer": 9,
+      "ppl": 9.4127,
+      "ppl_std": 0.83584,
+      "abs_delta_vs_passthrough": 0.027499999999999858,
+      "rel_delta_vs_passthrough": 0.0029301453352086116,
+      "seconds_per_pass": 9.64,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "9",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.57435,
+        "rel_l2": 0.126574,
+        "cosine": 0.997051,
+        "top1": 0.793213,
+        "top5": 0.758854,
+        "max_abs_err": 52.1419,
+        "mismatch_frac": 0.9897403717041016
+      }
+    },
+    {
+      "layer": 10,
+      "ppl": 9.4078,
+      "ppl_std": 0.83328,
+      "abs_delta_vs_passthrough": 0.02260000000000062,
+      "rel_delta_vs_passthrough": 0.0024080467118442464,
+      "seconds_per_pass": 9.71,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "10",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.58789,
+        "rel_l2": 0.174363,
+        "cosine": 0.996664,
+        "top1": 0.782064,
+        "top5": 0.749023,
+        "max_abs_err": 45.269,
+        "mismatch_frac": 0.9900614420572916
+      }
+    },
+    {
+      "layer": 11,
+      "ppl": 9.4594,
+      "ppl_std": 0.83907,
+      "abs_delta_vs_passthrough": 0.07420000000000115,
+      "rel_delta_vs_passthrough": 0.007906064868090309,
+      "seconds_per_pass": 10.62,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "11",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.11398,
+        "rel_l2": 0.39439,
+        "cosine": 0.995614,
+        "top1": 0.706543,
+        "top5": 0.754964,
+        "max_abs_err": 48.6375,
+        "mismatch_frac": 0.9907738367716471
+      }
+    },
+    {
+      "layer": 12,
+      "ppl": 9.5354,
+      "ppl_std": 0.84218,
+      "abs_delta_vs_passthrough": 0.1501999999999999,
+      "rel_delta_vs_passthrough": 0.016003921067212195,
+      "seconds_per_pass": 8.87,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "12",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.79622,
+        "rel_l2": 0.795212,
+        "cosine": 0.988316,
+        "top1": 0.458089,
+        "top5": 0.718132,
+        "max_abs_err": 66.6767,
+        "mismatch_frac": 0.9932010968526205
+      }
+    },
+    {
+      "layer": 13,
+      "ppl": 9.4593,
+      "ppl_std": 0.83848,
+      "abs_delta_vs_passthrough": 0.07410000000000139,
+      "rel_delta_vs_passthrough": 0.00789540979414412,
+      "seconds_per_pass": 9.08,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "13",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.69071,
+        "rel_l2": 1.65716,
+        "cosine": 0.989611,
+        "top1": 0.481445,
+        "top5": 0.683936,
+        "max_abs_err": 98.4177,
+        "mismatch_frac": 0.9931286176045736
+      }
+    },
+    {
+      "layer": 14,
+      "ppl": 9.4503,
+      "ppl_std": 0.83551,
+      "abs_delta_vs_passthrough": 0.06510000000000105,
+      "rel_delta_vs_passthrough": 0.006936453138984897,
+      "seconds_per_pass": 8.78,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "14",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.45744,
+        "rel_l2": 0.31393,
+        "cosine": 0.9974,
+        "top1": 0.736491,
+        "top5": 0.815771,
+        "max_abs_err": 38.1898,
+        "mismatch_frac": 0.9878174463907877
+      }
+    },
+    {
+      "layer": 15,
+      "ppl": 9.4073,
+      "ppl_std": 0.83059,
+      "abs_delta_vs_passthrough": 0.02210000000000001,
+      "rel_delta_vs_passthrough": 0.0023547713421131155,
+      "seconds_per_pass": 8.64,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "15",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.26993,
+        "rel_l2": 0.251302,
+        "cosine": 0.996382,
+        "top1": 0.677002,
+        "top5": 0.739242,
+        "max_abs_err": 130.251,
+        "mismatch_frac": 0.9789708455403646
+      }
+    },
+    {
+      "layer": 16,
+      "ppl": 9.4771,
+      "ppl_std": 0.83926,
+      "abs_delta_vs_passthrough": 0.09190000000000076,
+      "rel_delta_vs_passthrough": 0.00979201295657,
+      "seconds_per_pass": 9.5,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "16",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.59127,
+        "rel_l2": 1.0215,
+        "cosine": 0.988857,
+        "top1": 0.516927,
+        "top5": 0.713932,
+        "max_abs_err": 66.8991,
+        "mismatch_frac": 0.9940381050109863
+      }
+    },
+    {
+      "layer": 17,
+      "ppl": 9.4834,
+      "ppl_std": 0.84219,
+      "abs_delta_vs_passthrough": 0.09820000000000029,
+      "rel_delta_vs_passthrough": 0.01046328261518138,
+      "seconds_per_pass": 9.73,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "17",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.46005,
+        "rel_l2": 0.484369,
+        "cosine": 0.993096,
+        "top1": 0.700114,
+        "top5": 0.689274,
+        "max_abs_err": 42.9994,
+        "mismatch_frac": 0.992980162302653
+      }
+    },
+    {
+      "layer": 18,
+      "ppl": 9.3912,
+      "ppl_std": 0.82873,
+      "abs_delta_vs_passthrough": 0.006000000000000227,
+      "rel_delta_vs_passthrough": 0.0006393044367728154,
+      "seconds_per_pass": 9.35,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "18",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.51493,
+        "rel_l2": 0.140827,
+        "cosine": 0.997761,
+        "top1": 0.617594,
+        "top5": 0.72002,
+        "max_abs_err": 55.1561,
+        "mismatch_frac": 0.9835634231567383
+      }
+    },
+    {
+      "layer": 19,
+      "ppl": 9.432,
+      "ppl_std": 0.83416,
+      "abs_delta_vs_passthrough": 0.04680000000000106,
+      "rel_delta_vs_passthrough": 0.004986574606827885,
+      "seconds_per_pass": 9.82,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "19",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.25172,
+        "rel_l2": 0.380856,
+        "cosine": 0.996061,
+        "top1": 0.588786,
+        "top5": 0.791341,
+        "max_abs_err": 58.5699,
+        "mismatch_frac": 0.9900177319844564
+      }
+    },
+    {
+      "layer": 20,
+      "ppl": 9.4589,
+      "ppl_std": 0.83859,
+      "abs_delta_vs_passthrough": 0.07370000000000054,
+      "rel_delta_vs_passthrough": 0.007852789498359177,
+      "seconds_per_pass": 9.16,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "20",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.34247,
+        "rel_l2": 984765.0,
+        "cosine": 0.989157,
+        "top1": 0.646159,
+        "top5": 0.765316,
+        "max_abs_err": 54.7556,
+        "mismatch_frac": 0.9922417004903158
+      }
+    },
+    {
+      "layer": 21,
+      "ppl": 9.4049,
+      "ppl_std": 0.82921,
+      "abs_delta_vs_passthrough": 0.019700000000000273,
+      "rel_delta_vs_passthrough": 0.002099049567404027,
+      "seconds_per_pass": 9.2,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "21",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.3411,
+        "rel_l2": 0.311454,
+        "cosine": 0.996139,
+        "top1": 0.82666,
+        "top5": 0.771289,
+        "max_abs_err": 39.0142,
+        "mismatch_frac": 0.9905144373575846
+      }
+    },
+    {
+      "layer": 22,
+      "ppl": 9.405,
+      "ppl_std": 0.82974,
+      "abs_delta_vs_passthrough": 0.01980000000000004,
+      "rel_delta_vs_passthrough": 0.0021097046413502156,
+      "seconds_per_pass": 9.45,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "22",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.97216,
+        "rel_l2": 0.126339,
+        "cosine": 0.997565,
+        "top1": 0.830078,
+        "top5": 0.817204,
+        "max_abs_err": 66.3911,
+        "mismatch_frac": 0.9879738489786783
+      }
+    },
+    {
+      "layer": 23,
+      "ppl": 9.4746,
+      "ppl_std": 0.83974,
+      "abs_delta_vs_passthrough": 0.08940000000000126,
+      "rel_delta_vs_passthrough": 0.009525636107914723,
+      "seconds_per_pass": 9.27,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "23",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 3.75443,
+        "rel_l2": 0.221005,
+        "cosine": 0.99726,
+        "top1": 0.763753,
+        "top5": 0.822363,
+        "max_abs_err": 44.2154,
+        "mismatch_frac": 0.9881536165873209
+      }
+    },
+    {
+      "layer": 24,
+      "ppl": 9.5058,
+      "ppl_std": 0.84099,
+      "abs_delta_vs_passthrough": 0.12060000000000137,
+      "rel_delta_vs_passthrough": 0.01285001917913325,
+      "seconds_per_pass": 9.98,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "24",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 5.40598,
+        "rel_l2": 0.0970609,
+        "cosine": 0.996772,
+        "top1": 0.572673,
+        "top5": 0.686198,
+        "max_abs_err": 121.428,
+        "mismatch_frac": 0.98935333887736
+      }
+    },
+    {
+      "layer": 25,
+      "ppl": 9.3282,
+      "ppl_std": 0.82052,
+      "abs_delta_vs_passthrough": -0.05699999999999861,
+      "rel_delta_vs_passthrough": -0.006073392149341369,
+      "seconds_per_pass": 9.59,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "25",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 4.33074,
+        "rel_l2": 0.135597,
+        "cosine": 0.997374,
+        "top1": 0.87207,
+        "top5": 0.781755,
+        "max_abs_err": 65.664,
+        "mismatch_frac": 0.9879220326741537
+      }
+    },
+    {
+      "layer": 26,
+      "ppl": 9.4252,
+      "ppl_std": 0.83369,
+      "abs_delta_vs_passthrough": 0.040000000000000924,
+      "rel_delta_vs_passthrough": 0.004262029578485374,
+      "seconds_per_pass": 10.41,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "26",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 2.1968,
+        "rel_l2": 0.0901839,
+        "cosine": 0.998911,
+        "top1": 0.965251,
+        "top5": 0.870736,
+        "max_abs_err": 47.2955,
+        "mismatch_frac": 0.9806408882141113
+      }
+    },
+    {
+      "layer": 27,
+      "ppl": 9.3924,
+      "ppl_std": 0.83152,
+      "abs_delta_vs_passthrough": 0.007200000000000983,
+      "rel_delta_vs_passthrough": 0.0007671653241274543,
+      "seconds_per_pass": 8.95,
+      "replace_valid": "true",
+      "mask_valid": "true",
+      "mask_executed": "27",
+      "failed_vectors": "0",
+      "fallback_vectors": "0",
+      "shadow_metrics": {
+        "mae": 1.93037,
+        "rel_l2": 0.4739,
+        "cosine": 0.997715,
+        "top1": 0.788411,
+        "top5": 0.863835,
+        "max_abs_err": 26.8409,
+        "mismatch_frac": 0.9860736529032389
+      }
+    }
+  ],
+  "ranked_by_damage": [
+    {
+      "layer": 5,
+      "abs_delta": 0.5768000000000004,
+      "rel_delta": 0.06145846652175771
+    },
+    {
+      "layer": 0,
+      "abs_delta": 0.25260000000000105,
+      "rel_delta": 0.026914716788134622
+    },
+    {
+      "layer": 12,
+      "abs_delta": 0.1501999999999999,
+      "rel_delta": 0.016003921067212195
+    },
+    {
+      "layer": 8,
+      "abs_delta": 0.12150000000000105,
+      "rel_delta": 0.012945914844649135
+    },
+    {
+      "layer": 24,
+      "abs_delta": 0.12060000000000137,
+      "rel_delta": 0.01285001917913325
+    },
+    {
+      "layer": 2,
+      "abs_delta": 0.10990000000000144,
+      "rel_delta": 0.011709926266888446
+    },
+    {
+      "layer": 6,
+      "abs_delta": 0.1009000000000011,
+      "rel_delta": 0.010750969611729224
+    },
+    {
+      "layer": 17,
+      "abs_delta": 0.09820000000000029,
+      "rel_delta": 0.01046328261518138
+    },
+    {
+      "layer": 16,
+      "abs_delta": 0.09190000000000076,
+      "rel_delta": 0.00979201295657
+    },
+    {
+      "layer": 23,
+      "abs_delta": 0.08940000000000126,
+      "rel_delta": 0.009525636107914723
+    },
+    {
+      "layer": 11,
+      "abs_delta": 0.07420000000000115,
+      "rel_delta": 0.007906064868090309
+    },
+    {
+      "layer": 13,
+      "abs_delta": 0.07410000000000139,
+      "rel_delta": 0.00789540979414412
+    },
+    {
+      "layer": 20,
+      "abs_delta": 0.07370000000000054,
+      "rel_delta": 0.007852789498359177
+    },
+    {
+      "layer": 7,
+      "abs_delta": 0.07360000000000078,
+      "rel_delta": 0.007842134424412988
+    },
+    {
+      "layer": 14,
+      "abs_delta": 0.06510000000000105,
+      "rel_delta": 0.006936453138984897
+    },
+    {
+      "layer": 4,
+      "abs_delta": 0.056400000000000006,
+      "rel_delta": 0.006009461705664239
+    },
+    {
+      "layer": 19,
+      "abs_delta": 0.04680000000000106,
+      "rel_delta": 0.004986574606827885
+    },
+    {
+      "layer": 26,
+      "abs_delta": 0.040000000000000924,
+      "rel_delta": 0.004262029578485374
+    },
+    {
+      "layer": 9,
+      "abs_delta": 0.027499999999999858,
+      "rel_delta": 0.0029301453352086116
+    },
+    {
+      "layer": 1,
+      "abs_delta": 0.026699999999999946,
+      "rel_delta": 0.0028449047436389153
+    },
+    {
+      "layer": 10,
+      "abs_delta": 0.02260000000000062,
+      "rel_delta": 0.0024080467118442464
+    },
+    {
+      "layer": 15,
+      "abs_delta": 0.02210000000000001,
+      "rel_delta": 0.0023547713421131155
+    },
+    {
+      "layer": 22,
+      "abs_delta": 0.01980000000000004,
+      "rel_delta": 0.0021097046413502156
+    },
+    {
+      "layer": 21,
+      "abs_delta": 0.019700000000000273,
+      "rel_delta": 0.002099049567404027
+    },
+    {
+      "layer": 27,
+      "abs_delta": 0.007200000000000983,
+      "rel_delta": 0.0007671653241274543
+    },
+    {
+      "layer": 18,
+      "abs_delta": 0.006000000000000227,
+      "rel_delta": 0.0006393044367728154
+    },
+    {
+      "layer": 25,
+      "abs_delta": -0.05699999999999861,
+      "rel_delta": -0.006073392149341369
+    },
+    {
+      "layer": 3,
+      "abs_delta": -0.06509999999999927,
+      "rel_delta": -0.006936453138984707
+    }
+  ],
+  "additivity": {
+    "sum_of_single_layer_deltas": 2.2454,
+    "all_layer_replacement_delta": 4.1569,
+    "whole_over_sum_ratio": 1.851,
+    "classification": "super-additive (amplifying): all-layer damage exceeds the sum of single-layer damages, i.e. errors compound through the residual stream"
+  },
+  "prefix": {
+    "0-1": {
+      "ppl": 9.6421,
+      "abs_delta_vs_passthrough": 0.2568999999999999,
+      "rel_delta_vs_passthrough": 0.02737288496782167,
+      "seconds_per_pass": 10.35,
+      "mask_executed": "0,1"
+    },
+    "0-3": {
+      "ppl": 9.7778,
+      "abs_delta_vs_passthrough": 0.39259999999999984,
+      "rel_delta_vs_passthrough": 0.04183182031283296,
+      "seconds_per_pass": 10.65,
+      "mask_executed": "0,1,2,3"
+    },
+    "0-6": {
+      "ppl": 10.9311,
+      "abs_delta_vs_passthrough": 1.5459000000000014,
+      "rel_delta_vs_passthrough": 0.16471678813450982,
+      "seconds_per_pass": 12.01,
+      "mask_executed": "0,1,2,3,4,5,6"
+    },
+    "0-13": {
+      "ppl": 12.2383,
+      "abs_delta_vs_passthrough": 2.8531000000000013,
+      "rel_delta_vs_passthrough": 0.3039999147594086,
+      "seconds_per_pass": 13.73,
+      "mask_executed": "0,1,2,3,4,5,6,7,8,9,10,11,12,13"
+    },
+    "0-20": {
+      "ppl": 13.1579,
+      "abs_delta_vs_passthrough": 3.7727000000000004,
+      "rel_delta_vs_passthrough": 0.40198397476878495,
+      "seconds_per_pass": 15.64,
+      "mask_executed": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20"
+    },
+    "0": {
+      "ppl": 9.6378,
+      "abs_delta_vs_passthrough": 0.25260000000000105
+    },
+    "0-27": {
+      "ppl": 13.5421,
+      "abs_delta_vs_passthrough": 4.1569
+    }
+  },
+  "suffix": {
+    "26-27": {
+      "ppl": 9.4117,
+      "abs_delta_vs_passthrough": 0.026500000000000412,
+      "rel_delta_vs_passthrough": 0.0028235945957465385,
+      "seconds_per_pass": 9.93,
+      "mask_executed": "26,27"
+    },
+    "24-27": {
+      "ppl": 9.4778,
+      "abs_delta_vs_passthrough": 0.0926000000000009,
+      "rel_delta_vs_passthrough": 0.009866598474193508,
+      "seconds_per_pass": 10.42,
+      "mask_executed": "24,25,26,27"
+    },
+    "21-27": {
+      "ppl": 9.5384,
+      "abs_delta_vs_passthrough": 0.1532,
+      "rel_delta_vs_passthrough": 0.016323573285598605,
+      "seconds_per_pass": 10.93,
+      "mask_executed": "21,22,23,24,25,26,27"
+    },
+    "14-27": {
+      "ppl": 9.9639,
+      "abs_delta_vs_passthrough": 0.5787000000000013,
+      "rel_delta_vs_passthrough": 0.06166091292673586,
+      "seconds_per_pass": 13.58,
+      "mask_executed": "14,15,16,17,18,19,20,21,22,23,24,25,26,27"
+    },
+    "7-27": {
+      "ppl": 10.6367,
+      "abs_delta_vs_passthrough": 1.2515,
+      "rel_delta_vs_passthrough": 0.13334825043685805,
+      "seconds_per_pass": 16.31,
+      "mask_executed": "7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27"
+    },
+    "0-27": {
+      "ppl": 13.5421,
+      "abs_delta_vs_passthrough": 4.1569
+    },
+    "27": {
+      "ppl": 9.3924,
+      "abs_delta_vs_passthrough": 0.007200000000000983
+    }
+  },
+  "partition": {
+    "7-13": {
+      "ppl": 9.8767,
+      "abs_delta_vs_passthrough": 0.49150000000000027,
+      "rel_delta_vs_passthrough": 0.052369688445637844,
+      "seconds_per_pass": 11.97,
+      "mask_executed": "7,8,9,10,11,12,13"
+    },
+    "14-20": {
+      "ppl": 9.8359,
+      "abs_delta_vs_passthrough": 0.4507000000000012,
+      "rel_delta_vs_passthrough": 0.04802241827558296,
+      "seconds_per_pass": 12.22,
+      "mask_executed": "14,15,16,17,18,19,20"
+    }
+  },
+  "per_layer_shadow_metrics": {
+    "0": {
+      "layer": 0,
+      "n": 6291456,
+      "max_abs_err": 728.406,
+      "mae": 19.7147,
+      "rel_l2": 0.0233209,
+      "mismatch_frac": 0.7565611203511556,
+      "cosine": 0.999524,
+      "top1": 0.555827,
+      "top5": 0.625977
+    },
+    "1": {
+      "layer": 1,
+      "n": 6291456,
+      "max_abs_err": 28.8706,
+      "mae": 3.04078,
+      "rel_l2": 0.143815,
+      "mismatch_frac": 0.9137333234151205,
+      "cosine": 0.997962,
+      "top1": 0.685628,
+      "top5": 0.768945
+    },
+    "2": {
+      "layer": 2,
+      "n": 6291456,
+      "max_abs_err": 63.1256,
+      "mae": 4.41665,
+      "rel_l2": 0.540106,
+      "mismatch_frac": 0.9914663632710775,
+      "cosine": 0.993109,
+      "top1": 0.495199,
+      "top5": 0.745182
+    },
+    "3": {
+      "layer": 3,
+      "n": 6291456,
+      "max_abs_err": 69.9089,
+      "mae": 4.46199,
+      "rel_l2": 1.31256,
+      "mismatch_frac": 0.9906485875447592,
+      "cosine": 0.981551,
+      "top1": 0.508708,
+      "top5": 0.720671
+    },
+    "4": {
+      "layer": 4,
+      "n": 6291456,
+      "max_abs_err": 45.441,
+      "mae": 4.93941,
+      "rel_l2": 0.088099,
+      "mismatch_frac": 0.9882319768269857,
+      "cosine": 0.99759,
+      "top1": 0.890869,
+      "top5": 0.767839
+    },
+    "5": {
+      "layer": 5,
+      "n": 6291456,
+      "max_abs_err": 83.782,
+      "mae": 5.30351,
+      "rel_l2": 0.296586,
+      "mismatch_frac": 0.9922771453857422,
+      "cosine": 0.994119,
+      "top1": 0.515706,
+      "top5": 0.694548
+    },
+    "6": {
+      "layer": 6,
+      "n": 6291456,
+      "max_abs_err": 60.2105,
+      "mae": 5.61715,
+      "rel_l2": 0.598538,
+      "mismatch_frac": 0.9887684186299642,
+      "cosine": 0.996106,
+      "top1": 0.704671,
+      "top5": 0.787744
+    },
+    "7": {
+      "layer": 7,
+      "n": 6291456,
+      "max_abs_err": 45.3874,
+      "mae": 3.92179,
+      "rel_l2": 0.190825,
+      "mismatch_frac": 0.9849441846211752,
+      "cosine": 0.99683,
+      "top1": 0.772705,
+      "top5": 0.810579
+    },
+    "8": {
+      "layer": 8,
+      "n": 6291456,
+      "max_abs_err": 54.2676,
+      "mae": 5.40453,
+      "rel_l2": 0.271706,
+      "mismatch_frac": 0.9910484949747721,
+      "cosine": 0.995092,
+      "top1": 0.654541,
+      "top5": 0.779183
+    },
+    "9": {
+      "layer": 9,
+      "n": 6291456,
+      "max_abs_err": 52.1419,
+      "mae": 5.57435,
+      "rel_l2": 0.126574,
+      "mismatch_frac": 0.9897403717041016,
+      "cosine": 0.997051,
+      "top1": 0.793213,
+      "top5": 0.758854
+    },
+    "10": {
+      "layer": 10,
+      "n": 6291456,
+      "max_abs_err": 45.269,
+      "mae": 4.58789,
+      "rel_l2": 0.174363,
+      "mismatch_frac": 0.9900614420572916,
+      "cosine": 0.996664,
+      "top1": 0.782064,
+      "top5": 0.749023
+    },
+    "11": {
+      "layer": 11,
+      "n": 6291456,
+      "max_abs_err": 48.6375,
+      "mae": 5.11398,
+      "rel_l2": 0.39439,
+      "mismatch_frac": 0.9907738367716471,
+      "cosine": 0.995614,
+      "top1": 0.706543,
+      "top5": 0.754964
+    },
+    "12": {
+      "layer": 12,
+      "n": 6291456,
+      "max_abs_err": 66.6767,
+      "mae": 5.79622,
+      "rel_l2": 0.795212,
+      "mismatch_frac": 0.9932010968526205,
+      "cosine": 0.988316,
+      "top1": 0.458089,
+      "top5": 0.718132
+    },
+    "13": {
+      "layer": 13,
+      "n": 6291456,
+      "max_abs_err": 98.4177,
+      "mae": 5.69071,
+      "rel_l2": 1.65716,
+      "mismatch_frac": 0.9931286176045736,
+      "cosine": 0.989611,
+      "top1": 0.481445,
+      "top5": 0.683936
+    },
+    "14": {
+      "layer": 14,
+      "n": 6291456,
+      "max_abs_err": 38.1898,
+      "mae": 4.45744,
+      "rel_l2": 0.31393,
+      "mismatch_frac": 0.9878174463907877,
+      "cosine": 0.9974,
+      "top1": 0.736491,
+      "top5": 0.815771
+    },
+    "15": {
+      "layer": 15,
+      "n": 6291456,
+      "max_abs_err": 130.251,
+      "mae": 5.26993,
+      "rel_l2": 0.251302,
+      "mismatch_frac": 0.9789708455403646,
+      "cosine": 0.996382,
+      "top1": 0.677002,
+      "top5": 0.739242
+    },
+    "16": {
+      "layer": 16,
+      "n": 6291456,
+      "max_abs_err": 66.8991,
+      "mae": 4.59127,
+      "rel_l2": 1.0215,
+      "mismatch_frac": 0.9940381050109863,
+      "cosine": 0.988857,
+      "top1": 0.516927,
+      "top5": 0.713932
+    },
+    "17": {
+      "layer": 17,
+      "n": 6291456,
+      "max_abs_err": 42.9994,
+      "mae": 4.46005,
+      "rel_l2": 0.484369,
+      "mismatch_frac": 0.992980162302653,
+      "cosine": 0.993096,
+      "top1": 0.700114,
+      "top5": 0.689274
+    },
+    "18": {
+      "layer": 18,
+      "n": 6291456,
+      "max_abs_err": 55.1561,
+      "mae": 4.51493,
+      "rel_l2": 0.140827,
+      "mismatch_frac": 0.9835634231567383,
+      "cosine": 0.997761,
+      "top1": 0.617594,
+      "top5": 0.72002
+    },
+    "19": {
+      "layer": 19,
+      "n": 6291456,
+      "max_abs_err": 58.5699,
+      "mae": 4.25172,
+      "rel_l2": 0.380856,
+      "mismatch_frac": 0.9900177319844564,
+      "cosine": 0.996061,
+      "top1": 0.588786,
+      "top5": 0.791341
+    },
+    "20": {
+      "layer": 20,
+      "n": 6291456,
+      "max_abs_err": 54.7556,
+      "mae": 4.34247,
+      "rel_l2": 984765.0,
+      "mismatch_frac": 0.9922417004903158,
+      "cosine": 0.989157,
+      "top1": 0.646159,
+      "top5": 0.765316
+    },
+    "21": {
+      "layer": 21,
+      "n": 6291456,
+      "max_abs_err": 39.0142,
+      "mae": 4.3411,
+      "rel_l2": 0.311454,
+      "mismatch_frac": 0.9905144373575846,
+      "cosine": 0.996139,
+      "top1": 0.82666,
+      "top5": 0.771289
+    },
+    "22": {
+      "layer": 22,
+      "n": 6291456,
+      "max_abs_err": 66.3911,
+      "mae": 4.97216,
+      "rel_l2": 0.126339,
+      "mismatch_frac": 0.9879738489786783,
+      "cosine": 0.997565,
+      "top1": 0.830078,
+      "top5": 0.817204
+    },
+    "23": {
+      "layer": 23,
+      "n": 6291456,
+      "max_abs_err": 44.2154,
+      "mae": 3.75443,
+      "rel_l2": 0.221005,
+      "mismatch_frac": 0.9881536165873209,
+      "cosine": 0.99726,
+      "top1": 0.763753,
+      "top5": 0.822363
+    },
+    "24": {
+      "layer": 24,
+      "n": 6291456,
+      "max_abs_err": 121.428,
+      "mae": 5.40598,
+      "rel_l2": 0.0970609,
+      "mismatch_frac": 0.98935333887736,
+      "cosine": 0.996772,
+      "top1": 0.572673,
+      "top5": 0.686198
+    },
+    "25": {
+      "layer": 25,
+      "n": 6291456,
+      "max_abs_err": 65.664,
+      "mae": 4.33074,
+      "rel_l2": 0.135597,
+      "mismatch_frac": 0.9879220326741537,
+      "cosine": 0.997374,
+      "top1": 0.87207,
+      "top5": 0.781755
+    },
+    "26": {
+      "layer": 26,
+      "n": 6291456,
+      "max_abs_err": 47.2955,
+      "mae": 2.1968,
+      "rel_l2": 0.0901839,
+      "mismatch_frac": 0.9806408882141113,
+      "cosine": 0.998911,
+      "top1": 0.965251,
+      "top5": 0.870736
+    },
+    "27": {
+      "layer": 27,
+      "n": 6291456,
+      "max_abs_err": 26.8409,
+      "mae": 1.93037,
+      "rel_l2": 0.4739,
+      "mismatch_frac": 0.9860736529032389,
+      "cosine": 0.997715,
+      "top1": 0.788411,
+      "top5": 0.863835
+    }
+  },
+  "correlation_analysis": {
+    "note": "Pearson/Spearman of single-layer PPL damage vs per-layer raw-score shadow metrics; 28 layers -> exploratory, moderate confidence.",
+    "results": {
+      "mae": {
+        "pearson": 0.3666484768421713,
+        "spearman": 0.49753694581280794,
+        "n": 28
+      },
+      "rel_l2": {
+        "pearson": -0.011012136564444618,
+        "spearman": 0.1663929939792009,
+        "n": 28
+      },
+      "cosine": {
+        "pearson": 0.012238842703547626,
+        "spearman": -0.34318555008210183,
+        "n": 28
+      },
+      "top1": {
+        "pearson": -0.4154929492986167,
+        "spearman": -0.5084838533114395,
+        "n": 28
+      },
+      "top5": {
+        "pearson": -0.4163039936734443,
+        "spearman": -0.3990147783251232,
+        "n": 28
+      },
+      "max_abs_err": {
+        "pearson": 0.3264749196842713,
+        "spearman": 0.2977558839627806,
+        "n": 28
+      },
+      "mismatch_frac": {
+        "pearson": -0.22771873842794416,
+        "spearman": 0.42692939244663386,
+        "n": 28
+      }
+    },
+    "best_predictor": "top1"
+  },
+  "score_path_audit": {
+    "insertion_point": "llm_graph_context::build_attn_mha, immediately after ggml_mul_mat_set_prec(kq, GGML_PREC_F32) and BEFORE ggml_soft_max_ext",
+    "baseline_path": "attn = softmax(kq_scale * (q_rot . K_rot) + causal_mask); kq_scale = 1/sqrt(head_dim)",
+    "slha_path": "attn = softmax(kq_scale * slha_score(prepared(q_rot), compressed_K_tile[k]) + causal_mask), for k<n_written; logits=0 for k>=n_written (masked out)",
+    "findings": {
+      "scale_1_over_sqrt_headdim": "applied AFTER replacement (inside ggml_soft_max_ext via kq_scale) to the SLHA scores; both paths unscaled at the replacement point",
+      "positional_bias": "RoPE applied to q and cache-K before mul_mat; SLHA uses rotated q and post-RoPE compressed K. f_max_alibi_bias=0 (RoPE model, no ALiBi). No additive kq_b for Qwen2.5 non-flash.",
+      "causal_mask": "applied AFTER replacement (kq_mask inside soft_max_ext); SLHA scores masked identically to baseline",
+      "softcap_clipping": "NONE for Qwen2.5 (hparams.attn_soft_cap=false); the tanh softcap block is skipped",
+      "gqa_head_mapping": "op maps query head h -> kv_head = h/gqa_factor; Qwen2.5-1.5B n_head=12 n_kv_head=2 gqa_factor=6 (correct)",
+      "active_kv_lengths": "baseline over n_kv; SLHA over n_check=min(n_written,n_kv); padded positions (k>=n_written) are exactly zero in baseline and set to 0 by replace, and masked out by causal mask (verified in PR #58 padding audit)"
+    },
+    "semantic_mismatches_beyond_approximation": [
+      "SCALE/TEMPERATURE: the same fixed kq_scale=1/sqrt(head_dim) is applied to SLHA scores whose magnitude is not calibrated to Q.K; if E[|slha|] != E[|Q.K|] the effective softmax temperature differs -> attention-sharpness distortion (affine a_layer hypothesis)",
+      "All other elements (mask, RoPE positional info, GQA mapping, no softcap, active KV length, post-softmax pipeline) are IDENTICAL between the two paths"
+    ]
+  },
+  "diagnostics_softmax_affine_perhead_position": {
+    "status": "not captured in this run",
+    "reason": "the out-of-tree diagnostic instrumentation (archived + hashed above) segfaulted during the shadow pass on this host and did not emit metrics; the committed shadow metrics (mae/rel_l2/cosine/top1/top5/max_abs, used for the correlation) and the score-path audit stand in for the post-softmax analysis. Top-1 attention agreement is the argmax/attention-selection signal and is the strongest damage predictor."
+  },
+  "limitations": [
+    "Screening is single-run at a reduced chunk count; run-to-run PPL variability is not formally characterised.",
+    "28 layers -> correlation analysis is exploratory (moderate |rho| ~0.5).",
+    "Post-softmax / affine / per-head / position diagnostics rely on out-of-tree instrumentation (archived + hashed above); the committed change is the layer mask only.",
+    "The screening chunk count differs from the 12-chunk protocol; absolute PPLs are not comparable to PR #58, but within-experiment deltas (vs the same-protocol control) are."
+  ],
+  "unresolved_risks": [
+    "Root cause of the +44% gap not proven; the score-path audit points to a score-magnitude/temperature mismatch as the leading hypothesis, not yet confirmed by an end-to-end temperature experiment.",
+    "Super-additivity means per-layer screening understates joint damage; a full pairwise interaction map was not completed."
+  ]
+}

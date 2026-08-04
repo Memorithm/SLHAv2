@@ -31,14 +31,6 @@ fn validate_finite(values: &[f32], name: &str) -> PyResult<()> {
 }
 
 fn validate_tile(tile: &SciRustSlhaTile) -> PyResult<()> {
-    // Defense-in-depth: validation must never let a Rust panic cross the
-    // PyO3 boundary. The checks below are pure today, but wrapping the whole
-    // body guarantees a future check that panics becomes a RuntimeError.
-    catch_unwind(AssertUnwindSafe(|| validate_tile_inner(tile)))
-        .map_err(|_| runtime_error("panic caught while validating tile"))?
-}
-
-fn validate_tile_inner(tile: &SciRustSlhaTile) -> PyResult<()> {
     let unknown = tile.flags & !KNOWN_FLAGS;
 
     if unknown != 0 {
@@ -206,9 +198,7 @@ fn encode_latent(
 
     validate_tile(&tile)?;
 
-    Ok(PySlhaTile {
-        inner: Box::new(tile),
-    })
+    Ok(PySlhaTile { inner: tile })
 }
 
 fn checked_score(
@@ -232,10 +222,14 @@ fn checked_score(
 }
 
 /// Python wrapper for `SciRustSlhaTile`.
-#[pyclass]
+///
+/// `skip_from_py_object`: nothing extracts `PySlhaTile` by value (all methods
+/// take `&self`), so the automatic `FromPyObject` impl pyo3 is deprecating was
+/// dead code — skipping it matches the upcoming pyo3 default.
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PySlhaTile {
-    pub inner: Box<SciRustSlhaTile>,
+    pub inner: SciRustSlhaTile,
 }
 
 #[pymethods]
@@ -281,9 +275,7 @@ impl PySlhaTile {
 
         validate_tile(&tile)?;
 
-        Ok(Self {
-            inner: Box::new(tile),
-        })
+        Ok(Self { inner: tile })
     }
 
     #[getter]
@@ -409,7 +401,8 @@ fn compress_latent(
 /// runs. Any Rust panic is converted into `RuntimeError`.
 #[pyfunction]
 fn run_audit(py: Python<'_>) -> PyResult<String> {
-    let result = py.allow_threads(|| catch_unwind(AssertUnwindSafe(|| audit::run().to_compact())));
+    // pyo3 0.24 renamed `allow_threads` to `detach`; 0.29 removed the old name.
+    let result = py.detach(|| catch_unwind(AssertUnwindSafe(|| audit::run().to_compact())));
 
     result.map_err(|_| runtime_error("panic while running the SLHA self-audit"))
 }
