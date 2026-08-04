@@ -10,10 +10,12 @@ use scirust::audit;
 use scirust::learned::LearnedModel;
 use scirust::weights;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::mem::{align_of, size_of};
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// Public C ABI revision.
 pub const SLHA_ABI_VERSION: u32 = 1;
@@ -30,7 +32,6 @@ pub const SLHA_ERR_INVALID_HANDLE: i32 = -7;
 pub const SLHA_ERR_IO: i32 = -8;
 pub const SLHA_ERR_UTF8: i32 = -9;
 
-const MODEL_MAGIC: u64 = 0x534C_4841_4D4F_4401;
 const LAST_ERROR_CAPACITY: usize = 512;
 const CODEC_FLAGS: u16 = FLAG_NF4 | FLAG_MIXED | FLAG_TQ3 | FLAG_MIX3;
 const KNOWN_TILE_FLAGS: u16 =
@@ -120,13 +121,53 @@ static SLHA_CONTEXT: SlhaContext = SlhaContext {
     _reserved: 0,
 };
 
-/// Opaque handle to a loaded SLHA projection model (`.slhw`).
+/// Opaque token returned to C. The projection itself is owned by the
+/// process-wide registry and is never reached by dereferencing this pointer.
+#[repr(C, align(8))]
 pub struct SlhaModel {
-    magic: u64,
-    inner: LearnedModel,
+    _opaque: u64,
 }
 
-unsafe fn model_ref<'a>(model: *const SlhaModel) -> Result<&'a SlhaModel, FfiError> {
+struct ModelEntry {
+    token: Box<SlhaModel>,
+    inner: Arc<LearnedModel>,
+}
+
+// The boxes are intentional: their stable allocations quarantine every
+// released token address and prevent stale handles becoming live again.
+#[allow(clippy::vec_box)]
+struct ModelRegistry {
+    live: HashMap<usize, ModelEntry>,
+    retired_tokens: Vec<Box<SlhaModel>>,
+}
+
+fn model_registry() -> &'static RwLock<ModelRegistry> {
+    static REGISTRY: OnceLock<RwLock<ModelRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        RwLock::new(ModelRegistry {
+            live: HashMap::new(),
+            retired_tokens: Vec::new(),
+        })
+    })
+}
+
+fn register_model(inner: LearnedModel) -> *mut SlhaModel {
+    let mut token = Box::new(SlhaModel { _opaque: 0 });
+    let pointer = (&mut *token) as *mut SlhaModel;
+    let entry = ModelEntry {
+        token,
+        inner: Arc::new(inner),
+    };
+    let previous = model_registry()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .live
+        .insert(pointer as usize, entry);
+    debug_assert!(previous.is_none());
+    pointer
+}
+
+fn model_arc(model: *const SlhaModel) -> Result<Arc<LearnedModel>, FfiError> {
     if model.is_null() {
         return Err(ffi_error(SLHA_ERR_NULL, "model handle is NULL"));
     }
@@ -138,18 +179,33 @@ unsafe fn model_ref<'a>(model: *const SlhaModel) -> Result<&'a SlhaModel, FfiErr
         ));
     }
 
-    // SAFETY: the caller promises a live handle created by slha_weights_load.
-    let model = unsafe { &*model };
-
-    if model.magic != MODEL_MAGIC {
-        return Err(ffi_error(
-            SLHA_ERR_INVALID_HANDLE,
-            "model handle has an invalid magic value",
-        ));
-    }
-
-    Ok(model)
+    model_registry()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .live
+        .get(&(model as usize))
+        .map(|entry| Arc::clone(&entry.inner))
+        .ok_or_else(|| {
+            ffi_error(
+                SLHA_ERR_INVALID_HANDLE,
+                "model handle is not a live SLHA handle",
+            )
+        })
 }
+
+fn unregister_model(model: *mut SlhaModel) -> bool {
+    let mut registry = model_registry()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(entry) = registry.live.remove(&(model as usize)) else {
+        return false;
+    };
+    registry.retired_tokens.push(entry.token);
+    true
+}
+
+/// Defensive upper bound for caller-controlled batch lengths.
+pub const MAX_TILES: usize = 1 << 20;
 
 unsafe fn read_array_unaligned<T: Copy, const N: usize>(pointer: *const T) -> [T; N] {
     core::array::from_fn(|index| {
@@ -377,14 +433,14 @@ pub unsafe extern "C" fn slha_prepare_query(
         }
 
         // SAFETY: the caller promises a live handle.
-        let model = unsafe { model_ref(model)? };
+        let model = model_arc(model)?;
 
-        if d != model.inner.d {
+        if d != model.d {
             return Err(ffi_error(
                 SLHA_ERR_DIMENSION,
                 format!(
                     "query dimension mismatch: received {d}, expected {}",
-                    model.inner.d
+                    model.d
                 ),
             ));
         }
@@ -393,8 +449,8 @@ pub unsafe extern "C" fn slha_prepare_query(
         let q = unsafe { read_vec_unaligned(q, d) };
         validate_finite(&q, "q")?;
 
-        let coarse = model.inner.query_coarse(&q);
-        let signs = model.inner.sign_bits(&q);
+        let coarse = model.query_coarse(&q);
+        let signs = model.sign_bits(&q);
 
         validate_finite(&coarse, "q_coarse")?;
 
@@ -431,7 +487,7 @@ pub unsafe extern "C" fn slha_score_tile(
         }
 
         // SAFETY: the caller promises a live handle.
-        let _model = unsafe { model_ref(model)? };
+        let _model = model_arc(model)?;
 
         // SAFETY: the caller guarantees readable storage.
         let tile = unsafe { tile.read_unaligned() };
@@ -484,8 +540,14 @@ pub unsafe extern "C" fn slha_score_tiles(
             ));
         }
 
-        // SAFETY: the caller promises a live handle.
-        let _model = unsafe { model_ref(model)? };
+        let _model = model_arc(model)?;
+
+        if n_tiles > MAX_TILES {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                format!("n_tiles={n_tiles} exceeds the safety bound {MAX_TILES}"),
+            ));
+        }
 
         if n_tiles == 0 {
             return Ok(());
@@ -596,10 +658,7 @@ pub unsafe extern "C" fn slha_weights_load(path: *const c_char) -> *mut SlhaMode
 
         let inner = weights::load(path).map_err(|error| ffi_error(SLHA_ERR_IO, error))?;
 
-        Ok(Box::into_raw(Box::new(SlhaModel {
-            magic: MODEL_MAGIC,
-            inner,
-        })))
+        Ok(register_model(inner))
     }));
 
     match result {
@@ -623,11 +682,7 @@ pub unsafe extern "C" fn slha_weights_load(path: *const c_char) -> *mut SlhaMode
 pub unsafe extern "C" fn slha_model_dim(model: *const SlhaModel) -> usize {
     clear_last_error();
 
-    // SAFETY: this fn's # Safety contract — model is a live handle from
-    // slha_weights_load; model_ref re-validates magic and nullness.
-    match catch_unwind(AssertUnwindSafe(|| unsafe {
-        model_ref(model).map(|model| model.inner.d)
-    })) {
+    match catch_unwind(AssertUnwindSafe(|| model_arc(model).map(|model| model.d))) {
         Ok(Ok(dimension)) => dimension,
         Ok(Err(error)) => {
             set_last_error(&error.message);
@@ -667,15 +722,12 @@ pub unsafe extern "C" fn slha_encode_key(
         }
 
         // SAFETY: the caller promises a live handle.
-        let model = unsafe { model_ref(model)? };
+        let model = model_arc(model)?;
 
-        if d != model.inner.d {
+        if d != model.d {
             return Err(ffi_error(
                 SLHA_ERR_DIMENSION,
-                format!(
-                    "key dimension mismatch: received {d}, expected {}",
-                    model.inner.d
-                ),
+                format!("key dimension mismatch: received {d}, expected {}", model.d),
             ));
         }
 
@@ -690,7 +742,7 @@ pub unsafe extern "C" fn slha_encode_key(
         let key = unsafe { read_vec_unaligned(key, d) };
         validate_finite(&key, "key")?;
 
-        let tile = model.inner.encode_with(&key, pos, false, codec);
+        let tile = model.encode_with(&key, pos, false, codec);
         validate_tile(&tile)?;
 
         // SAFETY: the caller guarantees writable storage for one tile.
@@ -723,14 +775,14 @@ pub unsafe extern "C" fn slha_decode_latent(
         }
 
         // SAFETY: the caller promises a live handle.
-        let model = unsafe { model_ref(model)? };
+        let model = model_arc(model)?;
 
-        if d != model.inner.d {
+        if d != model.d {
             return Err(ffi_error(
                 SLHA_ERR_DIMENSION,
                 format!(
                     "output dimension mismatch: received {d}, expected {}",
-                    model.inner.d
+                    model.d
                 ),
             ));
         }
@@ -742,7 +794,7 @@ pub unsafe extern "C" fn slha_decode_latent(
         let latent = tile.dequant_latent();
         validate_finite(&latent, "dequantized_latent")?;
 
-        let reconstruction = model.inner.reconstruct(&latent);
+        let reconstruction = model.reconstruct(&latent);
 
         if reconstruction.len() != d {
             return Err(ffi_error(
@@ -784,14 +836,14 @@ pub unsafe extern "C" fn slha_decode_key(
         }
 
         // SAFETY: the caller promises a live handle.
-        let model = unsafe { model_ref(model)? };
+        let model = model_arc(model)?;
 
-        if d != model.inner.d {
+        if d != model.d {
             return Err(ffi_error(
                 SLHA_ERR_DIMENSION,
                 format!(
                     "output dimension mismatch: received {d}, expected {}",
-                    model.inner.d
+                    model.d
                 ),
             ));
         }
@@ -800,7 +852,7 @@ pub unsafe extern "C" fn slha_decode_key(
         let tile = unsafe { tile.read_unaligned() };
         validate_tile(&tile)?;
 
-        let reconstruction = model.inner.reconstruct_from_tile(&tile);
+        let reconstruction = model.reconstruct_from_tile(&tile);
 
         if reconstruction.len() != d {
             return Err(ffi_error(
@@ -830,15 +882,20 @@ pub unsafe extern "C" fn slha_weights_release(model: *mut SlhaModel) -> i32 {
     }
 
     ffi_status(|| {
-        // SAFETY: validate the handle before ownership is reconstructed.
-        let _validated_magic = unsafe { model_ref(model)?.magic };
+        if !pointer_is_aligned(model) {
+            return Err(ffi_error(
+                SLHA_ERR_INVALID_HANDLE,
+                "model handle is misaligned",
+            ));
+        }
 
-        // SAFETY: the pointer is aligned and points to a live SlhaModel.
-        unsafe { (*model).magic = 0 };
+        if !unregister_model(model) {
+            return Err(ffi_error(
+                SLHA_ERR_INVALID_HANDLE,
+                "model handle is not a live SLHA handle",
+            ));
+        }
 
-        // SAFETY: the pointer was allocated by Box::into_raw and has not been
-        // previously released.
-        unsafe { drop(Box::from_raw(model)) };
         Ok(())
     })
 }
@@ -1159,6 +1216,43 @@ mod tests {
         assert_eq!(unsafe { slha_model_dim(handle) }, d);
 
         (model, path, handle)
+    }
+
+    #[test]
+    fn model_handles_reject_forgery_double_release_and_oversized_batches() {
+        let (_model, path, handle) = fitted_and_loaded_model(160, 0xA11CE);
+        let tile = zero_tile();
+        let coarse = [0.0f32; D_C];
+        let signs = [0u64; RESIDUAL_WORDS];
+        let mut score = 123.0f32;
+
+        assert_eq!(
+            unsafe {
+                slha_score_tiles(
+                    handle,
+                    &tile,
+                    MAX_TILES + 1,
+                    coarse.as_ptr(),
+                    signs.as_ptr(),
+                    &mut score,
+                )
+            },
+            SLHA_ERR_DIMENSION
+        );
+        assert_eq!(score, 123.0);
+
+        assert_eq!(unsafe { slha_weights_release(handle) }, SLHA_OK);
+        assert_eq!(
+            unsafe { slha_weights_release(handle) },
+            SLHA_ERR_INVALID_HANDLE
+        );
+        assert!(last_error().contains("not a live"));
+
+        let forged = std::ptr::dangling::<SlhaModel>();
+        assert_eq!(unsafe { slha_model_dim(forged) }, 0);
+        assert!(last_error().contains("not a live"));
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
