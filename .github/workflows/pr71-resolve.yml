@@ -4,18 +4,26 @@ on:
   push:
     branches:
       - fix/pr71-rebased-audit-installer
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: write
 
+concurrency:
+  group: pr71-resolver
+  cancel-in-progress: true
+
 jobs:
   resolve:
-    if: ${{ !contains(github.event.head_commit.message, '[pr71-resolution]') }}
+    if: ${{ github.event_name == 'pull_request' || !contains(github.event.head_commit.message, '[pr71-resolution]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          ref: fix/pr71-rebased-audit-installer
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
@@ -36,9 +44,6 @@ jobs:
             echo "Unexpected clean merge; continuing with policy adjustments."
           fi
 
-          # Resolve actual conflicts in favor of the current master integration
-          # where PR #71's fused-QK NO-GO experiment would otherwise overwrite
-          # calibration, oracle and ranking functionality already merged.
           git checkout --ours -- \
             Cargo.lock \
             integration/llama.cpp/README.md \
@@ -54,20 +59,11 @@ jobs:
             integration/llama.cpp/shim/slha_llama.hpp \
             slha-python/Cargo.toml
 
-          # This file merged automatically, but its PR text claims fused-QK is
-          # present. Restore master because that path is intentionally split out.
           git restore --source=HEAD --staged --worktree docs/INTEGRATION.md
-
-          # The monolithic module was deliberately replaced by the modular
-          # directory implementation on the PR branch.
           git rm -f scirust/src/attention/slha_v2.rs
-
-          # Keep the clarified license comment from the PR.
           git checkout --theirs -- slhav2-vram/Cargo.toml
           git add slhav2-vram/Cargo.toml
 
-          # The slha-c conflict is test-only: retain both independently added
-          # suites with a union merge. Production changes merged normally.
           git show :2:slha-c/src/lib.rs > /tmp/slha-c-ours.rs
           git show :1:slha-c/src/lib.rs > /tmp/slha-c-base.rs
           git show :3:slha-c/src/lib.rs > /tmp/slha-c-theirs.rs
@@ -75,8 +71,6 @@ jobs:
           cp /tmp/slha-c-ours.rs slha-c/src/lib.rs
           git add slha-c/src/lib.rs
 
-          # Combine fail-closed codec validation from PR #71 with the SIMD
-          # delegation already merged on master.
           git checkout --theirs -- slhav2-vram/src/mem/tile.rs
           python3 - <<'PY'
           from pathlib import Path
@@ -120,7 +114,6 @@ jobs:
           PY
           git add slhav2-vram/src/mem/tile.rs
 
-          # Remove the fused-QK patch from this remediation/installer branch.
           git rm -f integration/llama.cpp/patches/0002-slha-fused-qk.patch
 
           unresolved="$(git diff --name-only --diff-filter=U)"
