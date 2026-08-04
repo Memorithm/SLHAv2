@@ -1,0 +1,50 @@
+name: PR79 patch merge regressions
+
+on:
+  pull_request:
+    branches:
+      - ci/pr79-patcher
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.event.pull_request.head.ref == 'fix/pr71-merged-master-v3' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fix/pr71-merged-master-v3
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt
+      - name: Restore safety rationale comments
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scirust/src/attention/slha_v2/tests.rs')
+          text = path.read_text()
+          replacements = {
+              '            let a = unsafe { tile.compute_score_avx2(&q, &q_sign) };':
+              '            // SAFETY: this branch is gated by runtime AVX2 feature detection.\n            let a = unsafe { tile.compute_score_avx2(&q, &q_sign) };',
+              '            let a = unsafe { tile.compute_score_avx512(&q, &q_sign) };':
+              '            // SAFETY: this branch is gated by runtime AVX-512F feature detection.\n            let a = unsafe { tile.compute_score_avx512(&q, &q_sign) };',
+          }
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one occurrence, found {count}: {old}')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scirust/src/attention/slha_v2/tests.rs
+          git commit -m "fix(tests): document SIMD unsafe calls"
+          git push origin HEAD:fix/pr71-merged-master-v3
