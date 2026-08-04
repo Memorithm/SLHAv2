@@ -1,0 +1,49 @@
+file=slhav2-vram/src/mem/tile.rs
+conflict_count=1
+
+### conflict lines 121-157
+ 000117:     /// Panics with a descriptive message if the tile's flags select an
+ 000118:     /// unsupported codec combination. Prefer [`Self::try_score`] when handling
+ 000119:     /// untrusted tiles.
+ 000120:     pub fn score(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
+>000121: <<<<<<< HEAD
+>000122:         // OPTIMIZATION: Convert to the identical SciRustSlhaTile representation to leverage
+>000123:         // highly-optimized hardware-accelerated CPU SIMD execution paths (AVX2, AVX-512, NEON)
+>000124:         // instead of executing the slow scalar fallback loop.
+>000125:         let q_coarse_arr: &[f32; codec::D_C] = q_coarse
+>000126:             .try_into()
+>000127:             .expect("q_coarse slice must be exactly D_C elements");
+>000128:         let q_sign_arr: &[u64; codec::RESIDUAL_WORDS] = q_sign
+>000129:             .try_into()
+>000130:             .expect("q_sign slice must be exactly RESIDUAL_WORDS elements");
+>000131:         self.to_slha_tile().compute_score(q_coarse_arr, q_sign_arr)
+>000132: =======
+>000133:         codec::validate_codec(self.flags()).unwrap_or_else(|e| panic!("cannot score tile: {e}"));
+>000134:         self.score_unchecked(q_coarse, q_sign)
+>000135:     }
+>000136: 
+>000137:     fn score_unchecked(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
+>000138:         let latent = self.latent();
+>000139:         let scale = self.scale();
+>000140:         let gscales = self.group_scales();
+>000141:         let flags = self.flags();
+>000142:         if self.is_warm() {
+>000143:             codec::score_warm(q_coarse, latent, scale, gscales, flags)
+>000144:         } else {
+>000145:             let residual = self.residual();
+>000146:             codec::score_hot(
+>000147:                 q_coarse,
+>000148:                 q_sign,
+>000149:                 latent,
+>000150:                 &residual,
+>000151:                 scale,
+>000152:                 self.dynamic_lambda(),
+>000153:                 gscales,
+>000154:                 flags,
+>000155:             )
+>000156:         }
+>000157: >>>>>>> refs/remotes/origin/pr71
+ 000158:     }
+ 000159: 
+ 000160:     pub fn to_slha_tile(&self) -> SciRustSlhaTile {
+ 000161:         let residual = self.residual();

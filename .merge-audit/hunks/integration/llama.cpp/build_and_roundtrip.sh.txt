@@ -1,0 +1,295 @@
+file=integration/llama.cpp/build_and_roundtrip.sh
+conflict_count=6
+
+### conflict lines 6-10
+ 000002: # Build llama.cpp with SLHA K-cache integration and run perplexity.
+ 000003: #
+ 000004: # Usage: WORK=/path/to/scratch ./build_and_roundtrip.sh [mode]
+ 000005: #
+>000006: <<<<<<< HEAD
+>000007: # Modes: baseline, passthrough, roundtrip, collect, shadow (default: passthrough)
+>000008: =======
+>000009: # Modes: baseline, passthrough, roundtrip, collect, scorediag (default: passthrough)
+>000010: >>>>>>> refs/remotes/origin/pr71
+ 000011: set -euo pipefail
+ 000012: 
+ 000013: WORK="${WORK:-/tmp/slha-llama}"
+ 000014: # Pinned llama.cpp commit for the SLHA integration patches.
+
+### conflict lines 67-114
+ 000063: echo "  llama.cpp commit verified: $ACTUAL_COMMIT"
+ 000064: 
+ 000065: # 3. Apply patches if not baseline.
+ 000066: if [ "$MODE" != "baseline" ]; then
+>000067: <<<<<<< HEAD
+>000068:     echo "== applying SLHA patch =="
+>000069:     PATCH_FILE="$REPO_ROOT/integration/llama.cpp/patches/0001-slha-k-passthrough.patch"
+>000070:     if [ ! -f "$PATCH_FILE" ]; then
+>000071:         echo "ERROR: patch file not found: $PATCH_FILE"
+>000072:         exit 1
+>000073:     fi
+>000074: 
+>000075:     # Check if patch is already applied.
+>000076:     if ! grep -q "SLHA_INTEGRATION" llama.cpp/src/llama-kv-cache.cpp 2>/dev/null; then
+>000077: =======
+>000078:     echo "== applying SLHA patches =="
+>000079: 
+>000080:     apply_patch_strict() {
+>000081:         local patch_file="$1"
+>000082:         local patch_name
+>000083:         patch_name="$(basename "$patch_file")"
+>000084: 
+>000085:         echo "  checking $patch_name ..."
+>000086:         if git apply --check "$patch_file" 2>/dev/null; then
+>000087:             echo "  applying $patch_name ..."
+>000088:             if ! patch --fuzz=0 -p1 < "$patch_file"; then
+>000089:                 echo "ERROR: $patch_name failed to apply"
+>000090:                 exit 1
+>000091:             fi
+>000092:         elif git apply --check -R "$patch_file" 2>/dev/null; then
+>000093:             echo "  $patch_name already applied, skipping"
+>000094:         else
+>000095:             echo "ERROR: $patch_name does not apply cleanly to pinned llama.cpp commit"
+>000096:             echo "       expected commit: $LLAMA_COMMIT"
+>000097:             exit 1
+>000098:         fi
+>000099: 
+>000100:         if find . -name "*.rej" -print -quit | grep -q .; then
+>000101:             echo "ERROR: reject files found after applying $patch_name"
+>000102:             find . -name "*.rej" -print
+>000103:             exit 1
+>000104:         fi
+>000105:     }
+>000106: 
+>000107:     # Apply each patch in order from patches/ directory.
+>000108:     for PATCH_FILE in "$REPO_ROOT/integration/llama.cpp/patches/"*.patch; do
+>000109:         PATCH_BASENAME="$(basename "$PATCH_FILE")"
+>000110:         if [ ! -f "$PATCH_FILE" ]; then
+>000111:             echo "  no patches found"
+>000112:             break
+>000113:         fi
+>000114: >>>>>>> refs/remotes/origin/pr71
+ 000115:         cd llama.cpp
+ 000116:         apply_patch_strict "$PATCH_FILE"
+ 000117:         cd ..
+ 000118: <<<<<<< HEAD
+
+### conflict lines 118-126
+ 000114: >>>>>>> refs/remotes/origin/pr71
+ 000115:         cd llama.cpp
+ 000116:         apply_patch_strict "$PATCH_FILE"
+ 000117:         cd ..
+>000118: <<<<<<< HEAD
+>000119:     else
+>000120:         echo "  patch already applied"
+>000121:     fi
+>000122: =======
+>000123:     done
+>000124: 
+>000125:     echo "  patch status: fuzz=0 offset=0 rejects=0"
+>000126: >>>>>>> refs/remotes/origin/pr71
+ 000127: 
+ 000128:     # Copy the shim files.
+ 000129:     echo "== copying SLHA shim =="
+ 000130:     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_llama.hpp" llama.cpp/src/
+
+### conflict lines 193-207
+ 000189:     export SLHA_WEIGHTS_DIR="$WORK/weights"
+ 000190: elif [ "$MODE" = "collect" ]; then
+ 000191:     export SLHA_KV_MODE=collect
+ 000192:     export SLHA_WEIGHTS_DIR="$CALIB_DIR"
+>000193: <<<<<<< HEAD
+>000194: elif [ "$MODE" = "shadow" ]; then
+>000195:     export SLHA_KV_MODE=tilestore
+>000196:     export SLHA_SCORE_MODE=shadow
+>000197:     export SLHA_WEIGHTS_DIR="$WORK/weights"
+>000198: elif [ "$MODE" = "replace" ]; then
+>000199:     export SLHA_KV_MODE=tilestore
+>000200:     export SLHA_SCORE_MODE=replace
+>000201: =======
+>000202: elif [ "$MODE" = "scorediag" ]; then
+>000203:     export SLHA_KV_MODE=scorediag
+>000204:     export SLHA_WEIGHTS_DIR="$WORK/weights"
+>000205: elif [ "$MODE" = "fused" ]; then
+>000206:     export SLHA_KV_MODE=fused
+>000207: >>>>>>> refs/remotes/origin/pr71
+ 000208:     export SLHA_WEIGHTS_DIR="$WORK/weights"
+ 000209: else
+ 000210:     unset SLHA_KV_MODE
+ 000211: fi
+
+### conflict lines 218-250
+ 000214:     OUTPUT_FILE="$WORK/${MODE}_${SLHA_CODEC:-mixed}_ppl.txt"
+ 000215: else
+ 000216:     OUTPUT_FILE="$WORK/${MODE}_ppl.txt"
+ 000217: fi
+>000218: <<<<<<< HEAD
+>000219: FLASH_ATTN_FLAG=""
+>000220: PARALLEL_FLAG=""
+>000221: BATCH_FLAG=""
+>000222: if [ "$MODE" = "shadow" ] || [ "$MODE" = "replace" ]; then
+>000223:     # Shadow scoring and the direct compressed-score path require the non-flash
+>000224:     # attention path so kq logits are materialised, and a single stream so the
+>000225:     # tile store positions are contiguous.
+>000226:     # --parallel 1 and --batch-size 512 ensure n_seq=1 so tile store positions
+>000227:     # are contiguous within a single sequence (no multi-sequence collision).
+>000228:     FLASH_ATTN_FLAG="--flash-attn off"
+>000229:     PARALLEL_FLAG="--parallel 1"
+>000230:     BATCH_FLAG="--batch-size 512"
+>000231: fi
+>000232: 
+>000233: set +o pipefail  # Temporarily disable for grep filter
+>000234: llama.cpp/build/bin/llama-perplexity \
+>000235:     -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" $FLASH_ATTN_FLAG $PARALLEL_FLAG $BATCH_FLAG \
+>000236:     2>&1 | tee "$OUTPUT_FILE" | grep -E "Final estimate|PPL" || true
+>000237: set -o pipefail
+>000238: =======
+>000239: # Fused and scorediag operate on the standard (non-flash) attention path —
+>000240: # the SLHA custom node is a GGML op on that path. Flash attention must be
+>000241: # disabled explicitly (`-fa off`) or the fused/diag callback never runs.
+>000242: FA_ARGS=""
+>000243: if [ "$MODE" = "fused" ] || [ "$MODE" = "scorediag" ]; then
+>000244:     FA_ARGS="-fa off"
+>000245: fi
+>000246: 
+>000247: llama.cpp/build/bin/llama-perplexity \
+>000248:     -m "$MODEL_FILE" -f "$DATA_FILE" --chunks "$CHUNKS" -t "$THREADS" $FA_ARGS \
+>000249:     2>&1 | tee "$OUTPUT_FILE" | grep -E "Final estimate|PPL"
+>000250: >>>>>>> refs/remotes/origin/pr71
+ 000251: 
+ 000252: echo
+ 000253: echo "Results written to $OUTPUT_FILE"
+ 000254: echo "Mode: $MODE"
+
+### conflict lines 255-381
+ 000251: 
+ 000252: echo
+ 000253: echo "Results written to $OUTPUT_FILE"
+ 000254: echo "Mode: $MODE"
+>000255: <<<<<<< HEAD
+>000256: echo "llama.cpp commit: $LLAMA_COMMIT"
+>000257: 
+>000258: # Collect-mode validation: emit a provenance manifest and enforce the
+>000259: # non-finite policy on the freshly collected calibration dumps. Default policy
+>000260: # is 'reject', so a collection that captured any non-finite (NaN / +/-Inf) row
+>000261: # fails here with a non-zero status instead of silently poisoning training.
+>000262: if [ "$MODE" = "collect" ]; then
+>000263:     echo "== validating collected calibration (policy=${SLHA_CALIBRATION_NONFINITE_POLICY:-reject}) =="
+>000264:     SHIM_DIR="$REPO_ROOT/integration/llama.cpp/shim"
+>000265:     CAL_TMP="$(mktemp -d)"
+>000266:     CALIBRATE_BIN="$CAL_TMP/slha_calibrate"
+>000267:     if "${CXX:-g++}" -O2 -std=c++17 -I"$SHIM_DIR" \
+>000268:             "$SHIM_DIR/slha_calibrate_cli.cpp" "$SHIM_DIR/slha_calibration.cpp" \
+>000269:             -o "$CALIBRATE_BIN"; then
+>000270:         REF_DIM="$(python3 - "$CALIB_DIR" <<'PY'
+>000271: import sys, glob, struct, re, os
+>000272: files = sorted(glob.glob(os.path.join(sys.argv[1], "layer-*-k.bin")),
+>000273:                key=lambda p: int(re.search(r"layer-(\d+)-k", p).group(1)))
+>000274: print(struct.unpack("<III", open(files[0], "rb").read(12))[2] if files else 0)
+>000275: PY
+>000276: )"
+>000277:         N_LAYERS="$(python3 - "$CALIB_DIR" <<'PY'
+>000278: import sys, glob, os
+>000279: print(len(glob.glob(os.path.join(sys.argv[1], "layer-*-k.bin"))))
+>000280: PY
+>000281: )"
+>000282:         MODEL_SHA="$(sha256sum "$MODEL_FILE" 2>/dev/null | cut -d' ' -f1)"
+>000283:         DATA_SHA="$(sha256sum "$DATA_FILE" 2>/dev/null | cut -d' ' -f1)"
+>000284:         TS_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+>000285:         IMPL_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+>000286:         set +e
+>000287:         "$CALIBRATE_BIN" "$CALIB_DIR" \
+>000288:             --policy "${SLHA_CALIBRATION_NONFINITE_POLICY:-reject}" \
+>000289:             --expect-dim "$REF_DIM" \
+>000290:             --expect-layers "$N_LAYERS" \
+>000291:             --min-rows "${SLHA_CALIBRATION_MIN_ROWS:-1}" \
+>000292:             --manifest "$CALIB_DIR/calibration_manifest.json" \
+>000293:             --impl-commit "$IMPL_COMMIT" \
+>000294:             --llama-commit "$LLAMA_COMMIT" \
+>000295:             --model-id "$MODEL_REPO/$MODEL_FILE" \
+>000296:             --model-sha "$MODEL_SHA" \
+>000297:             --dataset-sha "$DATA_SHA" \
+>000298:             --timestamp "$TS_UTC" \
+>000299:             --command "build_and_roundtrip.sh collect"
+>000300:         CAL_RC=$?
+>000301:         set -e
+>000302:         rm -rf "$CAL_TMP"
+>000303:         echo "  manifest: $CALIB_DIR/calibration_manifest.json"
+>000304:         if [ "$CAL_RC" -ne 0 ]; then
+>000305:             echo "ERROR: calibration validation FAILED (rc=$CAL_RC). The collected dumps"
+>000306:             echo "  contain non-finite rows or a structural defect under the current policy."
+>000307:             echo "  Fix the source, re-collect, or (research only) re-run with"
+>000308:             echo "  SLHA_CALIBRATION_NONFINITE_POLICY=drop-row."
+>000309:             exit 1
+>000310:         fi
+>000311:         echo "  calibration validation PASSED"
+>000312:     else
+>000313:         echo "ERROR: failed to build slha_calibrate validator"
+>000314:         rm -rf "$CAL_TMP"
+>000315:         exit 1
+>000316:     fi
+>000317: fi
+>000318: 
+>000319: # Replace-mode validation: parse SLHA_REPLACE_SUMMARY and reject unless valid.
+>000320: if [ "$MODE" = "replace" ]; then
+>000321:     echo "== validating strict replace coverage =="
+>000322:     SUMMARY_BLOCK=$(grep -A 30 "^SLHA_REPLACE_SUMMARY$" "$OUTPUT_FILE" || true)
+>000323:     VALID=$(echo "$SUMMARY_BLOCK" | grep "^valid=" | head -1 | cut -d= -f2)
+>000324:     ACTIVE_COVERAGE=$(echo "$SUMMARY_BLOCK" | grep "^active_coverage=" | head -1 | cut -d= -f2)
+>000325:     CALLBACKS=$(echo "$SUMMARY_BLOCK" | grep "^callbacks=" | head -1 | cut -d= -f2)
+>000326:     AE_V=$(echo "$SUMMARY_BLOCK" | grep "^active_expected_vectors=" | head -1 | cut -d= -f2)
+>000327:     AR_V=$(echo "$SUMMARY_BLOCK" | grep "^active_replaced_vectors=" | head -1 | cut -d= -f2)
+>000328:     AE_L=$(echo "$SUMMARY_BLOCK" | grep "^active_expected_logits=" | head -1 | cut -d= -f2)
+>000329:     AR_L=$(echo "$SUMMARY_BLOCK" | grep "^active_replaced_logits=" | head -1 | cut -d= -f2)
+>000330:     PAD_V=$(echo "$SUMMARY_BLOCK" | grep "^padding_vectors=" | head -1 | cut -d= -f2)
+>000331:     PAD_L=$(echo "$SUMMARY_BLOCK" | grep "^padding_logits=" | head -1 | cut -d= -f2)
+>000332:     INACT_V=$(echo "$SUMMARY_BLOCK" | grep "^inactive_stream_vectors=" | head -1 | cut -d= -f2)
+>000333:     INACT_L=$(echo "$SUMMARY_BLOCK" | grep "^inactive_stream_logits=" | head -1 | cut -d= -f2)
+>000334:     FAILED_V=$(echo "$SUMMARY_BLOCK" | grep "^failed_vectors=" | head -1 | cut -d= -f2)
+>000335:     FALLBACK_V=$(echo "$SUMMARY_BLOCK" | grep "^fallback_vectors=" | head -1 | cut -d= -f2)
+>000336:     N_STREAM=$(echo "$SUMMARY_BLOCK" | grep "^n_stream=" | head -1 | cut -d= -f2)
+>000337: 
+>000338:     if [ -z "$VALID" ]; then
+>000339:         echo "ERROR: SLHA_REPLACE_SUMMARY not found in output. Replace path may not have executed."
+>000340:         exit 1
+>000341:     fi
+>000342: 
+>000343:     echo "  callbacks=$CALLBACKS"
+>000344:     echo "  active_expected_vectors=$AE_V"
+>000345:     echo "  active_replaced_vectors=$AR_V"
+>000346:     echo "  active_expected_logits=$AE_L"
+>000347:     echo "  active_replaced_logits=$AR_L"
+>000348:     echo "  padding_vectors=$PAD_V"
+>000349:     echo "  padding_logits=$PAD_L"
+>000350:     echo "  inactive_stream_vectors=$INACT_V"
+>000351:     echo "  inactive_stream_logits=$INACT_L"
+>000352:     echo "  failed_vectors=$FAILED_V"
+>000353:     echo "  fallback_vectors=$FALLBACK_V"
+>000354:     echo "  n_stream=$N_STREAM"
+>000355:     echo "  active_coverage=$ACTIVE_COVERAGE"
+>000356:     echo "  valid=$VALID"
+>000357: 
+>000358:     if [ "$VALID" != "true" ]; then
+>000359:         echo "ERROR: strict replace validation FAILED (valid=$VALID). A valid replace run requires"
+>000360:         echo "  active_replaced_vectors == active_expected_vectors,"
+>000361:         echo "  active_replaced_logits == active_expected_logits,"
+>000362:         echo "  failed_vectors == 0, fallback_vectors == 0,"
+>000363:         echo "  n_stream == 1, active_coverage == 1, valid == true"
+>000364:         exit 1
+>000365:     fi
+>000366: 
+>000367:     if [ "$ACTIVE_COVERAGE" != "1" ] && [ "$ACTIVE_COVERAGE" != "1.0" ]; then
+>000368:         echo "ERROR: strict replace coverage FAILED (active_coverage=$ACTIVE_COVERAGE). Expected 1.0"
+>000369:         exit 1
+>000370:     fi
+>000371: 
+>000372:     if [ "$N_STREAM" != "1" ]; then
+>000373:         echo "ERROR: strict replace n_stream FAILED (n_stream=$N_STREAM). Expected 1"
+>000374:         exit 1
+>000375:     fi
+>000376: 
+>000377:     echo "  strict replace validation PASSED"
+>000378: fi
+>000379: =======
+>000380: echo "llama.cpp commit: $ACTUAL_COMMIT"
+>000381: >>>>>>> refs/remotes/origin/pr71

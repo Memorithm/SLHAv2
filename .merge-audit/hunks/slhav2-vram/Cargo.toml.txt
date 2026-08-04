@@ -1,0 +1,19 @@
+file=slhav2-vram/Cargo.toml
+conflict_count=1
+
+### conflict lines 7-13
+ 000003: version = "0.1.0"
+ 000004: edition = "2021"
+ 000005: rust-version = "1.85"
+ 000006: description = "Hardware-agnostic VRAM management and SLHAv2 tile scoring on GPU."
+>000007: <<<<<<< HEAD
+>000008: =======
+>000009: # Aligned with the rest of the workspace: PolyForm Noncommercial 1.0.0 (free
+>000010: # for noncommercial/personal use) + a paid commercial license for CCOS
+>000011: # deployments. The older `MIT OR Apache-2.0` applied only to versions published
+>000012: # before the dual-license change (see LICENSING.md §3).
+>000013: >>>>>>> refs/remotes/origin/pr71
+ 000014: license = "PolyForm-Noncommercial-1.0.0"
+ 000015: 
+ 000016: [lib]
+ 000017: name = "slhav2_vram"

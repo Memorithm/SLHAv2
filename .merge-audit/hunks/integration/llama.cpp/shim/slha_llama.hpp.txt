@@ -1,0 +1,102 @@
+file=integration/llama.cpp/shim/slha_llama.hpp
+conflict_count=2
+
+### conflict lines 24-78
+ 000020:     SLHA_KV_OFF = 0,
+ 000021:     SLHA_KV_PASSTHROUGH = 1,
+ 000022:     SLHA_KV_ROUNDTRIP = 2,
+ 000023:     SLHA_KV_COLLECT = 3,
+>000024: <<<<<<< HEAD
+>000025:     SLHA_KV_TILESTORE = 4,
+>000026: };
+>000027: 
+>000028: enum slha_score_mode : int {
+>000029:     SLHA_SCORE_OFF = 0,
+>000030:     SLHA_SCORE_SHADOW = 1,
+>000031:     SLHA_SCORE_REPLACE = 2,
+>000032: };
+>000033: 
+>000034: struct slha_layer_state;
+>000035: 
+>000036: /** Experimental CPU-side compressed K tile store.
+>000037:  *
+>000038:  * One tile per (layer, cache position). Capacity is fixed per layer and
+>000039:  * position indices are bounds-checked. No unbounded growth. */
+>000040: struct slha_tile_store {
+>000041:     size_t n_layers = 0;
+>000042:     size_t capacity = 0;
+>000043:     size_t tile_bytes = 0;
+>000044:     std::vector<std::byte> tiles;
+>000045:     std::vector<uint8_t> valid;
+>000046:     mutable std::mutex mutex;
+>000047: 
+>000048:     bool init(size_t n_layers, size_t capacity, size_t tile_bytes);
+>000049:     void reset();
+>000050:     void clear_layer(int32_t layer_id);
+>000051:     bool write(int32_t layer_id, size_t position, const void * tile);
+>000052:     const void * read(int32_t layer_id, size_t position) const;
+>000053:     bool check_capacity(int32_t layer_id, size_t position) const;
+>000054: };
+>000055: 
+>000056: /** Shadow-mode metrics accumulated per layer and per head. */
+>000057: struct slha_shadow_metrics {
+>000058:     mutable std::mutex mutex;
+>000059:     size_t n_samples = 0;
+>000060:     size_t n_vectors = 0;
+>000061:     double max_abs_error = 0.0;
+>000062:     double sum_abs_error = 0.0;
+>000063:     double sum_rel_l2 = 0.0;
+>000064:     double sum_cosine = 0.0;
+>000065:     double sum_pearson = 0.0;
+>000066:     double sum_spearman = 0.0;
+>000067:     double sum_top1_overlap = 0.0;
+>000068:     double sum_top5_overlap = 0.0;
+>000069:     size_t n_finite = 0;
+>000070:     size_t n_mismatch = 0;
+>000071: 
+>000072:     void add_sample(double baseline, double slha);
+>000073:     void add_vector(const std::vector<double> & baseline, const std::vector<double> & slha);
+>000074:     void print(int32_t layer_id) const;
+>000075: =======
+>000076:     SLHA_KV_SCORE_DIAG = 4,
+>000077:     SLHA_KV_FUSED = 5,
+>000078: >>>>>>> refs/remotes/origin/pr71
+ 000079: };
+ 000080: 
+ 000081: struct slha_layer_state {
+ 000082:     int32_t layer_id;
+
+### conflict lines 93-117
+ 000089:     // For collect mode
+ 000090:     std::vector<float> collected_k;
+ 000091:     std::unique_ptr<std::mutex> collect_mutex;
+ 000092: 
+>000093: <<<<<<< HEAD
+>000094:     // For ranking-dataset collection (offline training data only): the raw K
+>000095:     // rows indexed by KV position, so a candidate projection can be re-scored
+>000096:     // offline. Written only when SLHA_RANK_DATASET_DIR is set; empty otherwise.
+>000097:     std::vector<float> raw_k_by_pos;
+>000098:     size_t raw_k_max_pos = 0;
+>000099: 
+>000100:     // For shadow/replace modes
+>000101:     std::unique_ptr<slha_shadow_metrics> shadow_metrics;
+>000102: 
+>000103:     slha_layer_state() : layer_id(0), n_embd_gqa(0), kv_mode(SLHA_KV_OFF),
+>000104:                          score_mode(SLHA_SCORE_OFF),
+>000105:                          model_handle(nullptr), scratch(nullptr),
+>000106:                          collect_mutex(std::make_unique<std::mutex>()) {}
+>000107: =======
+>000108:     // For score_diag mode: ring buffer of tiles, indexed by KV cache slot
+>000109:     std::vector<char> tile_buffer;
+>000110:     size_t tile_capacity;    // max tiles in buffer
+>000111:     int32_t codec;
+>000112: 
+>000113:     slha_layer_state() : layer_id(0), n_embd_gqa(0), mode(SLHA_KV_OFF),
+>000114:                          model_handle(nullptr), scratch(nullptr),
+>000115:                          collect_mutex(std::make_unique<std::mutex>()),
+>000116:                          tile_capacity(0), codec(SLHA_CODEC_MIXED) {}
+>000117: >>>>>>> refs/remotes/origin/pr71
+ 000118: 
+ 000119:     // Non-copyable due to mutex
+ 000120:     slha_layer_state(const slha_layer_state&) = delete;
+ 000121:     slha_layer_state& operator=(const slha_layer_state&) = delete;

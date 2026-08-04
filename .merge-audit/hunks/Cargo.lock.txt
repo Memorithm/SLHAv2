@@ -1,0 +1,59 @@
+file=Cargo.lock
+conflict_count=2
+
+### conflict lines 247-261
+ 000243: source = "registry+https://github.com/rust-lang/crates.io-index"
+ 000244: checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+ 000245: 
+ 000246: [[package]]
+>000247: <<<<<<< HEAD
+>000248: name = "libloading"
+>000249: version = "0.8.9"
+>000250: source = "registry+https://github.com/rust-lang/crates.io-index"
+>000251: checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+>000252: dependencies = [
+>000253:  "cfg-if",
+>000254:  "windows-link",
+>000255: ]
+>000256: =======
+>000257: name = "linux-raw-sys"
+>000258: version = "0.12.1"
+>000259: source = "registry+https://github.com/rust-lang/crates.io-index"
+>000260: checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+>000261: >>>>>>> refs/remotes/origin/pr71
+ 000262: 
+ 000263: [[package]]
+ 000264: name = "memchr"
+ 000265: version = "2.8.3"
+
+### conflict lines 417-438
+ 000413: source = "registry+https://github.com/rust-lang/crates.io-index"
+ 000414: checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+ 000415: 
+ 000416: [[package]]
+>000417: <<<<<<< HEAD
+>000418: =======
+>000419: name = "rustix"
+>000420: version = "1.1.4"
+>000421: source = "registry+https://github.com/rust-lang/crates.io-index"
+>000422: checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+>000423: dependencies = [
+>000424:  "bitflags",
+>000425:  "errno",
+>000426:  "libc",
+>000427:  "linux-raw-sys",
+>000428:  "windows-sys",
+>000429: ]
+>000430: 
+>000431: [[package]]
+>000432: name = "rustversion"
+>000433: version = "1.0.23"
+>000434: source = "registry+https://github.com/rust-lang/crates.io-index"
+>000435: checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+>000436: 
+>000437: [[package]]
+>000438: >>>>>>> refs/remotes/origin/pr71
+ 000439: name = "same-file"
+ 000440: version = "1.0.6"
+ 000441: source = "registry+https://github.com/rust-lang/crates.io-index"
+ 000442: checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"

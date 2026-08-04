@@ -1,0 +1,23 @@
+file=slha-python/Cargo.toml
+conflict_count=1
+
+### conflict lines 22-36
+ 000018: crate-type = ["cdylib"]
+ 000019: 
+ 000020: [dependencies]
+ 000021: scirust = { version = "0.2", path = "../scirust" }
+>000022: <<<<<<< HEAD
+>000023: pyo3 = { version = "0.29" }
+>000024: 
+>000025: [build-dependencies]
+>000026: pyo3-build-config = "0.29"
+>000027: =======
+>000028: # pyo3 0.24 fixes RUSTSEC-2025-0020 (PyString::from_object buffer overflow).
+>000029: # RUSTSEC-2026-0176/0177 require pyo3 >= 0.29; the APIs they affect (PyList/
+>000030: # PyTuple iterators, PyCFunction::new_closure) are NOT used by this binding.
+>000031: # Tracked for an eventual upgrade to 0.29.
+>000032: pyo3 = { version = "0.24" }
+>000033: 
+>000034: [build-dependencies]
+>000035: pyo3-build-config = "0.24"
+>000036: >>>>>>> refs/remotes/origin/pr71
