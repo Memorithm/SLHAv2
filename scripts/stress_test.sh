@@ -116,7 +116,7 @@ step "test debug (workspace)"         600 -- cargo test --workspace --all-featur
 if [ $QUICK -eq 0 ]; then
   step "test release (workspace)" 600 -- cargo test --workspace --release --all-features
 fi
-step "doc build (--no-deps)"          300 -- env RUSTDOCFLAGS=-D warnings cargo doc --no-deps --workspace --all-features
+step "doc build (--no-deps)"          300 -- env "RUSTDOCFLAGS=-D warnings" cargo doc --no-deps --workspace --all-features
 # `pyo3/extension-module` est réservé à Maturin ; Cargo peut valider tout le workspace.
 step "benches compile (workspace)"    600 -- cargo bench --workspace --all-features --no-run
 

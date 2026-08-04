@@ -52,11 +52,60 @@ impl fmt::Display for CudaError {
 
 impl Error for CudaError {}
 
+/// Human-readable name for a common CUDA driver error code (the `CUDA_ERROR_*`
+/// enum). Unknown codes fall back to a numeric message.
+fn cu_result_name(code: CUresult) -> &'static str {
+    match code {
+        0 => "CUDA_SUCCESS",
+        1 => "CUDA_ERROR_INVALID_VALUE",
+        2 => "CUDA_ERROR_OUT_OF_MEMORY",
+        3 => "CUDA_ERROR_NOT_INITIALIZED",
+        4 => "CUDA_ERROR_DEINITIALIZED",
+        5 => "CUDA_ERROR_PROFILER_DISABLED",
+        6 => "CUDA_ERROR_PROFILER_NOT_INITIALIZED",
+        7 => "CUDA_ERROR_PROFILER_ALREADY_STARTED",
+        8 => "CUDA_ERROR_PROFILER_ALREADY_STOPPED",
+        100 => "CUDA_ERROR_NO_DEVICE",
+        101 => "CUDA_ERROR_INVALID_DEVICE",
+        200 => "CUDA_ERROR_INVALID_IMAGE",
+        201 => "CUDA_ERROR_INVALID_CONTEXT",
+        202 => "CUDA_ERROR_CONTEXT_ALREADY_CURRENT",
+        205 => "CUDA_ERROR_OUT_OF_MEMORY",
+        206 => "CUDA_ERROR_INVALID_POINTER",
+        207 => "CUDA_ERROR_INVALID_MEMORY_BLOCK",
+        208 => "CUDA_ERROR_INVALID_PTX",
+        209 => "CUDA_ERROR_INVALID_GRAPHICS_CONTEXT",
+        218 => "CUDA_ERROR_SHARED_OBJECT_SYMBOL_NOT_FOUND",
+        219 => "CUDA_ERROR_SHARED_OBJECT_INIT_FAILED",
+        220 => "CUDA_ERROR_OPERATING_SYSTEM",
+        300 => "CUDA_ERROR_INVALID_HANDLE",
+        400 => "CUDA_ERROR_NOT_FOUND",
+        500 => "CUDA_ERROR_NOT_READY",
+        600 => "CUDA_ERROR_ILLEGAL_ADDRESS",
+        700 => "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES",
+        701 => "CUDA_ERROR_LAUNCH_TIMEOUT",
+        702 => "CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING",
+        703 => "CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED",
+        704 => "CUDA_ERROR_PEER_ACCESS_NOT_ENABLED",
+        705 => "CUDA_ERROR_CONTEXT_ALREADY_IN_USE",
+        708 => "CUDA_ERROR_LAUNCH_FAILED",
+        709 => "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES",
+        710 => "CUDA_ERROR_LAUNCH_TIMEOUT",
+        711 => "CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING",
+        715 => "CUDA_ERROR_UNKNOWN",
+        800 => "CUDA_ERROR_INVALID_RESOURCE_HANDLE",
+        _ => "CUDA_ERROR_UNKNOWN_CODE",
+    }
+}
+
 fn cuda_check(result: CUresult, op: &'static str) -> Result<(), CudaError> {
     if result == CUDA_SUCCESS {
         Ok(())
     } else {
-        Err(CudaError(format!("{op} failed with code {result}")))
+        Err(CudaError(format!(
+            "{op} failed: {} ({result})",
+            cu_result_name(result)
+        )))
     }
 }
 
@@ -102,11 +151,15 @@ impl Drop for CudaAllocation {
         // SAFETY: cuCtxSetCurrent and cuMemFree_v2 are safe when the CUDA
         // driver is initialized and the context handle is valid. The Rc
         // guarantees the engine still exists.
-        unsafe {
+        let freed = unsafe {
             cuCtxSetCurrent(ctx);
-            cuMemFree_v2(self.ptr);
+            cuMemFree_v2(self.ptr)
+        };
+        // Only count the free when it actually succeeded, so the backing
+        // allocation counter never desyncs from reality.
+        if freed == CUDA_SUCCESS {
+            CUDA_BACKING_ALLOCATIONS.fetch_sub(1, Ordering::SeqCst);
         }
-        CUDA_BACKING_ALLOCATIONS.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -118,7 +171,7 @@ pub struct CudaModule {
 }
 
 impl CudaModule {
-    pub fn load_ptx(engine: &CudaEngine, ptx_bytes: &[u8]) -> Result<Self, CudaError> {
+    pub fn load_ptx(engine: &CudaEngine, ptx_bytes: &[u8]) -> Result<Rc<CudaModule>, CudaError> {
         engine.load_ptx(ptx_bytes)
     }
 }
@@ -127,18 +180,22 @@ impl Drop for CudaModule {
     fn drop(&mut self) {
         let ctx = self.owner.context;
         // SAFETY: cuCtxSetCurrent and cuModuleUnload are safe when the context
-        // and module handles are valid. All CudaFunctions are dropped before
-        // their CudaModule due to Rust drop order (fields dropped in declaration
-        // order, and CudaModule holds the module reference).
-        unsafe {
+        // and module handles are valid. The Rc ensures no CudaFunction
+        // outlives the module (each function holds an Rc<CudaModule>), so the
+        // module is only unloaded once its last function is dropped too.
+        let _ = unsafe {
             cuCtxSetCurrent(ctx);
-            cuModuleUnload(self.module);
-        }
+            cuModuleUnload(self.module)
+        };
     }
 }
 
 impl CudaModule {
-    pub fn get_function(&self, name: &str) -> Result<CudaFunction, CudaError> {
+    /// Resolve a kernel by name. Takes `&Rc<Self>` so the returned
+    /// [`CudaFunction`] can clone the module handle and keep it (and the
+    /// underlying `CUmodule`) alive for as long as the function is used —
+    /// preventing a dangling-module use-after-free.
+    pub fn get_function(self: &Rc<Self>, name: &str) -> Result<CudaFunction, CudaError> {
         // SAFETY: NUL-terminated C string for the kernel name.
         let cname =
             CString::new(name).map_err(|_| CudaError("kernel name contains null byte".into()))?;
@@ -153,8 +210,8 @@ impl CudaModule {
         }
         Ok(CudaFunction {
             func,
-            _module: self.module,
-        }) // borrow-check: keep module reference
+            module: Rc::clone(self),
+        })
     }
 
     pub fn raw_module(&self) -> CUmodule {
@@ -162,9 +219,63 @@ impl CudaModule {
     }
 }
 
+/// A CUDA stream (RAII). Streams allow async copies + kernel launches that
+/// overlap; the engine's convenience paths use the null stream, while
+/// [`CudaEngine::score_tiles_on_stream`] uses these for the persistent
+/// scoring pipeline.
+pub struct CudaStream {
+    stream: CUstream,
+    owner: Rc<CudaInner>,
+}
+
+impl CudaStream {
+    pub fn new(engine: &CudaEngine) -> Result<Self, CudaError> {
+        let mut stream: CUstream = std::ptr::null_mut();
+        unsafe {
+            cuda_check(cuCtxSetCurrent(engine.inner.context), "cuCtxSetCurrent")?;
+            cuda_check(
+                cuStreamCreate(&mut stream as *mut CUstream, 0),
+                "cuStreamCreate",
+            )?;
+        }
+        Ok(Self {
+            stream,
+            owner: Rc::clone(&engine.inner),
+        })
+    }
+
+    pub fn raw(&self) -> CUstream {
+        self.stream
+    }
+
+    pub fn synchronize(&self) -> Result<(), CudaError> {
+        let ctx = self.owner.context;
+        unsafe {
+            cuda_check(cuCtxSetCurrent(ctx), "cuCtxSetCurrent")?;
+            cuda_check(cuStreamSynchronize(self.stream), "cuStreamSynchronize")
+        }
+    }
+}
+
+impl Drop for CudaStream {
+    fn drop(&mut self) {
+        let ctx = self.owner.context;
+        // SAFETY: cuCtxSetCurrent + cuStreamDestroy are safe with valid
+        // handles; the Rc keeps the engine alive.
+        let _ = unsafe {
+            cuCtxSetCurrent(ctx);
+            cuStreamDestroy(self.stream)
+        };
+    }
+}
+
+/// A kernel function handle. Owns an `Rc<CudaModule>` so the module (and its
+/// `CUfunction`) cannot be unloaded while the function is still in use — this
+/// removes the dangling-module use-after-free that a bare `CUmodule` value
+/// would allow if the module were dropped first.
 pub struct CudaFunction {
     func: CUfunction,
-    _module: CUmodule,
+    module: Rc<CudaModule>,
 }
 
 impl CudaFunction {
@@ -173,8 +284,18 @@ impl CudaFunction {
     }
 }
 
+impl Clone for CudaFunction {
+    fn clone(&self) -> Self {
+        Self {
+            func: self.func,
+            module: Rc::clone(&self.module),
+        }
+    }
+}
+
 // ── Engine ────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct CudaEngine {
     inner: Rc<CudaInner>,
 }
@@ -343,7 +464,7 @@ impl CudaEngine {
         Ok(())
     }
 
-    pub fn load_ptx(&self, ptx_bytes: &[u8]) -> Result<CudaModule, CudaError> {
+    pub fn load_ptx(&self, ptx_bytes: &[u8]) -> Result<Rc<CudaModule>, CudaError> {
         // cuModuleLoadData requires the PTX data to remain valid for the
         // duration of the call. Append a NUL terminator to be safe.
         let mut ptx = ptx_bytes.to_vec();
@@ -362,10 +483,10 @@ impl CudaEngine {
             )?;
         }
 
-        Ok(CudaModule {
+        Ok(Rc::new(CudaModule {
             module,
             owner: Rc::clone(&self.inner),
-        })
+        }))
     }
 
     pub fn score_tiles(
@@ -379,6 +500,43 @@ impl CudaEngine {
     ) -> Result<(), CudaError> {
         if num_tiles <= 0 {
             return Ok(());
+        }
+        let n = num_tiles as usize;
+
+        // Bounds-check every buffer against the kernel's read/write ranges
+        // before launching: the kernel reads `n` 128-byte tiles and writes `n`
+        // f32 scores; q_coarse is D_C f32s and q_sign RESIDUAL_WORDS u64s.
+        let tile_bytes = n
+            .checked_mul(crate::codec::TILE_BYTES)
+            .ok_or_else(|| CudaError("score_tiles: tile byte count overflow".into()))?;
+        let score_bytes = n
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaError("score_tiles: score byte count overflow".into()))?;
+        if tile_bytes > tiles_dev.len {
+            return Err(CudaError(format!(
+                "score_tiles: {} tiles need {} bytes but the tile allocation has {}",
+                n, tile_bytes, tiles_dev.len
+            )));
+        }
+        if score_bytes > scores_dev.len {
+            return Err(CudaError(format!(
+                "score_tiles: {} scores need {} bytes but the score allocation has {}",
+                n, score_bytes, scores_dev.len
+            )));
+        }
+        let q_coarse_bytes = crate::codec::D_C * core::mem::size_of::<f32>();
+        if q_coarse_bytes > q_coarse_dev.len {
+            return Err(CudaError(format!(
+                "score_tiles: q_coarse needs {q_coarse_bytes} bytes but the allocation has {}",
+                q_coarse_dev.len
+            )));
+        }
+        let q_sign_bytes = crate::codec::RESIDUAL_WORDS * core::mem::size_of::<u64>();
+        if q_sign_bytes > q_sign_dev.len {
+            return Err(CudaError(format!(
+                "score_tiles: q_sign needs {q_sign_bytes} bytes but the allocation has {}",
+                q_sign_dev.len
+            )));
         }
 
         let grid_dim = (num_tiles as usize).div_ceil(256) as u32;
@@ -394,7 +552,8 @@ impl CudaEngine {
 
         // SAFETY: cuLaunchKernel launches the kernel with the given grid/block
         // dimensions and kernel arguments. All device pointers must be valid
-        // allocations (guaranteed by the allocation types).
+        // allocations (guaranteed by the allocation types and the bounds checks
+        // above).
         unsafe {
             cuda_check(
                 cuLaunchKernel(
@@ -415,6 +574,159 @@ impl CudaEngine {
         }
 
         Ok(())
+    }
+
+    /// Same as [`Self::score_tiles`] but launches on `stream`, enabling
+    /// overlap of H2D copies, the kernel and D2H copies. The caller is
+    /// responsible for `stream.synchronize()` (or an event) before reading the
+    /// scores. Bounds-checks are identical to [`Self::score_tiles`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn score_tiles_on_stream(
+        &self,
+        q_coarse_dev: &CudaAllocation,
+        q_sign_dev: &CudaAllocation,
+        tiles_dev: &CudaAllocation,
+        scores_dev: &CudaAllocation,
+        num_tiles: i32,
+        kernel: &CudaFunction,
+        stream: &CudaStream,
+    ) -> Result<(), CudaError> {
+        if num_tiles <= 0 {
+            return Ok(());
+        }
+        let n = num_tiles as usize;
+
+        let tile_bytes = n
+            .checked_mul(crate::codec::TILE_BYTES)
+            .ok_or_else(|| CudaError("score_tiles_on_stream: tile byte count overflow".into()))?;
+        let score_bytes = n
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaError("score_tiles_on_stream: score byte count overflow".into()))?;
+        if tile_bytes > tiles_dev.len {
+            return Err(CudaError(format!(
+                "score_tiles_on_stream: {} tiles need {} bytes but the tile allocation has {}",
+                n, tile_bytes, tiles_dev.len
+            )));
+        }
+        if score_bytes > scores_dev.len {
+            return Err(CudaError(format!(
+                "score_tiles_on_stream: {} scores need {} bytes but the score allocation has {}",
+                n, score_bytes, scores_dev.len
+            )));
+        }
+        let q_coarse_bytes = crate::codec::D_C * core::mem::size_of::<f32>();
+        if q_coarse_bytes > q_coarse_dev.len {
+            return Err(CudaError(format!(
+                "score_tiles_on_stream: q_coarse needs {q_coarse_bytes} bytes but the allocation has {}",
+                q_coarse_dev.len
+            )));
+        }
+        let q_sign_bytes = crate::codec::RESIDUAL_WORDS * core::mem::size_of::<u64>();
+        if q_sign_bytes > q_sign_dev.len {
+            return Err(CudaError(format!(
+                "score_tiles_on_stream: q_sign needs {q_sign_bytes} bytes but the allocation has {}",
+                q_sign_dev.len
+            )));
+        }
+
+        let grid_dim = (num_tiles as usize).div_ceil(256) as u32;
+        let block_dim = 256u32;
+
+        let args: [*mut libc::c_void; 5] = [
+            &q_coarse_dev.ptr as *const u64 as *mut libc::c_void,
+            &q_sign_dev.ptr as *const u64 as *mut libc::c_void,
+            &tiles_dev.ptr as *const u64 as *mut libc::c_void,
+            &scores_dev.ptr as *const u64 as *mut libc::c_void,
+            &num_tiles as *const i32 as *mut libc::c_void,
+        ];
+
+        unsafe {
+            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
+            cuda_check(
+                cuLaunchKernel(
+                    kernel.func,
+                    grid_dim,
+                    1,
+                    1,
+                    block_dim,
+                    1,
+                    1,
+                    0,
+                    stream.raw(),
+                    args.as_ptr(),
+                    std::ptr::null_mut(),
+                ),
+                "cuLaunchKernel",
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Async host→device copy on `stream`. Returns immediately; the copy
+    /// completes before any subsequent op enqueued on the same stream.
+    pub fn copy_to_device_async(
+        &self,
+        src: &[u8],
+        dst: &mut CudaAllocation,
+        dst_offset: usize,
+        stream: &CudaStream,
+    ) -> Result<(), CudaError> {
+        let end = dst_offset
+            .checked_add(src.len())
+            .ok_or_else(|| CudaError("copy_to_device_async: offset + length overflow".into()))?;
+        if end > dst.len {
+            return Err(CudaError(format!(
+                "copy_to_device_async: offset {dst_offset} + size {} exceeds allocation size {}",
+                src.len(),
+                dst.len
+            )));
+        }
+        unsafe {
+            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
+            cuda_check(
+                cuMemcpyHtoDAsync_v2(
+                    dst.ptr + dst_offset as u64,
+                    src.as_ptr() as *const libc::c_void,
+                    src.len() as u64,
+                    stream.raw(),
+                ),
+                "cuMemcpyHtoDAsync_v2",
+            )
+        }
+    }
+
+    /// Async device→host copy on `stream`. Returns immediately; call
+    /// `stream.synchronize()` before reading `dst`.
+    pub fn copy_to_host_async(
+        &self,
+        src: &CudaAllocation,
+        src_offset: usize,
+        dst: &mut [u8],
+        stream: &CudaStream,
+    ) -> Result<(), CudaError> {
+        let end = src_offset
+            .checked_add(dst.len())
+            .ok_or_else(|| CudaError("copy_to_host_async: offset + length overflow".into()))?;
+        if end > src.len {
+            return Err(CudaError(format!(
+                "copy_to_host_async: offset {src_offset} + size {} exceeds allocation size {}",
+                dst.len(),
+                src.len
+            )));
+        }
+        unsafe {
+            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
+            cuda_check(
+                cuMemcpyDtoHAsync_v2(
+                    dst.as_ptr() as *mut libc::c_void,
+                    src.ptr + src_offset as u64,
+                    dst.len() as u64,
+                    stream.raw(),
+                ),
+                "cuMemcpyDtoHAsync_v2",
+            )
+        }
     }
 }
 
@@ -550,8 +862,27 @@ extern "C" {
     fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const libc::c_void, count: u64) -> CUresult;
     fn cuMemcpyDtoH_v2(dst: *mut libc::c_void, src: CUdeviceptr, count: u64) -> CUresult;
     fn cuModuleLoadData(module: *mut CUmodule, data: *const libc::c_void) -> CUresult;
-    fn cuModuleGetFunction(func: *mut CUfunction, module: CUmodule, name: *const i8) -> CUresult;
+    fn cuModuleGetFunction(
+        func: *mut CUfunction,
+        module: CUmodule,
+        name: *const core::ffi::c_char,
+    ) -> CUresult;
     fn cuModuleUnload(module: CUmodule) -> CUresult;
+    fn cuStreamCreate(stream: *mut CUstream, flags: u32) -> CUresult;
+    fn cuStreamDestroy(stream: CUstream) -> CUresult;
+    fn cuStreamSynchronize(stream: CUstream) -> CUresult;
+    fn cuMemcpyHtoDAsync_v2(
+        dst: CUdeviceptr,
+        src: *const libc::c_void,
+        count: u64,
+        stream: CUstream,
+    ) -> CUresult;
+    fn cuMemcpyDtoHAsync_v2(
+        dst: *mut libc::c_void,
+        src: CUdeviceptr,
+        count: u64,
+        stream: CUstream,
+    ) -> CUresult;
     fn cuLaunchKernel(
         f: CUfunction,
         grid_dim_x: u32,

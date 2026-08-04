@@ -1,23 +1,36 @@
-//! Filtre de sécurité géométrique dans l'espace latent (representation engineering).
+//! Filtre géométrique d'anomalies dans l'espace latent (outlier filter).
 //!
-//! Ce module implémente un classifieur ultra-léger qui analyse la représentation
-//! géométrique des latents SLHA v2. L'API principale accepte une [`SciRustSlhaTile`]
-//! complète et réutilise son décodeur canonique afin de respecter le codec, les échelles
-//! par groupe et l'état éventuel du plan de correction.
+//! Ce module implémente un détecteur d'anomalies ultra-léger qui analyse la
+//! représentation géométrique des latents SLHA v2. L'API principale accepte une
+//! [`SciRustSlhaTile`] complète et réutilise son décodeur canonique afin de
+//! respecter le codec, les échelles par groupe et l'état éventuel du plan de
+//! correction.
 //!
 //! ## Principe
 //!
-//! L'espace latent compressé de SLHAv2 est un condensé topologique des activations du
-//! modèle. Les attaques complexes provoquent des anomalies de distribution mesurables :
+//! L'espace latent compressé de SLHAv2 est un condensé topologique des
+//! activations du modèle. Ce filtre signale les vecteurs qui s'écartent d'une
+//! distribution de référence par trois heuristiques géométriques :
 //!
-//! 1. **Déviation angulaire** — le vecteur projeté s'écarte du vecteur directeur de
-//!    référence (activation « normale »). Mesuré par produit scalaire normalisé
-//!    (cosinus), indépendant de la norme du vecteur analysé.
-//! 2. **Isolation orthogonale** — le vecteur devient quasi-orthogonal à un classifieur
-//!    linéaire calibré (signature d'une injection de prompt structurée créant un
-//!    sous-espace disjoint).
-//! 3. **Dérive sémantique** — la moyenne glissante du cosinus s'effondre sur une fenêtre
-//!    récente : des vecteurs individuellement plausibles mais collectivement dérivants.
+//! 1. **Déviation angulaire** — le vecteur projeté s'écarte du vecteur directeur
+//!    de référence (activation « normale »). Mesuré par produit scalaire
+//!    normalisé (cosinus), indépendant de la norme du vecteur analysé.
+//! 2. **Isolation orthogonale** — le vecteur devient quasi-orthogonal à un
+//!    classifieur linéaire calibré (signature d'un sous-espace disjoint).
+//! 3. **Dérive sémantique** — la moyenne glissante du cosinus s'effondre sur une
+//!    fenêtre récente : des vecteurs individuellement plausibles mais
+//!    collectivement dérivants.
+//!
+//! ## Limites (honnêteté)
+//!
+//! Ce module est un **filtre statistique d'outliers**, pas un contrôle de
+//! sécurité validé. Les seuils (`DEFAULT_DOT_THRESHOLD`, `DEFAULT_DRIFT_THRESHOLD`,
+//! …) sont des constantes **non calibrées** : ils n'ont été évalués sur aucun jeu
+//! d'attaques réelles, et un dérive de distribution bénigne (changement de sujet,
+//! de langue, de format) déclenchera des faux positifs. Ne pas l'utiliser comme
+//! seule barrière de sécurité ; le qualifier de « détection d'injection de prompt »
+//! serait un sur-engagement. Une évaluation par jeu de données et une calibration
+//! des seuils sont requises avant tout usage en production.
 //!
 //! ## Performance
 //!

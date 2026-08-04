@@ -101,17 +101,35 @@ impl SerializedTile {
             .copy_from_slice(&scales[..len]);
     }
 
+    /// Score this tile against a query, validating the codec flags first.
+    ///
+    /// Returns `Err(CodecError)` for an unsupported flag combination (see
+    /// [`codec::validate_codec`]) instead of silently decoding as INT4.
+    pub fn try_score(&self, q_coarse: &[f32], q_sign: &[u64]) -> Result<f32, codec::CodecError> {
+        codec::validate_codec(self.flags())?;
+        Ok(self.score_unchecked(q_coarse, q_sign))
+    }
+
+    /// Score this tile against a query.
+    ///
+    /// # Panics
+    ///
+    /// Panics with a descriptive message if the tile's flags select an
+    /// unsupported codec combination. Prefer [`Self::try_score`] when handling
+    /// untrusted tiles.
     pub fn score(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
-        // OPTIMIZATION: Convert to the identical SciRustSlhaTile representation to leverage
-        // highly-optimized hardware-accelerated CPU SIMD execution paths (AVX2, AVX-512, NEON)
-        // instead of executing the slow scalar fallback loop.
-        let q_coarse_arr: &[f32; codec::D_C] = q_coarse
+        codec::validate_codec(self.flags()).unwrap_or_else(|e| panic!("cannot score tile: {e}"));
+        self.score_unchecked(q_coarse, q_sign)
+    }
+
+    fn score_unchecked(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
+        let q_coarse: &[f32; codec::D_C] = q_coarse
             .try_into()
             .expect("q_coarse slice must be exactly D_C elements");
-        let q_sign_arr: &[u64; codec::RESIDUAL_WORDS] = q_sign
+        let q_sign: &[u64; codec::RESIDUAL_WORDS] = q_sign
             .try_into()
             .expect("q_sign slice must be exactly RESIDUAL_WORDS elements");
-        self.to_slha_tile().compute_score(q_coarse_arr, q_sign_arr)
+        self.to_slha_tile().compute_score(q_coarse, q_sign)
     }
 
     pub fn to_slha_tile(&self) -> SciRustSlhaTile {

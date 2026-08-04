@@ -1,0 +1,3 @@
+# Mark patch files as binary to skip whitespace checks (context blank lines
+# in unified diffs are trailing spaces by design).
+*.patch binary

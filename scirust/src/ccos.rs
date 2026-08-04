@@ -111,6 +111,10 @@ pub struct ElasticKvCache {
     importance: Vec<f32>,
     free: Vec<usize>,
     budget_bytes: usize,
+    /// Running logical footprint (HOT 128, WARM 96, COLD 0, minus separable
+    /// correction planes). Maintained O(1) at every mutation so
+    /// [`Self::enforce_budget`] never walks the arena.
+    live_bytes_counter: usize,
     policy: PageOutPolicy,
     eviction: EvictionPolicy,
     next_seq: u64,
@@ -133,6 +137,7 @@ impl ElasticKvCache {
             importance: Vec::new(),
             free: Vec::new(),
             budget_bytes,
+            live_bytes_counter: 0,
             policy,
             eviction: EvictionPolicy::default(),
             next_seq: 0,
@@ -249,6 +254,7 @@ impl ElasticKvCache {
         };
 
         self.next_seq += 1;
+        self.live_bytes_counter += self.slot_live_bytes(slot);
         slot
     }
 
@@ -362,10 +368,12 @@ impl ElasticKvCache {
     /// the flag). No I/O, no allocation.
     pub fn page_out(&mut self, slot: usize) {
         if self.state[slot] == TileState::Hot {
+            self.live_bytes_counter -= self.slot_live_bytes(slot);
             self.tiles[slot].residual_bitmap = [0u64; RESIDUAL_WORDS];
             self.tiles[slot].dynamic_lambda = 0.0;
             self.tiles[slot].flags |= FLAG_WARM;
             self.state[slot] = TileState::Warm;
+            self.live_bytes_counter += self.slot_live_bytes(slot);
         }
     }
 
@@ -384,6 +392,7 @@ impl ElasticKvCache {
         // Both layouts put the plane at the end of the 64-byte latent.
         t.latent_kv[LATENT_BYTES - n..].fill(0);
         t.flags |= FLAG_TQ3_NOCORR;
+        self.live_bytes_counter -= n;
         true
     }
 
@@ -422,6 +431,7 @@ impl ElasticKvCache {
             return false;
         }
 
+        self.live_bytes_counter -= self.slot_live_bytes(slot);
         self.state[slot] = TileState::Cold;
         self.free.push(slot);
         true
@@ -455,25 +465,28 @@ impl ElasticKvCache {
         Ok(Some(self.insert_with_state(rec.tile, state)))
     }
 
+    /// Logical footprint of one slot: HOT 128 / WARM 96 / COLD 0, minus the
+    /// codec's separable-plane bytes where the correction plane is paged out.
+    fn slot_live_bytes(&self, slot: usize) -> usize {
+        let base = match self.state[slot] {
+            TileState::Hot => HOT_BYTES,
+            TileState::Warm => WARM_BYTES,
+            TileState::Cold => return 0,
+        };
+        let t = &self.tiles[slot];
+        base - if t.is_tq3_nocorr() {
+            t.separable_corr_bytes()
+        } else {
+            0
+        }
+    }
+
     /// Elastic logical footprint: Σ over live slots (HOT 128, WARM 96, COLD 0;
     /// minus the codec's separable-plane bytes where it is paged out).
+    ///
+    /// O(1): backed by a running counter maintained at every mutation.
     pub fn live_bytes(&self) -> usize {
-        self.state
-            .iter()
-            .zip(&self.tiles)
-            .map(|(s, t)| {
-                let base = match s {
-                    TileState::Hot => HOT_BYTES,
-                    TileState::Warm => WARM_BYTES,
-                    TileState::Cold => return 0,
-                };
-                base - if t.is_tq3_nocorr() {
-                    t.separable_corr_bytes()
-                } else {
-                    0
-                }
-            })
-            .sum()
+        self.live_bytes_counter
     }
 
     /// Number of live slots whose separable correction plane is paged out.
@@ -540,13 +553,13 @@ impl ElasticKvCache {
     ///    (plan axis A5: lowest cumulative attention first, attention sinks
     ///    pinned) — dropping a token is the harder loss.
     pub fn enforce_budget(&mut self) -> bool {
-        if self.live_bytes() <= self.budget_bytes {
+        if self.live_bytes_counter <= self.budget_bytes {
             return true;
         }
 
         // Phase 1 — HOT TQ3 correction planes.
         for s in self.slots_in_paging_order(TileState::Hot) {
-            if self.live_bytes() <= self.budget_bytes {
+            if self.live_bytes_counter <= self.budget_bytes {
                 return true;
             }
             self.drop_correction(s);
@@ -554,7 +567,7 @@ impl ElasticKvCache {
 
         // Phase 2 — HOT→WARM.
         for s in self.slots_in_paging_order(TileState::Hot) {
-            if self.live_bytes() <= self.budget_bytes {
+            if self.live_bytes_counter <= self.budget_bytes {
                 return true;
             }
             self.page_out(s);
@@ -563,7 +576,7 @@ impl ElasticKvCache {
         // Phase 3 — WARM TQ3 correction planes (tiles paged in phase 2 have
         // already lost theirs in phase 1; this catches inserted-WARM tiles).
         for s in self.slots_in_paging_order(TileState::Warm) {
-            if self.live_bytes() <= self.budget_bytes {
+            if self.live_bytes_counter <= self.budget_bytes {
                 return true;
             }
             self.drop_correction(s);
@@ -590,13 +603,13 @@ impl ElasticKvCache {
             }
         }
         for s in live {
-            if self.live_bytes() <= self.budget_bytes {
+            if self.live_bytes_counter <= self.budget_bytes {
                 return true;
             }
 
             self.evict(s);
         }
 
-        self.live_bytes() <= self.budget_bytes
+        self.live_bytes_counter <= self.budget_bytes
     }
 }

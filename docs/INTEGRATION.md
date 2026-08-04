@@ -3,18 +3,26 @@
 Ce guide explique comment brancher SLHA v2 dans **llama.cpp**, **Ollama**,
 **vLLM** ou votre propre moteur d'inférence.
 
-> **Statut.** La **Phase 2 llama.cpp** est engagée pour de vrai et
-> **partiellement livrée** — voir [`integration/llama.cpp/`](../integration/llama.cpp/) :
+> **Statut.** La **Phase 2 llama.cpp** est **implémentée et mesurée** — voir
+> [`integration/llama.cpp/`](../integration/llama.cpp/) :
 > le **pont ABI C** (`slha-c` : `slha_weights_load` / `slha_encode_key` /
-> `slha_decode_latent` / `slha_weights_free`) est **implémenté et testé**, une
-> **perplexité de référence est mesurée** (Qwen2.5-0.5B Q8_0, WikiText-2 :
-> **PPL 17,72**), et le **point d'insertion du patch est identifié dans le
-> code** (`llama_kv_cache::cpy_k`, `ggml_map_custom1`). Ce qui reste (le shim
-> ggml + projections par couche + mesure du Δppl) y est spécifié précisément.
+> `slha_decode_latent` / `slha_weights_free`) est **implémenté et testé** ; le
+> shim ggml (`slha_llama.cpp`) et les patches couvrent **quatre modes**
+> (`passthrough`, `collect`, `roundtrip`, `scorediag`, `fused`) branchés à
+> `llama_kv_cache::cpy_k` et `build_attn_mha` ; des projections par couche sont
+> entraînées et mesurées sur Qwen2.5-1.5B Q8_0 (WikiText-2).
 >
-> Les sections **Ollama / vLLM ci-dessous restent du pseudo-code** illustratif
-> (les drapeaux `--kv-cache=slha` etc. n'existent pas) ; seules la Phase 2
-> llama.cpp et la section « moteur Rust custom » reposent sur du code réel.
+> **Résultats mesurés (honnêteté).** Le `roundtrip` (reconstruction de K) est
+> **NO-GO** : ΔPPL ≈ +40 %. Le `fused-QK` (scores SLHA calculés directement sur
+> les tuiles, remplaçant QK^T) est **implémenté et fonctionnel**, mais mesuré
+> **NO-GO** lui aussi : PPL ≈ 19830 vs 11,88 baseline (cos ≈ 0,68, KL ≈ 5 sur
+> les couches profondes). La cause la plus probable : les projections sont
+> entraînées sur K seul, pas sur K/Q conjoint — la calibration conjointe reste
+> à explorer.
+>
+> Les sections **Ollama / vLLM ci-dessous restent du pseudo-code** illustratif ;
+> seule la Phase 2 llama.cpp (et la section « moteur Rust custom ») repose sur
+> du code réel compilé et mesuré.
 
 ---
 
@@ -49,7 +57,9 @@ llama.cpp
 
 ### Ce qu'il faut modifier
 
-**Fichier : `llama.cpp` → fonction `llama_build_attention()`**
+**Fichier : `llama.cpp` → fonction `llama_kv_cache::cpy_k`** (point d'insertion
+réel du patch, via `ggml_map_custom1` — l'esquisse historique en
+`llama_build_attention()` est obsolète)
 
 Avant :
 ```cpp
