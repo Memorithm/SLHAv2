@@ -1,0 +1,14 @@
+base=a4544a0176fd9e9098046a43def5b3d94e6e5512
+master=3f8ee8af05db48c44e9568ed6ba941f2be112146
+pr71=a3b3272e8a6bab3bd11234913c8de7a49c80e603
+conflict_count=10
+Cargo.lock
+integration/llama.cpp/README.md
+integration/llama.cpp/build_and_roundtrip.sh
+integration/llama.cpp/shim/slha_llama.cpp
+integration/llama.cpp/shim/slha_llama.hpp
+scirust/src/attention/slha_v2.rs
+slha-c/src/lib.rs
+slha-python/Cargo.toml
+slhav2-vram/Cargo.toml
+slhav2-vram/src/mem/tile.rs
