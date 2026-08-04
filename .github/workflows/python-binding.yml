@@ -8,6 +8,7 @@ permissions:
 
 jobs:
   wheel-runtime:
+    # Runtime gate: Cargo-only checks cannot expose PyO3 ABI/alignment faults.
     name: PyO3 wheel build + runtime test
     runs-on: ubuntu-latest
     steps:
