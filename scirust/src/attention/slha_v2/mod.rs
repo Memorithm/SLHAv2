@@ -69,5 +69,11 @@ pub use constants::*;
 pub use simd::hamming_distance;
 pub use tile::{LatentCodec, SciRustSlhaTile};
 
+// The x86-64 equivalence test exercises the private scalar and AVX-512
+// implementations directly. Keep those helpers internal while making them
+// visible to the child test module through its existing `use super::*`.
+#[cfg(all(test, target_arch = "x86_64"))]
+use simd::{hamming_scalar, hamming_vpopcntdq};
+
 #[cfg(test)]
 mod tests;
