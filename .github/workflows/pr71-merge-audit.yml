@@ -1,0 +1,64 @@
+name: PR71 merge audit
+
+on:
+  push:
+    branches:
+      - ci/pr71-merge-audit-20260804
+
+permissions:
+  contents: write
+
+jobs:
+  merge-audit:
+    if: ${{ !contains(github.event.head_commit.message, '[merge-audit-result]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Attempt three-way merge and persist evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin feat/llama-compressed-score-quality-gate:refs/remotes/origin/pr71
+
+          ours_sha="$(git rev-parse HEAD)"
+          theirs_sha="$(git rev-parse refs/remotes/origin/pr71)"
+          base_sha="$(git merge-base HEAD refs/remotes/origin/pr71)"
+
+          set +e
+          git merge --no-commit --no-ff refs/remotes/origin/pr71
+          merge_rc=$?
+          set -e
+
+          if [ "$merge_rc" -eq 0 ]; then
+            git commit -m "chore: merge PR #71 onto current master [merge-audit-result]"
+            git push origin HEAD:ci/pr71-merge-audit-20260804
+            exit 0
+          fi
+
+          mkdir -p .merge-audit/base .merge-audit/master .merge-audit/pr71 .merge-audit/conflicted
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+
+          {
+            printf 'base=%s\nmaster=%s\npr71=%s\n' "$base_sha" "$ours_sha" "$theirs_sha"
+            printf 'conflict_count=%s\n' "${#conflicts[@]}"
+            printf '%s\n' "${conflicts[@]}"
+          } > .merge-audit/summary.txt
+
+          for path in "${conflicts[@]}"; do
+            for side in base master pr71 conflicted; do
+              mkdir -p ".merge-audit/$side/$(dirname "$path")"
+            done
+            git show ":1:$path" > ".merge-audit/base/$path" 2>/dev/null || true
+            git show ":2:$path" > ".merge-audit/master/$path" 2>/dev/null || true
+            git show ":3:$path" > ".merge-audit/pr71/$path" 2>/dev/null || true
+            cp "$path" ".merge-audit/conflicted/$path" 2>/dev/null || true
+          done
+
+          git merge --abort
+          git add .merge-audit
+          git commit -m "chore: record PR #71 merge conflicts [merge-audit-result]"
+          git push origin HEAD:ci/pr71-merge-audit-20260804
