@@ -1,0 +1,37 @@
+name: PR71 tree once
+
+on:
+  push:
+    branches:
+      - fix/pr71-rebased-audit-installer
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Merge PR 71 with recorded conflict choices
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin feat/llama-compressed-score-quality-gate:refs/remotes/origin/pr71
+          git merge --no-commit --no-ff refs/remotes/origin/pr71 || true
+          git checkout --ours -- Cargo.lock integration/llama.cpp/README.md integration/llama.cpp/build_and_roundtrip.sh integration/llama.cpp/shim/slha_llama.cpp integration/llama.cpp/shim/slha_llama.hpp slha-c/src/lib.rs slha-python/Cargo.toml slhav2-vram/Cargo.toml slhav2-vram/src/mem/tile.rs
+          git add Cargo.lock integration/llama.cpp/README.md integration/llama.cpp/build_and_roundtrip.sh integration/llama.cpp/shim/slha_llama.cpp integration/llama.cpp/shim/slha_llama.hpp slha-c/src/lib.rs slha-python/Cargo.toml slhav2-vram/Cargo.toml slhav2-vram/src/mem/tile.rs
+          git rm -f scirust/src/attention/slha_v2.rs
+          git restore --source=HEAD --staged --worktree docs/INTEGRATION.md
+          git rm -f integration/llama.cpp/patches/0002-slha-fused-qk.patch
+          test -z "$(git diff --name-only --diff-filter=U)"
+          mkdir -p .pr71-resolution
+          printf '# PR 71 resolved tree\n\n- resolution_exit_code: 0\n- unresolved_conflicts: 0\n- fused_qk_split_out: true\n- validation_pending: true\n' > .pr71-resolution/STATUS.md
+          git rm -f .github/workflows/pr71-tree-once.yml .github/workflows/pr71-resolve-only.yml
+          git rm -f .pr71-resolution/SENTINEL.txt 2>/dev/null || true
+          git add -A
+          git commit -m "fix: resolve PR 71 tree onto master [pr71-tree]"
+          git push origin HEAD:fix/pr71-rebased-audit-installer
