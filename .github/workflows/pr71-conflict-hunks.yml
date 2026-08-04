@@ -1,0 +1,67 @@
+name: PR71 conflict hunk extractor
+
+on:
+  push:
+    branches:
+      - ci/pr71-merge-audit-20260804
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    if: ${{ !contains(github.event.head_commit.message, '[hunks-result]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Extract conflict hunks with context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('.merge-audit/conflicted')
+          out_root = Path('.merge-audit/hunks')
+          out_root.mkdir(parents=True, exist_ok=True)
+
+          for source in sorted(p for p in root.rglob('*') if p.is_file()):
+              lines = source.read_text(errors='replace').splitlines()
+              blocks = []
+              i = 0
+              while i < len(lines):
+                  if lines[i].startswith('<<<<<<< '):
+                      start = i
+                      j = i + 1
+                      while j < len(lines) and not lines[j].startswith('>>>>>>> '):
+                          j += 1
+                      if j >= len(lines):
+                          raise SystemExit(f'unterminated conflict in {source}:{i+1}')
+                      ctx_start = max(0, start - 4)
+                      ctx_end = min(len(lines), j + 5)
+                      block = [f'### conflict lines {start+1}-{j+1}']
+                      for line_no in range(ctx_start, ctx_end):
+                          marker = '>' if start <= line_no <= j else ' '
+                          block.append(f'{marker}{line_no+1:06d}: {lines[line_no]}')
+                      blocks.append('\n'.join(block))
+                      i = j + 1
+                  else:
+                      i += 1
+
+              relative = source.relative_to(root)
+              target = out_root / (str(relative) + '.txt')
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_text(
+                  f'file={relative}\nconflict_count={len(blocks)}\n\n' +
+                  '\n\n'.join(blocks) + '\n'
+              )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .merge-audit/hunks
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: extract PR #71 conflict hunks [hunks-result]"
+          git push
