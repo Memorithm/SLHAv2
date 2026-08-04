@@ -198,7 +198,9 @@ fn encode_latent(
 
     validate_tile(&tile)?;
 
-    Ok(PySlhaTile { inner: tile })
+    Ok(PySlhaTile {
+        inner: Box::new(tile),
+    })
 }
 
 fn checked_score(
@@ -229,7 +231,7 @@ fn checked_score(
 #[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PySlhaTile {
-    pub inner: SciRustSlhaTile,
+    pub inner: Box<SciRustSlhaTile>,
 }
 
 #[pymethods]
@@ -275,7 +277,9 @@ impl PySlhaTile {
 
         validate_tile(&tile)?;
 
-        Ok(Self { inner: tile })
+        Ok(Self {
+            inner: Box::new(tile),
+        })
     }
 
     #[getter]
