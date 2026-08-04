@@ -917,6 +917,7 @@ fn avx2_path_matches_scalar() {
             // Alternate HOT / WARM to cover both branches.
             let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
             let s = tile.compute_score_scalar(&q, &q_sign);
+            // SAFETY: this branch is gated by runtime AVX2 feature detection.
             let a = unsafe { tile.compute_score_avx2(&q, &q_sign) };
             assert!(
                 (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
@@ -941,6 +942,7 @@ fn avx512_path_matches_scalar() {
         for (i, t) in toks.iter().enumerate() {
             let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
             let s = tile.compute_score_scalar(&q, &q_sign);
+            // SAFETY: this branch is gated by runtime AVX-512F feature detection.
             let a = unsafe { tile.compute_score_avx512(&q, &q_sign) };
             assert!(
                 (s - a).abs() <= 1e-3 * (1.0 + s.abs()),
