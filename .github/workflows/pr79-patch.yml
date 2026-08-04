@@ -1,4 +1,4 @@
-name: PR79 patch merge regressions
+name: PR79 patch Python alignment
 
 on:
   pull_request:
@@ -20,19 +20,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: rustfmt
-      - name: Restore safety rationale comments
+      - name: Preserve 64-byte tile alignment in PyClass
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          path = Path('scirust/src/attention/slha_v2/tests.rs')
+
+          path = Path('slha-python/src/lib.rs')
           text = path.read_text()
           replacements = {
-              '            let a = unsafe { tile.compute_score_avx2(&q, &q_sign) };':
-              '            // SAFETY: this branch is gated by runtime AVX2 feature detection.\n            let a = unsafe { tile.compute_score_avx2(&q, &q_sign) };',
-              '            let a = unsafe { tile.compute_score_avx512(&q, &q_sign) };':
-              '            // SAFETY: this branch is gated by runtime AVX-512F feature detection.\n            let a = unsafe { tile.compute_score_avx512(&q, &q_sign) };',
+              '    Ok(PySlhaTile { inner: tile })':
+              '    Ok(PySlhaTile {\n        inner: Box::new(tile),\n    })',
+              '    pub inner: SciRustSlhaTile,':
+              '    pub inner: Box<SciRustSlhaTile>,',
+              '        Ok(Self { inner: tile })':
+              '        Ok(Self {\n            inner: Box::new(tile),\n        })',
           }
           for old, new in replacements.items():
               count = text.count(old)
@@ -42,9 +45,16 @@ jobs:
           path.write_text(text)
           PY
           cargo fmt --all
+          cargo check --locked -p slha-python
+          python3 -m pip install --quiet "maturin>=1.0,<2.0"
+          cd slha-python
+          python3 -m maturin build --release --out "$RUNNER_TEMP/wheels"
+          python3 -m pip install --quiet --force-reinstall "$RUNNER_TEMP"/wheels/*.whl
+          python3 tests/test_binding.py
+          cd ..
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add scirust/src/attention/slha_v2/tests.rs
-          git commit -m "fix(tests): document SIMD unsafe calls"
+          git add slha-python/src/lib.rs
+          git commit -m "fix(python): preserve aligned tile storage"
           git push origin HEAD:fix/pr71-merged-master-v3
