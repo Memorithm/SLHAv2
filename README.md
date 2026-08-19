@@ -43,7 +43,11 @@ d'une ligne de texte — au lieu de plusieurs kilo-octets normalement.
 
 ## Le projet en bref — ce que vous pouvez faire
 
-SLHA v2 est un **workspace Cargo de 4 crates** (tous en v0.2.0), organisé autour d'un noyau de référence et de ponts vers l'extérieur. Concrètement, avec ce dépôt vous pouvez :
+SLHA v2 est un **workspace Cargo de 5 crates** (`scirust` 0.2.0, `slha-mcp`
+0.2.0, `slha-c` 0.2.0, `slha-python` 0.2.0, `slhav2-vram` 0.1.0) plus
+l'**incubateur Elastic** (`elastic/`, 5 crates v0.1.0 indépendantes de
+SLHAv2), organisés autour d'un noyau de référence et de ponts vers
+l'extérieur. Concrètement, avec ce dépôt vous pouvez :
 
 - **Compresser** chaque souvenir de KV-cache en une **tuile de 128 octets** sans padding (latent bas-rang 64 o + résidu 1-bit 32 o + métadonnées 32 o), et **scorer** une requête contre cette tuile sans la décompresser : produit scalaire sur le latent + popcount/Hamming sur le résidu (`compute_score`, eq. 2.3). Quatre codecs latents au même budget de 64 o : **INT4** (simple ou groupé MX), **NF4**, **mixte 8/4-bit**, et **TQ3** — portage du codec [TurboQuant](docs/TURBOQUANT.md) (3 bits + plan de correction 1 bit séparable).
 - **Piloter le cache mémoire** avec **CCOS** (`ccos::ElasticKvCache`), un cache KV élastique « Soft-Paging » sur arène contiguë (états HOT 128 o / WARM 96 o, résidu masqué + λ=0 / COLD évincé) qui borne l'empreinte sous un budget en octets que vous fixez (`enforce_budget`), avec politiques de pagination (σ_E / ancienneté) et d'éviction (Causal par défaut, ou Importance H2O/StreamingLLM).
@@ -53,7 +57,7 @@ SLHA v2 est un **workspace Cargo de 4 crates** (tous en v0.2.0), organisé autou
 - **Brancher un agent** via le serveur **MCP** `slha-mcp` (stdio, JSON-RPC 2.0 délimité par lignes, **zéro dépendance externe** — réutilise `scirust::json`), qui expose 5 outils : `slha.audit`, `slha.explain`, `slha.compress`, `slha.score`, `slha.benchmark`.
 - **Appeler le noyau depuis d'autres langages** grâce aux bindings **C** (`slha-c`, interface ABI C `cdylib`/`staticlib` + en-tête `slha.h`) et **Python** (`slha-python`, module natif via PyO3).
 
-Le noyau **`scirust`** est à **zéro dépendance externe par défaut** (build offline), avec dispatch SIMD choisi **à l'exécution** (AVX-512 > AVX2 > scalaire sur x86_64, NEON sur aarch64 ; repli scalaire portable, aucun gating à la compilation). L'équivalence SIMD ≡ scalaire du score est garantie **à 1e-3 près** (FMA / accumulation réordonnée, pas bit-pour-bit) ; seul le popcount/Hamming est exact bit-à-bit. Le noyau embarque aussi les modules `safety`, `numa`, `incoherence` (RHT de Hadamard opt-in), `rope`, `residual`, `adapter`, `ccos`, `audit` et `json`, et fournit le binaire `slha-audit`. Les ratios SIMD sont **indicatifs** et dépendent de votre matériel — mesurez les vôtres avec `cargo run --example cycles --release`.
+Le noyau **`scirust`** est à **zéro dépendance externe par défaut** (build offline : `serde`/`serde_json` sont optionnels, feature `serde` réservée au binaire d'entraînement au ranking), avec dispatch SIMD choisi **à l'exécution** (AVX-512 > AVX2 > scalaire sur x86_64, NEON sur aarch64 ; repli scalaire portable, aucun gating à la compilation). L'équivalence SIMD ≡ scalaire du score est garantie **à 1e-3 près** (FMA / accumulation réordonnée, pas bit-pour-bit) ; seul le popcount/Hamming est exact bit-à-bit. Le noyau embarque aussi les modules `safety`, `numa`, `incoherence` (RHT de Hadamard opt-in), `rope`, `residual`, `adapter`, `ccos`, `audit` et `json`, et fournit le binaire `slha-audit`. Les ratios SIMD sont **indicatifs** et dépendent de votre matériel — mesurez les vôtres avec `cargo run --example cycles --release`.
 
 > **Licence :** double licence — **PolyForm Noncommercial 1.0.0** (usage non-commercial et personnel, gratuit) ; **licence commerciale** requise pour tout usage commercial (voir `LICENSING.md`). SLHAv2 et [TurboQuant](https://github.com/CHECKUPAUTO/TurboQuant) sont des modules compagnons de **CCOS** ; la licence commerciale est offerte exclusivement pour les déploiements CCOS (l'usage non-commercial reste régi par PolyForm NC, sans restriction d'environnement).
 

@@ -1,0 +1,126 @@
+{
+  "schema": "slha_elastic_mission_results_v1",
+  "generated": "2026-08-19",
+  "repositories": {
+    "SLHAv2": {
+      "starting_sha": "8edc1c2a6cd744e924f7818fd21e02557fb8bc4d",
+      "branch": "feat/elastic-architecture-v1",
+      "ending_sha": "bf2facc43249cf62e63add7f97bc8809f12d44ed",
+      "note": "ending_sha filled at mission close"
+    }
+  },
+  "hardware": {
+    "gpu": "NVIDIA Thor",
+    "driver": "580.00",
+    "cuda": "13.0",
+    "nvcc": "13.0.48",
+    "cpu_cores": 14,
+    "arch": "aarch64",
+    "rustc": "1.89.0"
+  },
+  "quality_gate": {
+    "status": "NO-GO (pre-registered, unchanged)",
+    "baseline_ppl": 11.8644,
+    "strict_replacement_ppl": 16.8855,
+    "relative_delta_pct": 42.36,
+    "target_relative_delta_pct": 1.0,
+    "evidence": "integration/llama.cpp/results/measurements.json (kept as historical)",
+    "rank_transplant_oracle": {
+      "ranking_recovery_fraction": 0.6592,
+      "top16_fraction_of_full_recovery": 0.9842,
+      "early_layers_0_6_recovery_fraction": 0.878,
+      "deployable": false
+    },
+    "note": "No new perplexity experiment was run in this mission; the registered gate remains NO-GO and the fused score replacement is documented as not production-complete."
+  },
+  "elastic_language": {
+    "crates": [
+      "elastic-core",
+      "elastic-runtime",
+      "elastic-macros",
+      "elastic-testkit",
+      "elastic"
+    ],
+    "tests_passing": 46,
+    "standalone_extraction": {
+      "status": "PASS",
+      "leak_scan": "0 references to scirust/slha/ccos/llama"
+    },
+    "independent_examples": [
+      "elastic/examples/queue_workers.rs",
+      "elastic-testkit/examples/cross_resource.rs"
+    ]
+  },
+  "slhav2_fixes": {
+    "P0-1_stub_kernel": "REMOVED (fused_gemm.ptx deleted; GpuEngine fails closed)",
+    "P0-2_hybrid_pin_raii": "FIXED (PinnedHostRegion with cudaHostUnregister on drop)",
+    "P0-3_tile_store_alignment": "FIXED (128-aligned region + tests)",
+    "P0-4_kcache_metadata_rewrite": "FIXED (GGML tensor untouched; external tile store)",
+    "P0-5_arbitrary_layer_caps": "FIXED (observed-layer sizing, fail closed)",
+    "P0-6_cuda_error_table": "FIXED (cuGetErrorName/cuGetErrorString)",
+    "P0-7_stale_gpu_query": "FIXED (exact D_C/RESIDUAL_WORDS validation)",
+    "P0-8_arena_accounting": "FIXED (padding tracked as overhead; conservation invariant)",
+    "P0-E1_logical_vs_physical": "FIXED (physical ElasticKvCache: HOT 128/WARM 96/COLD 0 real bytes)",
+    "P1-1_zero_dependency_claim": "FIXED (serde optional behind feature)",
+    "P1-2_msrv": "FIXED (slhav2-vram 1.85 -> 1.89)",
+    "P1-3_readme_4_crates": "FIXED (5 crates + elastic incubator documented)",
+    "P1-6_codec_fail_closed": "FIXED (unknown SLHA_CODEC aborts)"
+  },
+  "elastic_context": {
+    "implemented": true,
+    "observations": [
+      "logical_tokens",
+      "active_tokens",
+      "predicted_growth",
+      "topology",
+      "vram_available",
+      "vram_total",
+      "ram_available",
+      "ram_total",
+      "positional_limit"
+    ],
+    "actions": [
+      "demote",
+      "promote",
+      "offload",
+      "restore",
+      "prefetch",
+      "rebalance"
+    ],
+    "tiers": [
+      "HOT",
+      "WARM",
+      "COLD",
+      "PINNED"
+    ],
+    "telemetry": [
+      "logical_tokens",
+      "raw_kv_bytes",
+      "resident_bytes",
+      "vram_pressure",
+      "hot/warm/cold/pinned counts",
+      "demotions/promotions/evictions"
+    ],
+    "deterministic": true,
+    "demo": "slhav2-vram/examples/elastic_context.rs"
+  },
+  "cuda": {
+    "compile_status": "PASS",
+    "runtime_status": "PASS",
+    "gpu_tested": "NVIDIA Thor",
+    "tests": "12/12 ignored CUDA tests executed and passed"
+  },
+  "tests": {
+    "workspace_all_features": "412 passed",
+    "elastic": "46 passed",
+    "shim_suite": "7 binaries ALL PASS + compile-check against real ggml headers",
+    "python_wheel": "built+installed+imported (aarch64, D_C=128)",
+    "mcp": "initialize->initialized->tools/call slha.audit 7/7 checks"
+  },
+  "not_run": {
+    "perplexity_regate": "No model weights/dataset available on this machine for a 12-chunk WikiText-2 Qwen2.5-1.5B run",
+    "llama_roundtrip_full": "Full llama-perplexity roundtrip requires the pinned llama.cpp tag + GGUF model + WikiText-2 slice (build_and_baseline.sh downloads); not executed",
+    "msrv_1.89_ci_check": "Only the host toolchain 1.89 was used; a rustup 1.89 target check is a CI item",
+    "miri": "Not run (no nightly toolchain configured)"
+  }
+}
