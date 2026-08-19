@@ -7,6 +7,13 @@ on:
 permissions:
   contents: read
 
+# Keep exactly one CI run alive per source branch. The feature branch is
+# updated frequently during audit/fix cycles; without this, obsolete 5-job
+# runs can remain queued ahead of the only HEAD that matters.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
