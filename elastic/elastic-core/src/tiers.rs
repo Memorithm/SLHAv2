@@ -1,14 +1,13 @@
-//! Tier state machines (HOT/WARM/COLD/…) with validated transition tables.
+//! Validated tier state machines (HOT/WARM/COLD/…).
 //!
-//! Tiers are declared as a directed graph of allowed transitions. Invalid
-//! transitions are rejected at runtime with a clear error; the
-//! `elastic-macros` crate can additionally reject statically-declared
-//! invalid transitions at compile time where the graph is known.
+//! A machine is a directed graph over exact `(name, rank)` tier descriptors.
+//! Runtime construction uses [`TierMachine::try_new`]; [`TierMachine::new`]
+//! is the fail-fast convenience constructor for statically authored graphs.
 
 use core::fmt;
 use core::marker::PhantomData;
 
-/// A tier of an elastic resource (HOT, WARM, COLD, EVICTED, PINNED, …).
+/// A tier of an elastic resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tier {
     /// Stable tier identifier.
@@ -17,16 +16,16 @@ pub struct Tier {
     pub rank: u8,
 }
 
-/// A directed transition between two tiers.
+/// A directed transition between two exact tiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TierTransition {
-    /// From tier.
+    /// Source tier.
     pub from: Tier,
-    /// To tier.
+    /// Destination tier.
     pub to: Tier,
 }
 
-/// Errors from tier state transitions.
+/// Tier graph/transition error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TierError {
     /// The transition is not declared in the table.
@@ -36,25 +35,53 @@ pub enum TierError {
         /// Destination tier name.
         to: &'static str,
     },
-    /// The tier is not part of this table.
+    /// A tier name is not part of this machine.
     UnknownTier(&'static str),
+    /// The name exists, but the supplied rank does not match the canonical
+    /// descriptor registered by this machine.
+    TierDescriptorMismatch {
+        /// Tier name.
+        name: &'static str,
+        /// Canonical rank.
+        expected_rank: u8,
+        /// Supplied rank.
+        actual_rank: u8,
+    },
+    /// Two declared tiers use the same stable name.
+    DuplicateTier(&'static str),
+    /// The same directed edge was declared twice.
+    DuplicateTransition {
+        /// Source tier name.
+        from: &'static str,
+        /// Destination tier name.
+        to: &'static str,
+    },
 }
 
 impl fmt::Display for TierError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TierError::TransitionNotAllowed { from, to } => {
+            Self::TransitionNotAllowed { from, to } => {
                 write!(f, "tier transition not allowed: {from} -> {to}")
             }
-            TierError::UnknownTier(t) => write!(f, "unknown tier: {t}"),
+            Self::UnknownTier(tier) => write!(f, "unknown tier: {tier}"),
+            Self::TierDescriptorMismatch {
+                name,
+                expected_rank,
+                actual_rank,
+            } => write!(
+                f,
+                "tier descriptor mismatch for {name}: rank {actual_rank}, expected {expected_rank}"
+            ),
+            Self::DuplicateTier(tier) => write!(f, "duplicate tier: {tier}"),
+            Self::DuplicateTransition { from, to } => {
+                write!(f, "duplicate tier transition: {from} -> {to}")
+            }
         }
     }
 }
 
 /// A validated tier state machine.
-///
-/// Built from an explicit transition table; `transition(from, to)` returns
-/// `Ok(())` only for declared edges. Deterministic and allocation-free.
 #[derive(Clone, Debug)]
 pub struct TierMachine {
     tiers: alloc::vec::Vec<Tier>,
@@ -62,9 +89,39 @@ pub struct TierMachine {
 }
 
 impl TierMachine {
-    /// Build a machine from an explicit tier list and transition table.
+    /// Build a machine and panic if the static graph is invalid.
+    ///
+    /// Prefer [`Self::try_new`] when graph data comes from runtime/config input.
     pub fn new(tiers: alloc::vec::Vec<Tier>, transitions: alloc::vec::Vec<TierTransition>) -> Self {
-        Self { tiers, transitions }
+        Self::try_new(tiers, transitions).expect("invalid static tier graph")
+    }
+
+    /// Validate and build a tier machine.
+    pub fn try_new(
+        tiers: alloc::vec::Vec<Tier>,
+        transitions: alloc::vec::Vec<TierTransition>,
+    ) -> Result<Self, TierError> {
+        for (index, tier) in tiers.iter().enumerate() {
+            if tiers[..index]
+                .iter()
+                .any(|candidate| candidate.name == tier.name)
+            {
+                return Err(TierError::DuplicateTier(tier.name));
+            }
+        }
+
+        for (index, transition) in transitions.iter().enumerate() {
+            validate_descriptor(&tiers, transition.from)?;
+            validate_descriptor(&tiers, transition.to)?;
+            if transitions[..index].contains(transition) {
+                return Err(TierError::DuplicateTransition {
+                    from: transition.from.name,
+                    to: transition.to.name,
+                });
+            }
+        }
+
+        Ok(Self { tiers, transitions })
     }
 
     /// All declared tiers.
@@ -72,24 +129,24 @@ impl TierMachine {
         &self.tiers
     }
 
-    /// Look up a tier by name.
-    pub fn find(&self, name: &'static str) -> Option<Tier> {
-        self.tiers.iter().copied().find(|t| t.name == name)
+    /// All declared transitions.
+    pub fn transitions(&self) -> &[TierTransition] {
+        &self.transitions
     }
 
-    /// Validate a transition against the table.
+    /// Look up a tier by stable name.
+    pub fn find(&self, name: &'static str) -> Option<Tier> {
+        self.tiers.iter().copied().find(|tier| tier.name == name)
+    }
+
+    /// Validate a directed move between exact canonical tier descriptors.
     pub fn transition(&self, from: Tier, to: Tier) -> Result<(), TierError> {
-        if self.find(from.name).is_none() || self.find(to.name).is_none() {
-            return Err(TierError::UnknownTier(if self.find(from.name).is_none() {
-                from.name
-            } else {
-                to.name
-            }));
-        }
+        validate_descriptor(&self.tiers, from)?;
+        validate_descriptor(&self.tiers, to)?;
         if self
             .transitions
             .iter()
-            .any(|t| t.from == from && t.to == to)
+            .any(|transition| transition.from == from && transition.to == to)
         {
             Ok(())
         } else {
@@ -101,8 +158,22 @@ impl TierMachine {
     }
 }
 
-impl core::fmt::Display for TierMachine {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+fn validate_descriptor(tiers: &[Tier], tier: Tier) -> Result<(), TierError> {
+    let Some(canonical) = tiers.iter().copied().find(|candidate| candidate.name == tier.name) else {
+        return Err(TierError::UnknownTier(tier.name));
+    };
+    if canonical.rank != tier.rank {
+        return Err(TierError::TierDescriptorMismatch {
+            name: tier.name,
+            expected_rank: canonical.rank,
+            actual_rank: tier.rank,
+        });
+    }
+    Ok(())
+}
+
+impl fmt::Display for TierMachine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "TierMachine({} tiers, {} transitions)",
@@ -112,10 +183,7 @@ impl core::fmt::Display for TierMachine {
     }
 }
 
-/// A typed tier state holder with a validated machine.
-///
-/// `T` is the tier enum; `TIER` is its name, `RANK` its rank. The pair is
-/// usually produced by `elastic_macros::tier_enum!` or hand-written.
+/// Typed tier state holder with a validated machine.
 #[derive(Clone, Copy, Debug)]
 pub struct TierState<T> {
     current: T,
@@ -123,14 +191,29 @@ pub struct TierState<T> {
     _marker: PhantomData<T>,
 }
 
-impl<T: Copy + Eq + core::fmt::Debug> PartialEq for TierState<T> {
+impl<T: Copy + Eq + fmt::Debug> PartialEq for TierState<T> {
     fn eq(&self, other: &Self) -> bool {
         self.current == other.current
     }
 }
-impl<T: Copy + Eq + core::fmt::Debug> Eq for TierState<T> {}
+
+impl<T: Copy + Eq + fmt::Debug> Eq for TierState<T> {}
 
 impl<T: Copy + Eq + fmt::Debug> TierState<T> {
+    /// Construct a typed state after validating its initial descriptor against
+    /// the machine.
+    pub fn new(current: T, machine: &'static TierMachine) -> Result<Self, TierError>
+    where
+        T: TierLike,
+    {
+        validate_descriptor(machine.tiers(), current.as_tier())?;
+        Ok(Self {
+            current,
+            machine,
+            _marker: PhantomData,
+        })
+    }
+
     /// Current tier.
     pub fn current(&self) -> T {
         self.current
@@ -141,10 +224,8 @@ impl<T: Copy + Eq + fmt::Debug> TierState<T> {
     where
         T: TierLike,
     {
-        let from = self.current;
-        let from_tier = from.as_tier();
-        let to_tier = to.as_tier();
-        self.machine.transition(from_tier, to_tier)?;
+        self.machine
+            .transition(self.current.as_tier(), to.as_tier())?;
         self.current = to;
         Ok(())
     }
@@ -152,46 +233,39 @@ impl<T: Copy + Eq + fmt::Debug> TierState<T> {
 
 /// Bridge between a user tier enum and the core [`Tier`] representation.
 pub trait TierLike: Copy {
-    /// The core tier descriptor (name + rank) for this variant.
+    /// The core tier descriptor for this variant.
     fn as_tier(self) -> Tier;
-    /// Rebuild a variant from a core tier (infallible by construction when
-    /// the enum and the machine share their tier set).
-    fn from_tier(t: Tier) -> Self;
+    /// Rebuild a variant from a canonical core tier.
+    fn from_tier(tier: Tier) -> Self;
 }
 
-/// Build a `TierMachine` from a const list of `(name, rank)` pairs and a
-/// const list of `(from, to)` name pairs.
-///
-/// Note: `TierMachine` contains `Vec`s, so this cannot be a `const fn`
-/// returning a usable value. Prefer constructing `TierMachine` directly with
-/// `alloc::vec!` in a `const` item (as the tests do), or use the
-/// `elastic_macros::elastic_state!` macro which generates validated tables.
+/// Build a validated machine from `(name, rank)` and `(from, to)` lists.
 pub fn machine_from_lists(
     tiers: &[(&'static str, u8)],
     transitions: &[(&'static str, &'static str)],
-) -> TierMachine {
-    let mut tier_list = alloc::vec::Vec::new();
-    for &(name, rank) in tiers {
-        tier_list.push(Tier { name, rank });
-    }
-    let mut trans_list = alloc::vec::Vec::new();
+) -> Result<TierMachine, TierError> {
+    let tier_list: alloc::vec::Vec<Tier> = tiers
+        .iter()
+        .map(|&(name, rank)| Tier { name, rank })
+        .collect();
+    let mut transition_list = alloc::vec::Vec::with_capacity(transitions.len());
     for &(from, to) in transitions {
-        let f = tier_list
+        let from_tier = tier_list
             .iter()
             .copied()
-            .find(|t| t.name == from)
-            .unwrap_or(Tier {
-                name: from,
-                rank: 0,
-            });
-        let t = tier_list
+            .find(|tier| tier.name == from)
+            .ok_or(TierError::UnknownTier(from))?;
+        let to_tier = tier_list
             .iter()
             .copied()
-            .find(|t| t.name == to)
-            .unwrap_or(Tier { name: to, rank: 0 });
-        trans_list.push(TierTransition { from: f, to: t });
+            .find(|tier| tier.name == to)
+            .ok_or(TierError::UnknownTier(to))?;
+        transition_list.push(TierTransition {
+            from: from_tier,
+            to: to_tier,
+        });
     }
-    TierMachine::new(tier_list, trans_list)
+    TierMachine::try_new(tier_list, transition_list)
 }
 
 #[cfg(test)]
@@ -199,130 +273,37 @@ mod tests {
     use super::*;
 
     fn test_machine() -> TierMachine {
-        TierMachine::new(
-            alloc::vec![
-                Tier {
-                    name: "pinned",
-                    rank: 5
-                },
-                Tier {
-                    name: "hot",
-                    rank: 4
-                },
-                Tier {
-                    name: "warm",
-                    rank: 3
-                },
-                Tier {
-                    name: "cold",
-                    rank: 2
-                },
-                Tier {
-                    name: "evicted",
-                    rank: 1
-                },
+        machine_from_lists(
+            &[
+                ("pinned", 5),
+                ("hot", 4),
+                ("warm", 3),
+                ("cold", 2),
+                ("evicted", 1),
             ],
-            alloc::vec![
-                TierTransition {
-                    from: Tier {
-                        name: "hot",
-                        rank: 4
-                    },
-                    to: Tier {
-                        name: "warm",
-                        rank: 3
-                    }
-                },
-                TierTransition {
-                    from: Tier {
-                        name: "warm",
-                        rank: 3
-                    },
-                    to: Tier {
-                        name: "hot",
-                        rank: 4
-                    }
-                },
-                TierTransition {
-                    from: Tier {
-                        name: "warm",
-                        rank: 3
-                    },
-                    to: Tier {
-                        name: "cold",
-                        rank: 2
-                    }
-                },
-                TierTransition {
-                    from: Tier {
-                        name: "cold",
-                        rank: 2
-                    },
-                    to: Tier {
-                        name: "warm",
-                        rank: 3
-                    }
-                },
-                TierTransition {
-                    from: Tier {
-                        name: "cold",
-                        rank: 2
-                    },
-                    to: Tier {
-                        name: "evicted",
-                        rank: 1
-                    }
-                },
-                TierTransition {
-                    from: Tier {
-                        name: "evicted",
-                        rank: 1
-                    },
-                    to: Tier {
-                        name: "cold",
-                        rank: 2
-                    }
-                },
-                TierTransition {
-                    from: Tier {
-                        name: "pinned",
-                        rank: 5
-                    },
-                    to: Tier {
-                        name: "hot",
-                        rank: 4
-                    }
-                },
-                TierTransition {
-                    from: Tier {
-                        name: "hot",
-                        rank: 4
-                    },
-                    to: Tier {
-                        name: "pinned",
-                        rank: 5
-                    }
-                },
+            &[
+                ("hot", "warm"),
+                ("warm", "hot"),
+                ("warm", "cold"),
+                ("cold", "warm"),
+                ("cold", "evicted"),
+                ("evicted", "cold"),
+                ("pinned", "hot"),
+                ("hot", "pinned"),
             ],
         )
+        .unwrap()
     }
 
     #[test]
-    fn declared_transitions_pass() {
-        let m = test_machine();
-        let hot = m.find("hot").unwrap();
-        let warm = m.find("warm").unwrap();
-        assert!(m.transition(hot, warm).is_ok());
-        assert!(m.transition(warm, hot).is_ok());
-    }
-
-    #[test]
-    fn undeclared_transition_rejected() {
-        let m = test_machine();
-        let hot = m.find("hot").unwrap();
-        let evicted = m.find("evicted").unwrap();
+    fn declared_and_undeclared_transitions_are_distinguished() {
+        let machine = test_machine();
+        let hot = machine.find("hot").unwrap();
+        let warm = machine.find("warm").unwrap();
+        let evicted = machine.find("evicted").unwrap();
+        assert!(machine.transition(hot, warm).is_ok());
         assert_eq!(
-            m.transition(hot, evicted),
+            machine.transition(hot, evicted),
             Err(TierError::TransitionNotAllowed {
                 from: "hot",
                 to: "evicted"
@@ -331,11 +312,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tier_rejected() {
-        let m = test_machine();
-        let hot = m.find("hot").unwrap();
+    fn unknown_and_mismatched_descriptors_fail_closed() {
+        let machine = test_machine();
+        let hot = machine.find("hot").unwrap();
         assert_eq!(
-            m.transition(
+            machine.transition(
                 hot,
                 Tier {
                     name: "nope",
@@ -344,13 +325,63 @@ mod tests {
             ),
             Err(TierError::UnknownTier("nope"))
         );
+        assert_eq!(
+            machine.transition(
+                Tier {
+                    name: "hot",
+                    rank: 99
+                },
+                machine.find("warm").unwrap()
+            ),
+            Err(TierError::TierDescriptorMismatch {
+                name: "hot",
+                expected_rank: 4,
+                actual_rank: 99,
+            })
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_duplicate_tiers_and_edges() {
+        assert_eq!(
+            TierMachine::try_new(
+                alloc::vec![
+                    Tier { name: "hot", rank: 2 },
+                    Tier { name: "hot", rank: 1 }
+                ],
+                alloc::vec![]
+            ),
+            Err(TierError::DuplicateTier("hot"))
+        );
+
+        let hot = Tier { name: "hot", rank: 2 };
+        let warm = Tier { name: "warm", rank: 1 };
+        let edge = TierTransition {
+            from: hot,
+            to: warm,
+        };
+        assert_eq!(
+            TierMachine::try_new(alloc::vec![hot, warm], alloc::vec![edge, edge]),
+            Err(TierError::DuplicateTransition {
+                from: "hot",
+                to: "warm"
+            })
+        );
+    }
+
+    #[test]
+    fn list_builder_rejects_unknown_endpoints() {
+        assert_eq!(
+            machine_from_lists(&[("hot", 2)], &[("hot", "cold")]),
+            Err(TierError::UnknownTier("cold"))
+        );
     }
 
     #[test]
     fn pinned_is_protected_from_eviction() {
-        let m = test_machine();
-        let pinned = m.find("pinned").unwrap();
-        let evicted = m.find("evicted").unwrap();
-        assert!(m.transition(pinned, evicted).is_err());
+        let machine = test_machine();
+        let pinned = machine.find("pinned").unwrap();
+        let evicted = machine.find("evicted").unwrap();
+        assert!(machine.transition(pinned, evicted).is_err());
     }
 }
