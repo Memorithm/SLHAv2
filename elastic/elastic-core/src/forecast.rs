@@ -1,26 +1,17 @@
-//! Deterministic forecasting: EWMA, moving trend and bounded linear forecast.
+//! Deterministic forecasting: EWMA level, bounded trend and linear projection.
 //!
-//! The baseline controller does not require machine learning. These
-//! forecasters are deterministic functions of their input history; learned
-//! policies belong in an experimental layer, never here.
+//! The baseline controller does not require machine learning. Non-finite
+//! samples are rejected by preserving the previous finite forecast state.
 
-/// Add a u64 step count to an f64 trend without pulling in `std`
-/// (`f64 + u64` is std-only; we scale explicitly).
 fn step_scaled(trend: f64, steps: u64) -> f64 {
     trend * steps as f64
 }
 
-/// A deterministic linear forecast of a byte/resource series.
-///
-/// Uses EWMA level + EWMA trend with bounded derivative, so a single spike
-/// cannot produce an absurd forecast. `alpha` and `beta` in `(0,1)`.
+/// Deterministic EWMA level + bounded EWMA trend forecast.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Forecast {
-    /// EWMA level.
     level: f64,
-    /// EWMA trend (per step).
     trend: f64,
-    /// Maximum absolute trend per step (bounds the derivative).
     max_trend: f64,
     alpha: f64,
     beta: f64,
@@ -28,11 +19,12 @@ pub struct Forecast {
 }
 
 impl Forecast {
-    /// Create a forecast with the given smoothing constants and trend bound.
+    /// Create a forecast with smoothing constants in `(0,1)` and a finite,
+    /// non-negative trend bound.
     pub const fn new(alpha: f64, beta: f64, max_trend: f64) -> Self {
         assert!(alpha > 0.0 && alpha < 1.0);
         assert!(beta > 0.0 && beta < 1.0);
-        assert!(max_trend >= 0.0);
+        assert!(max_trend >= 0.0 && max_trend < f64::INFINITY);
         Self {
             level: 0.0,
             trend: 0.0,
@@ -43,24 +35,30 @@ impl Forecast {
         }
     }
 
-    /// Push an observation; returns the one-step forecast for the next step.
+    /// Push one observation and return the one-step forecast.
+    ///
+    /// `NaN`/infinite input is ignored so it cannot poison all future control
+    /// decisions. The previous forecast (or 0 before initialization) is
+    /// returned unchanged.
     pub fn observe(&mut self, value: f64) -> f64 {
+        if !value.is_finite() {
+            return self.forecast(1);
+        }
         if !self.initialized {
             self.level = value;
             self.trend = 0.0;
             self.initialized = true;
             return value;
         }
-        let pred = self.level + self.trend;
-        let error = value - pred;
+        let prediction = self.level + self.trend;
+        let error = value - prediction;
         self.level += self.alpha * error;
         self.trend += self.beta * error;
         self.trend = self.trend.clamp(-self.max_trend, self.max_trend);
         self.level + self.trend
     }
 
-    /// Forecast `steps` steps ahead from the current state (no new
-    /// observations). Deterministic.
+    /// Forecast `steps` steps ahead without mutating state.
     pub fn forecast(&self, steps: u64) -> f64 {
         if !self.initialized {
             return 0.0;
@@ -68,45 +66,41 @@ impl Forecast {
         self.level + step_scaled(self.trend, steps)
     }
 
-    /// Whether any observation has been seen.
+    /// Whether at least one finite observation has been accepted.
     pub fn initialized(&self) -> bool {
         self.initialized
     }
 }
 
-/// The time until a growing series crosses `capacity`, in steps.
+/// Time until a growing finite series crosses `capacity`, in logical steps.
 ///
-/// Returns `None` when the trend is not positive or the series is already
-/// past capacity (the caller should treat that as immediate exhaustion).
+/// Returns `Some(0)` when already exhausted and `None` when the series is
+/// uninitialized, flat/falling, or any required value is non-finite/invalid.
 pub fn steps_to_exhaustion(forecast: &Forecast, capacity: f64) -> Option<u64> {
-    if !forecast.initialized() {
+    if !forecast.initialized() || !capacity.is_finite() || capacity < 0.0 {
         return None;
     }
     let level = forecast.level;
     let trend = forecast.trend;
+    if !level.is_finite() || !trend.is_finite() {
+        return None;
+    }
     if level >= capacity {
         return Some(0);
     }
     if trend <= 0.0 {
         return None;
     }
-    // ceil without std: truncate-toward-zero then adjust for positives.
     let raw = (capacity - level) / trend;
-    let steps = if raw < 0.0 {
-        0.0
-    } else {
-        let t = raw as u64 as f64;
-        if t == raw {
-            t
-        } else {
-            t + 1.0
-        }
-    };
-    if steps.is_finite() {
-        Some(steps as u64)
-    } else {
-        None
+    if !raw.is_finite() || raw < 0.0 || raw > u64::MAX as f64 {
+        return None;
     }
+    let truncated = raw as u64;
+    Some(if truncated as f64 == raw {
+        truncated
+    } else {
+        truncated.saturating_add(1)
+    })
 }
 
 #[cfg(test)]
@@ -115,69 +109,74 @@ mod tests {
 
     #[test]
     fn forecast_converges_on_constant_series() {
-        let mut f = Forecast::new(0.5, 0.1, 1.0);
+        let mut forecast = Forecast::new(0.5, 0.1, 1.0);
         for _ in 0..20 {
-            f.observe(100.0);
+            forecast.observe(100.0);
         }
-        assert!((f.forecast(1) - 100.0).abs() < 1e-6);
+        assert!((forecast.forecast(1) - 100.0).abs() < 1e-6);
     }
 
     #[test]
     fn forecast_tracks_linear_growth() {
-        let mut f = Forecast::new(0.3, 0.3, 10.0);
-        let mut v = 0.0;
+        let mut forecast = Forecast::new(0.3, 0.3, 10.0);
+        let mut value = 0.0;
         for _ in 0..50 {
-            v += 1.0;
-            f.observe(v);
+            value += 1.0;
+            forecast.observe(value);
         }
-        // Final observed value is 50; the trend is positive, so the 10-step
-        // forecast must exceed the last observation (and stay bounded).
-        let ahead = f.forecast(10);
-        assert!(ahead > v, "ahead={ahead} last={v}");
+        let ahead = forecast.forecast(10);
+        assert!(ahead > value, "ahead={ahead} last={value}");
         assert!(ahead < 200.0, "ahead={ahead}");
     }
 
     #[test]
     fn bounded_derivative_prevents_spike_explosion() {
-        let mut f = Forecast::new(0.5, 0.5, 1.0);
-        f.observe(0.0);
-        f.observe(0.0);
-        f.observe(1000.0); // spike
-                           // Even with beta=0.5, the trend is clamped to 1.0/step, so the
-                           // long-range forecast cannot blow up.
-        assert!(f.forecast(1_000_000) < 2_000_000.0);
+        let mut forecast = Forecast::new(0.5, 0.5, 1.0);
+        forecast.observe(0.0);
+        forecast.observe(0.0);
+        forecast.observe(1000.0);
+        assert!(forecast.forecast(1_000_000) < 2_000_000.0);
     }
 
     #[test]
     fn exhaustion_timing() {
-        // Build an explicitly increasing series so the trend is positive.
-        let mut f = Forecast::new(0.5, 0.4, 10.0);
-        let mut v = 90.0;
+        let mut forecast = Forecast::new(0.5, 0.4, 10.0);
+        let mut value = 90.0;
         for _ in 0..30 {
-            v += 1.0;
-            f.observe(v);
+            value += 1.0;
+            forecast.observe(value);
         }
-        assert!(f.trend > 0.0, "trend={}", f.trend);
-        let steps = steps_to_exhaustion(&f, 200.0);
-        assert!(steps.is_some(), "trend={} level={}", f.trend, f.level);
-        assert!((1..=200).contains(&steps.unwrap()), "steps={steps:?}");
+        let steps = steps_to_exhaustion(&forecast, 200.0).unwrap();
+        assert!((1..=200).contains(&steps));
     }
 
     #[test]
-    fn exhaustion_none_when_flat() {
-        let mut f = Forecast::new(0.5, 0.1, 1.0);
-        f.observe(50.0);
-        f.observe(50.0);
-        assert_eq!(steps_to_exhaustion(&f, 100.0), None);
+    fn exhaustion_none_when_flat_or_invalid() {
+        let mut forecast = Forecast::new(0.5, 0.1, 1.0);
+        forecast.observe(50.0);
+        forecast.observe(50.0);
+        assert_eq!(steps_to_exhaustion(&forecast, 100.0), None);
+        assert_eq!(steps_to_exhaustion(&forecast, f64::NAN), None);
+        assert_eq!(steps_to_exhaustion(&forecast, -1.0), None);
+    }
+
+    #[test]
+    fn non_finite_sample_does_not_poison_history() {
+        let mut forecast = Forecast::new(0.5, 0.2, 1.0);
+        forecast.observe(10.0);
+        let before = forecast.forecast(3);
+        assert_eq!(forecast.observe(f64::NAN), forecast.forecast(1));
+        assert_eq!(forecast.forecast(3), before);
+        assert!(forecast.forecast(3).is_finite());
     }
 
     #[test]
     fn deterministic_same_history_same_forecast() {
         let mut a = Forecast::new(0.4, 0.2, 5.0);
         let mut b = Forecast::new(0.4, 0.2, 5.0);
-        for v in [1.0, 2.0, 3.5, 5.0, 8.0] {
-            a.observe(v);
-            b.observe(v);
+        for value in [1.0, 2.0, 3.5, 5.0, 8.0] {
+            a.observe(value);
+            b.observe(value);
         }
         assert_eq!(a.forecast(3), b.forecast(3));
     }
