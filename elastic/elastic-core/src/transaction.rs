@@ -44,6 +44,15 @@ pub trait Transaction {
     fn release(&mut self, _state: &mut Self::State) {}
 }
 
+/// Compatibility marker for code written against the first Elastic prototype.
+///
+/// Rollback success is now returned directly by [`Transaction::rollback`], so
+/// no separate sticky status method is needed. Every `Transaction`
+/// automatically satisfies this marker; it remains exported to avoid breaking
+/// controller/facade code while the API is still pre-release.
+pub trait RollbackAware: Transaction {}
+impl<T: Transaction + ?Sized> RollbackAware for T {}
+
 /// Result of running a transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransitionOutcome {
