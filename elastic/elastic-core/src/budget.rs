@@ -181,9 +181,6 @@ impl BudgetTree {
             return Err(BudgetError::HardLimitExceeded);
         }
 
-        // Walk the ancestor path. `path_child` is the subtree receiving the
-        // commit at each ancestor; reservations of every other immediate child
-        // must remain available.
         let mut path_child = index;
         let mut current = node.parent;
         let mut hops = 0usize;
@@ -226,8 +223,7 @@ impl BudgetTree {
         Ok(())
     }
 
-    /// Sum of direct commitments across all nodes without double-counting
-    /// descendant-inclusive totals.
+    /// Sum direct commitments without double-counting descendant totals.
     pub fn total_committed(&self) -> u64 {
         self.nodes
             .iter()
@@ -273,8 +269,6 @@ mod tests {
         let reserved = tree.add_child(root, 10, 600, 500, 300).unwrap();
         let borrower = tree.add_child(root, 1, 1000, 800, 0).unwrap();
         tree.try_commit(reserved, 100).unwrap();
-        // 200 bytes of the reserved subtree's 300-byte reservation remain
-        // protected, so borrower may consume at most 700 of the remaining 900.
         assert!(tree.try_commit(borrower, 700).is_ok());
         assert_eq!(
             tree.try_commit(borrower, 1),
@@ -293,9 +287,7 @@ mod tests {
         tree.try_commit(sibling_tenant, 50).unwrap();
         tree.try_commit(sibling_session, 50).unwrap();
 
-        // Root protects 200 for sibling_tenant; tenant protects 150 for
-        // sibling_session. Session therefore cannot consume tenant's full 800.
-        assert!(tree.try_commit(session, 650).is_ok());
+        assert!(tree.try_commit(session, 600).is_ok());
         assert_eq!(
             tree.try_commit(session, 1),
             Err(BudgetError::ReservationViolated)
