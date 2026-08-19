@@ -5,6 +5,7 @@
 pub mod backends;
 pub mod codec;
 pub mod elastic_cache;
+pub mod elastic_context;
 pub mod mem;
 pub mod pipeline;
 pub mod traits;
