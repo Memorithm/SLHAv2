@@ -1,10 +1,9 @@
 //! Structured elastic telemetry.
 //!
-//! The mission requires distinguishing at least:
-//! theoretical encoded bytes, allocator bytes, physically resident bytes,
-//! GPU bytes, process RAM/VRAM, fragmentation/overhead. This struct carries
-//! the canonical fields; backends fill what they can measure and leave the
-//! rest unset (`None`), never fabricating numbers.
+//! Backends fill measured fields and leave unknown values as `None`. Derived
+//! values are recomputed from their current inputs on every [`refresh`] call;
+//! stale ratios/pressures are never retained when an input disappears or is
+//! invalid.
 
 /// Elastic resource telemetry snapshot.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -24,45 +23,46 @@ pub struct ElasticTelemetry {
     pub kv_bytes_raw: Option<u64>,
     /// Actual physically allocated KV bytes.
     pub kv_bytes_actual: Option<u64>,
-    /// `kv_bytes_actual / kv_bytes_raw` (when both are known).
+    /// `kv_bytes_actual / kv_bytes_raw` (when both are known and raw > 0).
     pub compression_ratio: Option<f64>,
 
     /// Total VRAM.
     pub vram_total: Option<u64>,
     /// Available VRAM.
     pub vram_available: Option<u64>,
-    /// VRAM pressure in `[0,1]`.
+    /// Derived VRAM pressure in `[0,1]`.
     pub vram_pressure: Option<f64>,
 
     /// Total RAM.
     pub ram_total: Option<u64>,
     /// Available RAM.
     pub ram_available: Option<u64>,
-    /// RAM pressure in `[0,1]`.
+    /// Derived RAM pressure in `[0,1]`.
     pub ram_pressure: Option<f64>,
 
     /// Allocator free bytes.
     pub allocator_free: Option<u64>,
     /// Largest contiguous free block.
     pub allocator_largest_free_block: Option<u64>,
-    /// Fragmentation estimate in `[0,1]` (1 = maximally fragmented).
+    /// Derived fragmentation estimate in `[0,1]` (`0` = one contiguous free
+    /// block). Unknown when allocator geometry is invalid or unavailable.
     pub fragmentation: Option<f64>,
 
-    /// Adaptation counters.
+    /// Promotion count.
     pub promotions: u64,
-    /// Adaptation counters.
+    /// Demotion count.
     pub demotions: u64,
-    /// Adaptation counters.
+    /// Compression count.
     pub compressions: u64,
-    /// Adaptation counters.
+    /// Decompression count.
     pub decompressions: u64,
-    /// Adaptation counters.
+    /// Offload count.
     pub offloads: u64,
-    /// Adaptation counters.
+    /// Restore count.
     pub restores: u64,
-    /// Adaptation counters.
+    /// Prefetch count.
     pub prefetches: u64,
-    /// Adaptation counters.
+    /// Eviction count.
     pub evictions: u64,
 
     /// Compression latency (seconds).
@@ -84,28 +84,52 @@ impl ElasticTelemetry {
         Self::default()
     }
 
-    /// Recompute derived fields (`compression_ratio`) from the raw values.
+    /// Recompute every derived field from the current raw observations.
     pub fn refresh(&mut self) {
-        if let (Some(actual), Some(raw)) = (self.kv_bytes_actual, self.kv_bytes_raw) {
-            if raw > 0 {
-                self.compression_ratio = Some(actual as f64 / raw as f64);
+        self.compression_ratio = match (self.kv_bytes_actual, self.kv_bytes_raw) {
+            (Some(actual), Some(raw)) if raw > 0 => Some(actual as f64 / raw as f64),
+            _ => None,
+        };
+        self.vram_pressure = pressure(self.vram_total, self.vram_available);
+        self.ram_pressure = pressure(self.ram_total, self.ram_available);
+        self.fragmentation = match (
+            self.allocator_free,
+            self.allocator_largest_free_block,
+        ) {
+            (Some(0), Some(0)) => Some(0.0),
+            (Some(free), Some(largest)) if free > 0 && largest <= free => {
+                Some(1.0 - largest as f64 / free as f64)
             }
-        }
+            _ => None,
+        };
     }
 
-    /// Record an adaptation of the given kind (increments the counter).
+    /// Record an adaptation kind. Counters saturate rather than wrapping or
+    /// panicking in debug builds after extreme runtimes.
     pub fn record(&mut self, kind: &str) {
-        match kind {
-            "promote" => self.promotions += 1,
-            "demote" => self.demotions += 1,
-            "compress" => self.compressions += 1,
-            "decompress" => self.decompressions += 1,
-            "offload" => self.offloads += 1,
-            "restore" => self.restores += 1,
-            "prefetch" => self.prefetches += 1,
-            "evict" => self.evictions += 1,
-            _ => {}
+        let counter = match kind {
+            "promote" => Some(&mut self.promotions),
+            "demote" => Some(&mut self.demotions),
+            "compress" => Some(&mut self.compressions),
+            "decompress" => Some(&mut self.decompressions),
+            "offload" => Some(&mut self.offloads),
+            "restore" => Some(&mut self.restores),
+            "prefetch" => Some(&mut self.prefetches),
+            "evict" => Some(&mut self.evictions),
+            _ => None,
+        };
+        if let Some(counter) = counter {
+            *counter = counter.saturating_add(1);
         }
+    }
+}
+
+fn pressure(total: Option<u64>, available: Option<u64>) -> Option<f64> {
+    match (total, available) {
+        (Some(total), Some(available)) if total > 0 && available <= total => {
+            Some((total - available) as f64 / total as f64)
+        }
+        _ => None,
     }
 }
 
@@ -114,21 +138,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compression_ratio_derived() {
-        let mut t = ElasticTelemetry::new();
-        t.kv_bytes_raw = Some(1000);
-        t.kv_bytes_actual = Some(250);
-        t.refresh();
-        assert_eq!(t.compression_ratio, Some(0.25));
+    fn refresh_derives_current_ratios_and_pressures() {
+        let mut telemetry = ElasticTelemetry::new();
+        telemetry.kv_bytes_raw = Some(1000);
+        telemetry.kv_bytes_actual = Some(250);
+        telemetry.vram_total = Some(1000);
+        telemetry.vram_available = Some(250);
+        telemetry.ram_total = Some(2000);
+        telemetry.ram_available = Some(1000);
+        telemetry.allocator_free = Some(1000);
+        telemetry.allocator_largest_free_block = Some(600);
+        telemetry.refresh();
+        assert_eq!(telemetry.compression_ratio, Some(0.25));
+        assert_eq!(telemetry.vram_pressure, Some(0.75));
+        assert_eq!(telemetry.ram_pressure, Some(0.5));
+        assert_eq!(telemetry.fragmentation, Some(0.4));
     }
 
     #[test]
-    fn counters_record() {
-        let mut t = ElasticTelemetry::new();
-        t.record("demote");
-        t.record("demote");
-        t.record("promote");
-        assert_eq!(t.demotions, 2);
-        assert_eq!(t.promotions, 1);
+    fn refresh_clears_stale_derived_values_when_inputs_become_invalid() {
+        let mut telemetry = ElasticTelemetry::new();
+        telemetry.kv_bytes_raw = Some(100);
+        telemetry.kv_bytes_actual = Some(50);
+        telemetry.vram_total = Some(100);
+        telemetry.vram_available = Some(20);
+        telemetry.refresh();
+        assert!(telemetry.compression_ratio.is_some());
+        assert!(telemetry.vram_pressure.is_some());
+
+        telemetry.kv_bytes_raw = Some(0);
+        telemetry.vram_available = Some(101);
+        telemetry.refresh();
+        assert_eq!(telemetry.compression_ratio, None);
+        assert_eq!(telemetry.vram_pressure, None);
+    }
+
+    #[test]
+    fn counters_saturate() {
+        let mut telemetry = ElasticTelemetry::new();
+        telemetry.demotions = u64::MAX;
+        telemetry.record("demote");
+        assert_eq!(telemetry.demotions, u64::MAX);
+        telemetry.record("promote");
+        assert_eq!(telemetry.promotions, 1);
     }
 }
