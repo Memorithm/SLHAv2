@@ -4,3 +4,6 @@
 
 # CommandCode local state must never enter source control
 .commandcode/
+
+# Local C/C++ test binaries
+integration/llama.cpp/tests/tile_store_tests
