@@ -17,6 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: feat/elastic-architecture-v1
 
       - name: Apply exact verified patches
         shell: bash
@@ -35,6 +36,13 @@ jobs:
 
           cpp = Path("integration/llama.cpp/shim/slha_llama.cpp")
 
+          replace_exact(
+              cpp,
+              "#include <mutex>\n#include <random>\n",
+              "#include <mutex>\n#include <new>\n#include <random>\n#include <stdexcept>\n",
+              "llama explicit allocation exception headers",
+          )
+
           old_init_call = r'''            // Capacity per layer: positions are bounded by the KV cache the
             // runtime actually allocates. 16384 remains the documented
             // maximum supported by this tile-store layout; positions beyond
@@ -45,11 +53,11 @@ jobs:
                 return -1;
             }
 '''
-          new_init_call = r'''            // The runtime context capacity is not known at global init. Keep
-            // only the model-derived layer count and tile geometry here; the
-            // K-cache allocation hook sizes the store from the actual
-            // `n_tokens` allocated by llama.cpp. There is deliberately no
-            // SLHA-specific 16k/32k/128k context cap.
+          new_init_call = r'''            // Runtime context capacity is not known at global init. Keep only
+            // model-derived layer count and tile geometry here; the K-cache
+            // allocation hook sizes the store from llama.cpp's actual
+            // `n_tokens`. There is deliberately no SLHA-specific 16k/32k/128k
+            // context cap.
             if (!g_slha_tile_store.init(n_layers, 0, slha_tile_size())) {
                 std::cerr << "[SLHA] failed to initialize empty tile store metadata\n";
                 return -1;
@@ -117,8 +125,9 @@ bool slha_resize_empty_tile_store(
         return true;
     }
     // A resize invalidates pointers returned by read(). It is therefore only
-    // legal while the store is empty. Active-context growth must be preceded
-    // by the normal llama KV clear/reallocation seam; otherwise fail closed.
+    // legal while the store has no live tiles. Active-context growth must be
+    // preceded by the normal llama KV clear/reallocation seam; otherwise fail
+    // closed instead of reallocating under readers.
     if (std::any_of(store.valid.begin(), store.valid.end(), [](uint8_t value) { return value != 0; })) {
         return false;
     }
@@ -152,6 +161,9 @@ bool slha_resize_empty_tile_store(
 
 bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes_) {
     std::lock_guard<std::mutex> lock(mutex);
+    if (std::any_of(valid.begin(), valid.end(), [](uint8_t value) { return value != 0; })) {
+        return false;
+    }
     size_t slots = 0;
     size_t allocation = 0;
     if (!slha_checked_store_geometry(n_layers_, capacity_, tile_bytes_, &slots, &allocation)) {
@@ -199,10 +211,18 @@ bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes
     }
 
     auto & state = get_global_state();
-    const size_t n_layers = state.layers.size();
+    size_t n_layers = 0;
+    slha_kv_mode kv_mode = SLHA_KV_LEGACY;
+    slha_score_mode score_mode = SLHA_SCORE_OFF;
+    {
+        std::lock_guard<std::mutex> state_lock(state.mutex);
+        n_layers = state.layers.size();
+        kv_mode = state.kv_mode;
+        score_mode = state.score_mode;
+    }
     const size_t runtime_capacity = static_cast<size_t>(n_tokens);
     const size_t tile_bytes = slha_tile_size();
-    if ((state.kv_mode == SLHA_KV_TILESTORE || state.score_mode != SLHA_SCORE_OFF) &&
+    if ((kv_mode == SLHA_KV_TILESTORE || score_mode != SLHA_SCORE_OFF) &&
         !slha_resize_empty_tile_store(g_slha_tile_store, n_layers, runtime_capacity, tile_bytes)) {
         std::cerr << "[SLHA] failed to size tile store from runtime K-cache capacity="
                   << runtime_capacity << "; active data is never reallocated in place\n";
@@ -229,14 +249,85 @@ bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes
           replace_exact(cpp, old_intercept, new_intercept, "llama derive capacity from runtime n_tokens")
 
           cuda = Path("slhav2-vram/src/backends/cuda.rs")
-          text = cuda.read_text()
-          old_comment = "700 is\n/// `CUDA_ERROR_INVALID_VALUE`"
-          new_comment = "700 is\n/// `CUDA_ERROR_ILLEGAL_ADDRESS`"
-          if old_comment in text:
-              text = text.replace(old_comment, new_comment, 1)
-          else:
-              raise SystemExit("cuda error-code comment: exact historical text not found")
-          cuda.write_text(text)
+          replace_exact(
+              cuda,
+              "700 is\n/// `CUDA_ERROR_INVALID_VALUE`",
+              "700 is\n/// `CUDA_ERROR_ILLEGAL_ADDRESS`",
+              "CUDA error-code documentation",
+          )
+
+          owner_anchor = r'''    pub fn backing_allocation_count() -> usize {
+        CUDA_BACKING_ALLOCATIONS.load(Ordering::SeqCst)
+    }
+
+'''
+          owner_helpers = owner_anchor + r'''    fn ensure_allocation_owner(
+        &self,
+        allocation: &CudaAllocation,
+        label: &str,
+    ) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &allocation.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: allocation belongs to a different CUDA context"
+            )))
+        }
+    }
+
+    fn ensure_function_owner(
+        &self,
+        function: &CudaFunction,
+        label: &str,
+    ) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &function.module.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: kernel belongs to a different CUDA context"
+            )))
+        }
+    }
+
+    fn ensure_stream_owner(&self, stream: &CudaStream, label: &str) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &stream.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: stream belongs to a different CUDA context"
+            )))
+        }
+    }
+
+'''
+          replace_exact(cuda, owner_anchor, owner_helpers, "CUDA context ownership helpers")
+
+          replace_exact(
+              cuda,
+              r'''    ) -> Result<(), CudaError> {
+        let end = dst_offset_bytes
+            .checked_add(src.len())
+''',
+              r'''    ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(dst, "copy_to_device_at")?;
+        let end = dst_offset_bytes
+            .checked_add(src.len())
+''',
+              "CUDA sync H2D owner check",
+          )
+          replace_exact(
+              cuda,
+              r'''    ) -> Result<(), CudaError> {
+        let end = src_offset_bytes
+            .checked_add(dst.len())
+''',
+              r'''    ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(src, "copy_to_host_at")?;
+        let end = src_offset_bytes
+            .checked_add(dst.len())
+''',
+              "CUDA sync D2H owner check",
+          )
 
           old_offsets = r'''        let q_coarse_ptr = q_coarse_dev.ptr + q_coarse_offset as u64;
         let q_sign_ptr = q_sign_dev.ptr + q_sign_offset as u64;
@@ -245,7 +336,13 @@ bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes
 
         let grid_dim = (num_tiles as usize).div_ceil(256) as u32;
 '''
-          new_offsets = r'''        let n = num_tiles as usize;
+          new_offsets = r'''        self.ensure_allocation_owner(q_coarse_dev, "score_tiles_at q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles_at q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles_at tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles_at scores")?;
+        self.ensure_function_owner(kernel, "score_tiles_at")?;
+
+        let n = num_tiles as usize;
         let q_coarse_bytes = crate::codec::D_C * core::mem::size_of::<f32>();
         let q_sign_bytes = crate::codec::RESIDUAL_WORDS * core::mem::size_of::<u64>();
         let tile_bytes = n
@@ -254,7 +351,6 @@ bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes
         let score_bytes = n
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaError("score_tiles_at: score byte count overflow".into()))?;
-
         let check_range = |label: &str, offset: usize, need: usize, len: usize| {
             let end = offset
                 .checked_add(need)
@@ -278,10 +374,160 @@ bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes
 
         let grid_dim = n.div_ceil(256) as u32;
 '''
-          replace_exact(cuda, old_offsets, new_offsets, "CUDA offset/range validation")
+          replace_exact(cuda, old_offsets, new_offsets, "CUDA offset/range/context validation")
+
+          # High-level synchronous score path.
+          replace_exact(
+              cuda,
+              r'''        let n = num_tiles as usize;
+
+        // Bounds-check every buffer against the kernel's read/write ranges
+''',
+              r'''        self.ensure_allocation_owner(q_coarse_dev, "score_tiles q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles scores")?;
+        self.ensure_function_owner(kernel, "score_tiles")?;
+        let n = num_tiles as usize;
+
+        // Bounds-check every buffer against the kernel's read/write ranges
+''',
+              "CUDA score_tiles owner checks",
+          )
+          # Stream score path has a distinct comment after n.
+          replace_exact(
+              cuda,
+              r'''        let n = num_tiles as usize;
+
+        let tile_bytes = n
+            .checked_mul(crate::codec::TILE_BYTES)
+            .ok_or_else(|| CudaError("score_tiles_on_stream: tile byte count overflow".into()))?;
+''',
+              r'''        self.ensure_allocation_owner(q_coarse_dev, "score_tiles_on_stream q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles_on_stream q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles_on_stream tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles_on_stream scores")?;
+        self.ensure_function_owner(kernel, "score_tiles_on_stream")?;
+        self.ensure_stream_owner(stream, "score_tiles_on_stream")?;
+        let n = num_tiles as usize;
+
+        let tile_bytes = n
+            .checked_mul(crate::codec::TILE_BYTES)
+            .ok_or_else(|| CudaError("score_tiles_on_stream: tile byte count overflow".into()))?;
+''',
+              "CUDA stream score owner checks",
+          )
+          replace_exact(
+              cuda,
+              r'''    ) -> Result<(), CudaError> {
+        let end = dst_offset
+            .checked_add(src.len())
+            .ok_or_else(|| CudaError("copy_to_device_async: offset + length overflow".into()))?;
+''',
+              r'''    ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(dst, "copy_to_device_async")?;
+        self.ensure_stream_owner(stream, "copy_to_device_async")?;
+        let end = dst_offset
+            .checked_add(src.len())
+            .ok_or_else(|| CudaError("copy_to_device_async: offset + length overflow".into()))?;
+''',
+              "CUDA async H2D owner checks",
+          )
+          replace_exact(
+              cuda,
+              r'''    ) -> Result<(), CudaError> {
+        let end = src_offset
+            .checked_add(dst.len())
+            .ok_or_else(|| CudaError("copy_to_host_async: offset + length overflow".into()))?;
+''',
+              r'''    ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(src, "copy_to_host_async")?;
+        self.ensure_stream_owner(stream, "copy_to_host_async")?;
+        let end = src_offset
+            .checked_add(dst.len())
+            .ok_or_else(|| CudaError("copy_to_host_async: offset + length overflow".into()))?;
+''',
+              "CUDA async D2H owner checks",
+          )
+
+          # DeviceEngine trait copies also reject foreign-context allocations.
+          replace_exact(
+              cuda,
+              r'''    ) -> Result<(), CudaError> {
+        if dst_offset
+            .checked_add(src.len())
+            .is_none_or(|end| end > dst.len)
+''',
+              r'''    ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(dst, "copy_to_device")?;
+        if dst_offset
+            .checked_add(src.len())
+            .is_none_or(|end| end > dst.len)
+''',
+              "CUDA DeviceEngine H2D owner check",
+          )
+          replace_exact(
+              cuda,
+              r'''    ) -> Result<(), CudaError> {
+        if src_offset
+            .checked_add(dst.len())
+            .is_none_or(|end| end > src.len)
+''',
+              r'''    ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(src, "copy_to_host")?;
+        if src_offset
+            .checked_add(dst.len())
+            .is_none_or(|end| end > src.len)
+''',
+              "CUDA DeviceEngine D2H owner check",
+          )
+
+          tiers = Path("elastic/elastic-core/src/tiers.rs")
+          replace_exact(
+              tiers,
+              "#[derive(Clone, Debug)]\npub struct TierMachine {",
+              "#[derive(Clone, Debug, PartialEq, Eq)]\npub struct TierMachine {",
+              "TierMachine equality for validated-result tests",
+          )
+
+          controller = Path("elastic/elastic-core/src/controller.rs")
+          replace_exact(
+              controller,
+              "use crate::decision::{Candidate, DecisionTrace, Rejection};",
+              "use crate::decision::{Candidate, DecisionTrace};",
+              "remove stale Rejection import",
+          )
+          replace_exact(
+              controller,
+              r'''        trace.consider(
+            Candidate::new("none", 0.0, 0.0, 0.0, 0.0),
+            Some(Rejection::CostTooHigh),
+        );
+''',
+              r'''        trace.consider(Candidate::new("none", 0.0, 0.0, 0.0, 0.0), None);
+''',
+              "truthful no-action decision trace",
+          )
+
+          pipeline = Path("slhav2-vram/src/pipeline.rs")
+          replace_exact(
+              pipeline,
+              "pub fn score_tiles_cpu<E: DeviceEngine>(mut input: ScoringInput<'_, E>) {",
+              "pub fn score_tiles_cpu<E: DeviceEngine>(input: ScoringInput<'_, E>) {",
+              "remove unnecessary pipeline mutability",
+          )
+
+          value = Path("elastic/elastic-core/src/value.rs")
+          replace_exact(
+              value,
+              "            ElasticValue::Adaptive { max, .. } => Some(*max),",
+              "            ElasticValue::Adaptive { min, max } if min <= max => Some(*max),\n            ElasticValue::Adaptive { .. } => None,",
+              "reject inverted AdaptiveValue ranges",
+          )
           PY
 
           cargo fmt --all
+          (cd elastic && cargo fmt --all)
           git diff --check
 
       - name: Commit exact P0 patch and remove helper workflow
@@ -291,7 +537,7 @@ bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes
           git config user.name "SLHAv2 CI Patch"
           git config user.email "actions@github.com"
           git rm .github/workflows/p0-large-file-patch.yml
-          git add integration/llama.cpp/shim/slha_llama.cpp slhav2-vram/src/backends/cuda.rs
+          git add -A
           git diff --cached --check
-          git commit -m "fix: remove llama context cap and harden CUDA offsets"
+          git commit -m "fix: remove llama context cap and harden CUDA boundaries"
           git push origin HEAD:feat/elastic-architecture-v1
