@@ -10,6 +10,12 @@
 //! Array order is NOT semantic. A manifest whose layer entries are unsorted is
 //! valid provided the set is exactly 0..=27 with unique IDs; records are
 //! canonicalised by layer ID after parsing.
+//!
+//! This module is only compiled with the `serde` feature (the ranking-trainer
+//! toolchain); the library default build stays zero-dependency. The public
+//! error types and `parse_and_verify` signature are stable regardless.
+
+#![cfg(feature = "serde")]
 
 use serde::Deserialize;
 use std::collections::BTreeMap;

@@ -104,7 +104,9 @@ fn ffi_status(f: impl FnOnce() -> Result<(), FfiError>) -> i32 {
     }
 }
 
-#[allow(clippy::manual_is_multiple_of)]
+#[allow(unknown_lints, clippy::manual_is_multiple_of)]
+// `manual_is_multiple_of` was added in a clippy newer than this repo's MSRV;
+// the allow is harmless on older toolchains once unknown_lints is permitted.
 fn pointer_is_aligned<T>(pointer: *const T) -> bool {
     (pointer as usize) % align_of::<T>() == 0
 }

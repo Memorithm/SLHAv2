@@ -231,6 +231,10 @@ pub struct CudaStream {
 impl CudaStream {
     pub fn new(engine: &CudaEngine) -> Result<Self, CudaError> {
         let mut stream: CUstream = std::ptr::null_mut();
+        // SAFETY: `engine.inner.context` is a live CUDA context owned by the
+        // shared engine (the `Rc` is cloned into `Self` below before this
+        // handle can be used), and `cuStreamCreate` writes into the valid
+        // output pointer with the context current on this thread.
         unsafe {
             cuda_check(cuCtxSetCurrent(engine.inner.context), "cuCtxSetCurrent")?;
             cuda_check(
@@ -250,6 +254,8 @@ impl CudaStream {
 
     pub fn synchronize(&self) -> Result<(), CudaError> {
         let ctx = self.owner.context;
+        // SAFETY: the context handle is kept alive by the shared `Rc`, and
+        // `cuStreamSynchronize` only touches the live stream owned by `Self`.
         unsafe {
             cuda_check(cuCtxSetCurrent(ctx), "cuCtxSetCurrent")?;
             cuda_check(cuStreamSynchronize(self.stream), "cuStreamSynchronize")
@@ -361,9 +367,14 @@ impl CudaEngine {
                 dst.len
             )));
         }
+        // SAFETY: `self.inner.context` is kept alive by the `Rc` in
+        // `CudaAllocation`/`Self`, and the copy bounds were checked above
+        // (offset + length fits the destination allocation).
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
         }
+        // SAFETY: `dst.ptr` is a live device allocation of `dst.len` bytes
+        // (checked above), and `src` is a valid Rust slice of `src.len` bytes.
         unsafe {
             cuda_check(
                 cuMemcpyHtoD_v2(
@@ -393,9 +404,12 @@ impl CudaEngine {
                 src.len
             )));
         }
+        // SAFETY: context kept alive by the `Rc`; copy bounds checked above.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
         }
+        // SAFETY: `src.ptr` is a live device allocation of `src.len` bytes
+        // (checked above), and `dst` is a valid mutable Rust slice.
         unsafe {
             cuda_check(
                 cuMemcpyDtoH_v2(
@@ -442,6 +456,9 @@ impl CudaEngine {
             &num_tiles as *const i32 as *mut libc::c_void,
         ];
 
+        // SAFETY: `kernel.func` is a live CUfunction kept alive by
+        // `CudaFunction`'s `Rc<CudaModule>`; the argument array has exactly the
+        // five by-reference parameters the kernel expects.
         unsafe {
             cuda_check(
                 cuLaunchKernel(
@@ -640,6 +657,10 @@ impl CudaEngine {
             &num_tiles as *const i32 as *mut libc::c_void,
         ];
 
+        // SAFETY: `kernel.func` is a live CUfunction kept alive by
+        // `CudaFunction`'s `Rc<CudaModule>`; `stream.raw()` is a live stream;
+        // the argument array has exactly the five by-reference parameters the
+        // kernel expects; and every device pointer was bounds-checked above.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
             cuda_check(
@@ -682,6 +703,8 @@ impl CudaEngine {
                 dst.len
             )));
         }
+        // SAFETY: bounds checked above; `src` is a valid Rust slice; the
+        // context and stream are kept alive by their owning `Rc`s.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
             cuda_check(
@@ -715,6 +738,8 @@ impl CudaEngine {
                 src.len
             )));
         }
+        // SAFETY: bounds checked above; `dst` is a valid mutable Rust slice;
+        // the context and stream are kept alive by their owning `Rc`s.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
             cuda_check(
@@ -775,10 +800,13 @@ impl DeviceEngine for CudaEngine {
                 dst.len
             )));
         }
-        // SAFETY: Set context then copy host→device.
+        // SAFETY: the context is kept alive by the `Rc` shared with the
+        // allocation; copy bounds were checked above.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
         }
+        // SAFETY: `dst.ptr` is a live device allocation of `dst.len` bytes
+        // (checked above), and `src` is a valid Rust slice.
         unsafe {
             cuda_check(
                 cuMemcpyHtoD_v2(
@@ -808,10 +836,12 @@ impl DeviceEngine for CudaEngine {
                 src.len
             )));
         }
-        // SAFETY: Set context then copy device→host.
+        // SAFETY: the context is kept alive by the `Rc`; bounds checked above.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
         }
+        // SAFETY: `src.ptr` is a live device allocation of `src.len` bytes
+        // (checked above), and `dst` is a valid mutable Rust slice.
         unsafe {
             cuda_check(
                 cuMemcpyDtoH_v2(
