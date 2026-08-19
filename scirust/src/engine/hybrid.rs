@@ -1,11 +1,18 @@
 //! Pure Rust extreme-edge hybrid CPU (SIMD) + GPU (CUDA PTX) matrix execution engine for SLHAv2.
 //!
+//! **EXPERIMENTAL / QUARANTINED (P0-1, P0-2 of docs/ELASTIC_MISSION_AUDIT.md).**
+//!
+//! This module is a research prototype. The CUDA path previously loaded a
+//! no-op PTX `.entry stub` as production "fused GEMM" and registered pinned
+//! host memory without any `cudaHostUnregister`. The stub PTX has been
+//! removed: [`GpuEngine::new`] now fails closed unless a REAL kernel module
+//! is supplied, and pinned registration is an owning RAII type. Production
+//! GPU work is in `slhav2-vram`; nothing in the deployable path may use this
+//! module.
+//!
 //! This module coordinates ultra-high performance, zero-allocation operations
 //! on the d-model/KV context. It implements static SIMD dispatching on both AArch64 and x86_64,
 //! as well as a GPU orchestration backend leveraging `cudarc`.
-//!
-//! High-efficiency caching is maintained via Cache-aligned buffers (64-byte aligned),
-//! ensuring hardware-aligned streaming without cash invalidations.
 
 use std::error::Error;
 use std::fmt;
@@ -102,7 +109,12 @@ impl FixedArena {
 }
 
 /// Compilation constant embedding the PTX bytecode.
-pub const FUSED_GEMM_PTX: &str = include_str!("../../kernels/fused_gemm.ptx");
+///
+/// The original `kernels/fused_gemm.ptx` contained only a no-op `.entry
+/// stub` and has been REMOVED (P0-1). Loading it as production "fused GEMM"
+/// is what this quarantine prevents: `GpuEngine::new` now requires an
+/// explicit real PTX source and fails closed otherwise.
+pub const FUSED_GEMM_PTX: &str = "";
 
 /// Errors that can occur in the hybrid engine.
 #[derive(Debug, Clone)]
@@ -301,6 +313,7 @@ impl CpuSimdEngine {
 #[cfg(feature = "cuda")]
 extern "C" {
     fn cudaHostRegister(ptr: *mut std::ffi::c_void, size: usize, flags: u32) -> i32;
+    fn cudaHostUnregister(ptr: *mut std::ffi::c_void) -> i32;
 }
 
 #[cfg(feature = "cuda")]
@@ -313,22 +326,52 @@ pub struct GpuEngine {
 
 #[cfg(feature = "cuda")]
 impl GpuEngine {
-    /// Initialize a new GpuEngine and load the PTX module.
-    pub fn new() -> Result<Self, EngineError> {
+    /// Initialize a new GpuEngine from an explicit REAL PTX module.
+    ///
+    /// Fails closed: an empty PTX source (the removed stub) is rejected, and
+    /// the kernel name must resolve to a real entry point. The old path that
+    /// loaded the no-op `"stub"` kernel is gone.
+    pub fn new_with_ptx(
+        ptx_src: &'static str,
+        kernel_name: &'static str,
+    ) -> Result<Self, EngineError> {
         use cudarc::nvrtc::Ptx;
+
+        if ptx_src.trim().is_empty() {
+            return Err(EngineError::GpuError(
+                "refusing to load an empty PTX module (the removed no-op stub)".to_string(),
+            ));
+        }
 
         let dev = cudarc::driver::CudaDevice::new(0)
             .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
 
-        // Load the PTX kernel module
-        dev.load_ptx(Ptx::from_src(FUSED_GEMM_PTX), "fused_gemm", &["stub"])
+        dev.load_ptx(Ptx::from_src(ptx_src), "fused_gemm", &[kernel_name])
             .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
 
         Ok(Self { device: dev })
     }
 
+    /// The legacy constructor. The original no-op stub is gone, so this
+    /// fails closed rather than loading a fake kernel.
+    pub fn new() -> Result<Self, EngineError> {
+        Err(EngineError::GpuError(
+            "GpuEngine::new requires an explicit real PTX module; \
+             use new_with_ptx (the removed no-op stub kernel is quarantined)"
+                .to_string(),
+        ))
+    }
+
     /// Pinned host registration helper to register a memory region for zero-copy.
-    pub fn register_pinned_memory(&self, buffer: &mut [u8]) -> Result<(), EngineError> {
+    ///
+    /// Returns an owning RAII handle; the region stays registered until the
+    /// handle is dropped (`cudaHostUnregister`). The old API registered
+    /// without any unregister (P0-2) and allowed the buffer to move or be
+    /// freed while CUDA still treated it as registered.
+    pub fn register_pinned_memory<'a>(
+        &self,
+        buffer: &'a mut [u8],
+    ) -> Result<PinnedHostRegion<'a>, EngineError> {
         // SAFETY: The pointer and length represent a valid mutable slice allocated by Rust.
         unsafe {
             let res = cudaHostRegister(
@@ -337,7 +380,11 @@ impl GpuEngine {
                 CUDA_HOST_REGISTER_DEVICEMAP,
             );
             if res == 0 {
-                Ok(())
+                Ok(PinnedHostRegion {
+                    base: buffer.as_mut_ptr(),
+                    len: buffer.len(),
+                    _lifetime: std::marker::PhantomData,
+                })
             } else {
                 Err(EngineError::GpuError(format!(
                     "cudaHostRegister failed with code {res}"
@@ -346,14 +393,15 @@ impl GpuEngine {
         }
     }
 
-    /// Launch the PTX stub/gemm kernel on the device.
-    pub fn launch_kernel(&self, param: u64) -> Result<(), EngineError> {
+    /// Launch the kernel on the device (the caller supplied the real kernel
+    /// name at construction).
+    pub fn launch_kernel(&self, kernel_name: &str, param: u64) -> Result<(), EngineError> {
         use cudarc::driver::LaunchAsync;
 
         let func = self
             .device
-            .get_func("fused_gemm", "stub")
-            .ok_or_else(|| EngineError::GpuError("Kernel 'stub' not found".to_string()))?;
+            .get_func("fused_gemm", kernel_name)
+            .ok_or_else(|| EngineError::GpuError(format!("Kernel '{kernel_name}' not found")))?;
 
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (1, 1, 1),
@@ -361,13 +409,55 @@ impl GpuEngine {
             shared_mem_bytes: 0,
         };
 
-        // SAFETY: The kernel launch parameters match the PTX stub parameters.
+        // SAFETY: The kernel launch parameters match the PTX kernel parameters.
         unsafe {
             func.launch(cfg, (param,))
                 .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
         }
 
         Ok(())
+    }
+}
+
+/// RAII owner of a CUDA host-pinned registration.
+///
+/// The region must not be moved or freed while registered; dropping this
+/// handle unregisters it. The old code registered without any unregister
+/// (P0-2) and the buffer could be freed while CUDA still treated it as
+/// registered.
+#[cfg(feature = "cuda")]
+pub struct PinnedHostRegion<'a> {
+    base: *mut u8,
+    len: usize,
+    _lifetime: std::marker::PhantomData<&'a mut [u8]>,
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for PinnedHostRegion<'_> {
+    fn drop(&mut self) {
+        // SAFETY: `cudaHostUnregister` on a region registered by this handle;
+        // the pointer is the exact base returned by the registration call.
+        unsafe {
+            cudaHostUnregister(self.base as *mut std::ffi::c_void);
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl PinnedHostRegion<'_> {
+    /// The pinned base pointer.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.base
+    }
+
+    /// The pinned byte length.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the region is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -385,15 +475,25 @@ impl GpuEngine {
         ))
     }
 
-    /// Pinned host registration stub.
+    /// Create from a real PTX module (unavailable without the feature).
+    pub fn new_with_ptx(
+        _ptx_src: &'static str,
+        _kernel_name: &'static str,
+    ) -> Result<Self, EngineError> {
+        Err(EngineError::GpuError(
+            "CUDA support is disabled".to_string(),
+        ))
+    }
+
+    /// Pinned host registration (unavailable without the feature).
     pub fn register_pinned_memory(&self, _buffer: &mut [u8]) -> Result<(), EngineError> {
         Err(EngineError::GpuError(
             "CUDA support is disabled".to_string(),
         ))
     }
 
-    /// Launch kernel stub.
-    pub fn launch_kernel(&self, _param: u64) -> Result<(), EngineError> {
+    /// Launch kernel (unavailable without the feature).
+    pub fn launch_kernel(&self, _kernel_name: &str, _param: u64) -> Result<(), EngineError> {
         Err(EngineError::GpuError(
             "CUDA support is disabled".to_string(),
         ))
@@ -407,6 +507,7 @@ impl GpuEngine {
 /// - While GPU executes the GEMM kernel for Layer N in parallel.
 pub fn pipeline_execution_step(
     gpu_engine: &GpuEngine,
+    kernel_name: &str,
     layer_n_gpu_param: u64,
     layer_n_plus_1_query: &[f32],
     layer_n_plus_1_keys: &[u8],
@@ -414,7 +515,7 @@ pub fn pipeline_execution_step(
     layer_n_plus_1_scores: &mut [f32],
 ) -> Result<(), EngineError> {
     // 1. Launch GPU Kernel for Layer N (non-blocking)
-    let _ = gpu_engine.launch_kernel(layer_n_gpu_param);
+    gpu_engine.launch_kernel(kernel_name, layer_n_gpu_param)?;
 
     // 2. Overlap with CPU SIMD dequantization + scoring of Layer N+1
     CpuSimdEngine::dequant_and_fma(

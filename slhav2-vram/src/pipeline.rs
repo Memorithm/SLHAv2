@@ -191,6 +191,25 @@ impl GpuScoringPipeline {
             )));
         }
 
+        // Validate the query before touching the device: the kernel assumes
+        // exactly D_C f32 coarse values and RESIDUAL_WORDS u64 sign words.
+        // A shorter query would leave stale bytes from a previous step in
+        // the persistent device buffers and silently produce wrong scores.
+        if q_coarse.len() != codec::D_C {
+            return Err(crate::backends::cuda::CudaError(format!(
+                "GpuScoringPipeline: q_coarse must be exactly {} f32 values, got {}",
+                codec::D_C,
+                q_coarse.len()
+            )));
+        }
+        if q_sign.len() != codec::RESIDUAL_WORDS {
+            return Err(crate::backends::cuda::CudaError(format!(
+                "GpuScoringPipeline: q_sign must be exactly {} u64 values, got {}",
+                codec::RESIDUAL_WORDS,
+                q_sign.len()
+            )));
+        }
+
         // Refresh q on the device (query changes every step).
         self.q_coarse_buf.clear();
         for &v in q_coarse {

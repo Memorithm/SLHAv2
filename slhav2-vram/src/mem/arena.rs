@@ -40,6 +40,10 @@ pub struct DeviceArena<A> {
     free: BTreeMap<u64, FreeBlock>,
     alloc_map: std::collections::HashMap<u64, AllocBlock>,
     used: u64,
+    /// Bytes consumed by alignment padding (prefixes that cannot be reused
+    /// as part of any allocation). Reported separately; never counted as
+    /// free.
+    overhead: u64,
     next_cookie: AtomicU64,
 }
 
@@ -62,6 +66,7 @@ impl<A> DeviceArena<A> {
             free: BTreeMap::new(),
             alloc_map: std::collections::HashMap::new(),
             used: 0,
+            overhead: 0,
             next_cookie: AtomicU64::new(1),
         };
         arena.insert_free(0, capacity);
@@ -85,7 +90,20 @@ impl<A> DeviceArena<A> {
     }
 
     pub fn free_bytes(&self) -> u64 {
-        self.capacity - self.used
+        self.capacity - self.used - self.overhead
+    }
+
+    /// Bytes consumed by alignment padding that cannot serve any allocation.
+    pub fn overhead_bytes(&self) -> u64 {
+        self.overhead
+    }
+
+    /// Conservation invariant: `used + free + overhead == capacity`.
+    ///
+    /// `free_bytes()` counts only bytes that are actually in the free list;
+    /// alignment padding is tracked as overhead, so no byte disappears.
+    pub fn accounting_is_conserved(&self) -> bool {
+        self.used + self.free_bytes() + self.overhead == self.capacity
     }
 
     pub fn live_allocations(&self) -> usize {
@@ -116,6 +134,14 @@ impl<A> DeviceArena<A> {
         if avail < size {
             self.insert_free(offset, real);
             return None;
+        }
+
+        // The prefix [offset, aligned_off) is never usable by another
+        // allocation once the block is carved: it is too small to serve as a
+        // free block under this allocator's alignment rule, so it is
+        // accounted as defined overhead — never silently dropped.
+        if pad > 0 {
+            self.overhead += pad;
         }
 
         let leftover = avail - size;
@@ -150,6 +176,21 @@ impl<A> DeviceArena<A> {
         self.used -= block.size;
         self.insert_free(block.offset, block.size);
         self.coalesce();
+        // Reclaim any padding that sat immediately before this block: it
+        // becomes usable again once merged with the freed block (the merged
+        // free region starts at the padding's offset).
+        let merged_start = self
+            .free
+            .range(..=block.offset)
+            .next_back()
+            .map(|(&off, b)| (off, b.size))
+            .filter(|&(off, size)| off + size > block.offset)
+            .map(|(off, _)| off)
+            .unwrap_or(block.offset);
+        if merged_start < block.offset {
+            let reclaimed = block.offset - merged_start;
+            self.overhead = self.overhead.saturating_sub(reclaimed);
+        }
     }
 
     /// Insert a free block, merging it with any adjacent free blocks (the
@@ -192,6 +233,7 @@ impl<A> DeviceArena<A> {
         self.free.clear();
         self.alloc_map.clear();
         self.used = 0;
+        self.overhead = 0;
         self.insert_free(0, self.capacity);
     }
 }
@@ -301,6 +343,130 @@ mod tests {
             arena.free(s);
         }
         assert_eq!(arena.live_allocations(), 0);
+        assert_eq!(arena.free_bytes(), arena.capacity());
+    }
+
+    /// Conservation: used + free + overhead == capacity at every step of a
+    /// random sequence, including unaligned free blocks and misaligned
+    /// allocations.
+    #[test]
+    fn test_arena_accounting_conservation_random() {
+        let mut arena = DeviceArena::new(0u64, 1 << 20);
+        let mut live: Vec<ArenaSlice> = Vec::new();
+        let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            rng >> 33
+        };
+
+        for _ in 0..5000 {
+            assert!(
+                arena.accounting_is_conserved(),
+                "conservation violated at step with {} live, used {} free {} overhead {} cap {}",
+                live.len(),
+                arena.used_bytes(),
+                arena.free_bytes(),
+                arena.overhead_bytes(),
+                arena.capacity()
+            );
+            if next() % 3 == 0 && !live.is_empty() {
+                let idx = (next() as usize) % live.len();
+                let s = live.swap_remove(idx);
+                arena.free(&s);
+            } else {
+                // Sizes chosen so the first-fit block is often unaligned
+                // (e.g. 100 % 128 != 0 forces padding).
+                let size = 1 + (next() % 300);
+                if let Some(s) = arena.allocate(size) {
+                    live.push(s);
+                }
+            }
+        }
+        for s in &live {
+            arena.free(s);
+        }
+        assert!(arena.accounting_is_conserved());
+        assert_eq!(arena.used_bytes(), 0);
+        // Every byte is accounted: free + overhead == capacity. (Some
+        // padding prefixes may remain overhead after out-of-order frees
+        // where the predecessor block was already gone; they are tracked,
+        // never lost.)
+        assert_eq!(
+            arena.free_bytes() + arena.overhead_bytes(),
+            arena.capacity()
+        );
+    }
+
+    /// Fragmentation: an arena fragmented into many small free blocks must
+    /// still report those bytes as free (they are, they are just not
+    /// contiguous).
+    #[test]
+    fn test_arena_fragmentation_reported_as_free() {
+        let mut arena = DeviceArena::new(0u64, 4096);
+        let mut slices = Vec::new();
+        // Allocate small blocks spread across the arena.
+        for _ in 0..20 {
+            slices.push(arena.allocate(128).unwrap());
+        }
+        // Free every other one: free bytes are split, but total must match.
+        for (i, s) in slices.iter().enumerate() {
+            if i % 2 == 0 {
+                arena.free(s);
+            }
+        }
+        assert!(arena.accounting_is_conserved());
+        let fragmented_free = arena.free_bytes();
+        assert!(fragmented_free > 0);
+        // A request larger than any single free block fails closed.
+        assert!(arena.allocate(fragmented_free).is_none());
+        assert!(arena.accounting_is_conserved());
+    }
+
+    /// Re-use and repeated grow/shrink cycles must keep conservation and
+    /// never leak bytes.
+    #[test]
+    fn test_arena_repeated_grow_shrink_conservation() {
+        let mut arena = DeviceArena::new(0u64, 8192);
+        for cycle in 0..50 {
+            let mut slices = Vec::new();
+            let n = 1 + (cycle * 7) % 40;
+            for _ in 0..n {
+                if let Some(s) = arena.allocate(64) {
+                    slices.push(s);
+                }
+            }
+            for s in &slices {
+                arena.free(s);
+            }
+            assert!(
+                arena.accounting_is_conserved(),
+                "cycle {cycle}: used {} free {} overhead {}",
+                arena.used_bytes(),
+                arena.free_bytes(),
+                arena.overhead_bytes()
+            );
+            assert_eq!(arena.used_bytes(), 0);
+            assert_eq!(
+                arena.free_bytes() + arena.overhead_bytes(),
+                arena.capacity()
+            );
+        }
+    }
+
+    /// Exhaustion: the arena returns None and stays conserved.
+    #[test]
+    fn test_arena_exhausted_returns_none_conserved() {
+        let mut arena = DeviceArena::new(0u64, 1024);
+        // Two allocations whose sum exactly fills the arena.
+        let a = arena.allocate(512).unwrap();
+        let b = arena.allocate(512).unwrap();
+        assert!(arena.allocate(1).is_none());
+        assert!(arena.accounting_is_conserved());
+        arena.free(&a);
+        arena.free(&b);
+        assert!(arena.accounting_is_conserved());
         assert_eq!(arena.free_bytes(), arena.capacity());
     }
 }

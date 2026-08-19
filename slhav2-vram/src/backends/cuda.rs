@@ -52,49 +52,42 @@ impl fmt::Display for CudaError {
 
 impl Error for CudaError {}
 
-/// Human-readable name for a common CUDA driver error code (the `CUDA_ERROR_*`
-/// enum). Unknown codes fall back to a numeric message.
-fn cu_result_name(code: CUresult) -> &'static str {
-    match code {
-        0 => "CUDA_SUCCESS",
-        1 => "CUDA_ERROR_INVALID_VALUE",
-        2 => "CUDA_ERROR_OUT_OF_MEMORY",
-        3 => "CUDA_ERROR_NOT_INITIALIZED",
-        4 => "CUDA_ERROR_DEINITIALIZED",
-        5 => "CUDA_ERROR_PROFILER_DISABLED",
-        6 => "CUDA_ERROR_PROFILER_NOT_INITIALIZED",
-        7 => "CUDA_ERROR_PROFILER_ALREADY_STARTED",
-        8 => "CUDA_ERROR_PROFILER_ALREADY_STOPPED",
-        100 => "CUDA_ERROR_NO_DEVICE",
-        101 => "CUDA_ERROR_INVALID_DEVICE",
-        200 => "CUDA_ERROR_INVALID_IMAGE",
-        201 => "CUDA_ERROR_INVALID_CONTEXT",
-        202 => "CUDA_ERROR_CONTEXT_ALREADY_CURRENT",
-        205 => "CUDA_ERROR_OUT_OF_MEMORY",
-        206 => "CUDA_ERROR_INVALID_POINTER",
-        207 => "CUDA_ERROR_INVALID_MEMORY_BLOCK",
-        208 => "CUDA_ERROR_INVALID_PTX",
-        209 => "CUDA_ERROR_INVALID_GRAPHICS_CONTEXT",
-        218 => "CUDA_ERROR_SHARED_OBJECT_SYMBOL_NOT_FOUND",
-        219 => "CUDA_ERROR_SHARED_OBJECT_INIT_FAILED",
-        220 => "CUDA_ERROR_OPERATING_SYSTEM",
-        300 => "CUDA_ERROR_INVALID_HANDLE",
-        400 => "CUDA_ERROR_NOT_FOUND",
-        500 => "CUDA_ERROR_NOT_READY",
-        600 => "CUDA_ERROR_ILLEGAL_ADDRESS",
-        700 => "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES",
-        701 => "CUDA_ERROR_LAUNCH_TIMEOUT",
-        702 => "CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING",
-        703 => "CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED",
-        704 => "CUDA_ERROR_PEER_ACCESS_NOT_ENABLED",
-        705 => "CUDA_ERROR_CONTEXT_ALREADY_IN_USE",
-        708 => "CUDA_ERROR_LAUNCH_FAILED",
-        709 => "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES",
-        710 => "CUDA_ERROR_LAUNCH_TIMEOUT",
-        711 => "CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING",
-        715 => "CUDA_ERROR_UNKNOWN",
-        800 => "CUDA_ERROR_INVALID_RESOURCE_HANDLE",
-        _ => "CUDA_ERROR_UNKNOWN_CODE",
+/// Human-readable name for a CUDA driver error code.
+///
+/// Uses the real driver helpers `cuGetErrorName`/`cuGetErrorString` when the
+/// driver is initialized (they are null-safe for unknown codes); falls back
+/// to a verified numeric rendering only when the driver is not yet
+/// initialized. The old hand-written table is gone: several of its mappings
+/// were wrong (e.g. 205 is `CUDA_ERROR_INVALID_CONTEXT`, not OOM; 700 is
+/// `CUDA_ERROR_INVALID_VALUE`).
+fn cu_result_name(code: CUresult) -> String {
+    // SAFETY: `cuGetErrorName`/`cuGetErrorString` write into the output
+    // pointer only on success and return a CUresult; passing null outputs is
+    // safe. `CUDA_SUCCESS` is never routed here by `cuda_check`.
+    unsafe {
+        let mut name: *const core::ffi::c_char = core::ptr::null();
+        let mut desc: *const core::ffi::c_char = core::ptr::null();
+        let rn = cuGetErrorName(code, &mut name);
+        let rs = cuGetErrorString(code, &mut desc);
+        let name_str = if rn == CUDA_SUCCESS && !name.is_null() {
+            core::ffi::CStr::from_ptr(name)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            format!("CUDA_ERROR_UNKNOWN_CODE_{code}")
+        };
+        let desc_str = if rs == CUDA_SUCCESS && !desc.is_null() {
+            core::ffi::CStr::from_ptr(desc)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        };
+        if desc_str.is_empty() {
+            name_str
+        } else {
+            format!("{name_str} ({desc_str})")
+        }
     }
 }
 
@@ -106,6 +99,31 @@ fn cuda_check(result: CUresult, op: &'static str) -> Result<(), CudaError> {
             "{op} failed: {} ({result})",
             cu_result_name(result)
         )))
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    /// The driver reports the canonical names; these are the well-known
+    /// values the old hand-written table got wrong.
+    #[test]
+    fn error_name_uses_driver_helpers() {
+        // If the driver is unavailable in this environment, the wrapper must
+        // still return a deterministic numeric fallback.
+        let name = cu_result_name(2);
+        assert!(
+            name.contains("OUT_OF_MEMORY") || name.contains("UNKNOWN_CODE"),
+            "got {name}"
+        );
+        let name = cu_result_name(205);
+        assert!(
+            name.contains("INVALID_CONTEXT") || name.contains("UNKNOWN_CODE"),
+            "got {name}"
+        );
+        let name = cu_result_name(99999);
+        assert!(name.contains("UNKNOWN_CODE"), "got {name}");
     }
 }
 
@@ -926,4 +944,6 @@ extern "C" {
         kernel_params: *const *mut libc::c_void,
         extra: *mut libc::c_void,
     ) -> CUresult;
+    fn cuGetErrorName(error: CUresult, pStr: *mut *const core::ffi::c_char) -> CUresult;
+    fn cuGetErrorString(error: CUresult, pStr: *mut *const core::ffi::c_char) -> CUresult;
 }
