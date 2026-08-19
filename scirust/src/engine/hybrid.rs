@@ -1,33 +1,21 @@
-//! Pure Rust extreme-edge hybrid CPU (SIMD) + GPU (CUDA PTX) matrix execution engine for SLHAv2.
+//! Experimental hybrid CPU SIMD + CUDA research engine.
 //!
-//! **EXPERIMENTAL / QUARANTINED (P0-1, P0-2 of docs/ELASTIC_MISSION_AUDIT.md).**
-//!
-//! This module is a research prototype. The CUDA path previously loaded a
-//! no-op PTX `.entry stub` as production "fused GEMM" and registered pinned
-//! host memory without any `cudaHostUnregister`. The stub PTX has been
-//! removed: [`GpuEngine::new`] now fails closed unless a REAL kernel module
-//! is supplied, and pinned registration is an owning RAII type. Production
-//! GPU work is in `slhav2-vram`; nothing in the deployable path may use this
-//! module.
-//!
-//! This module coordinates ultra-high performance, zero-allocation operations
-//! on the d-model/KV context. It implements static SIMD dispatching on both AArch64 and x86_64,
-//! as well as a GPU orchestration backend leveraging `cudarc`.
+//! This module is deliberately quarantined from the production GPU path.
+//! Production CUDA execution lives in `slhav2-vram`; this module exists for
+//! experiments and must fail closed on malformed layouts or absent kernels.
+//! The historical no-op PTX stub is not shipped.
 
 use std::error::Error;
 use std::fmt;
 
-/// Predefined cache line size alignment (64 bytes).
+/// Cache-line alignment used by host-side scratch buffers.
 pub const CACHE_ALIGNMENT: usize = 64;
 
-/// A statically allocated cache-line-aligned memory buffer.
-///
-/// Imposes a strict 64-byte alignment on structures via `#[repr(C, align(64))]`.
-/// Fits perfectly on modern L1/L2 cache boundaries to prevent false sharing and invalidations.
+/// Cache-line-aligned fixed-size buffer.
 #[repr(C, align(64))]
 #[derive(Clone, Debug)]
 pub struct CacheAlignedBuffer<T, const N: usize> {
-    /// Underlying array storing the contiguous memory.
+    /// Underlying contiguous array.
     pub data: [T; N],
 }
 
@@ -40,28 +28,26 @@ impl<T: Default + Copy, const N: usize> Default for CacheAlignedBuffer<T, N> {
 }
 
 impl<T, const N: usize> CacheAlignedBuffer<T, N> {
-    /// Create a new aligned buffer from a pre-allocated array.
+    /// Create a buffer from an existing array.
     pub const fn new(data: [T; N]) -> Self {
         Self { data }
     }
 
-    /// Access the underlying aligned data as a slice.
+    /// Borrow the underlying array as a slice.
     pub fn as_slice(&self) -> &[T] {
         &self.data
     }
 
-    /// Access the underlying aligned data as a mutable slice.
+    /// Mutably borrow the underlying array as a slice.
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.data
     }
 }
 
-/// A fixed-size arena allocator for zero-allocation hot-path executions.
-///
-/// Avoids allocating on the stack by boxing the pre-allocated region once at creation,
-/// ensuring zero-allocation in the critical hot path of inference.
+/// Fixed 1 MiB scratch arena. Allocation happens once at construction; hot
+/// path allocations only bump an offset.
 pub struct FixedArena {
-    storage: Box<[u8; 1024 * 1024]>, // 1 MiB heap-allocated memory once
+    storage: Box<[u8; 1024 * 1024]>,
     offset: usize,
 }
 
@@ -72,7 +58,7 @@ impl Default for FixedArena {
 }
 
 impl FixedArena {
-    /// Create a new pre-allocated FixedArena.
+    /// Create an empty arena.
     pub fn new() -> Self {
         Self {
             storage: Box::new([0u8; 1024 * 1024]),
@@ -80,235 +66,225 @@ impl FixedArena {
         }
     }
 
-    /// Reset the arena offset to reuse the memory.
+    /// Reuse all arena storage.
     pub fn reset(&mut self) {
         self.offset = 0;
     }
 
-    /// Allocate a slice of memory with a specific size and alignment.
+    /// Allocate `size` bytes at `align` alignment.
     ///
-    /// Returns a mutable reference to the allocated slice or None if the capacity is exceeded.
+    /// Invalid alignment, integer overflow, zero-sized allocations and
+    /// exhaustion return `None`; no unchecked arithmetic is performed.
     pub fn alloc(&mut self, size: usize, align: usize) -> Option<&mut [u8]> {
-        let current_ptr = self.storage.as_ptr() as usize + self.offset;
-        let aligned_ptr = (current_ptr + align - 1) & !(align - 1);
-        let alignment_padding = aligned_ptr - current_ptr;
-
-        let total_size = size + alignment_padding;
-        if self.offset + total_size > self.storage.len() {
-            None
-        } else {
-            let start = self.offset + alignment_padding;
-            self.offset += total_size;
-            // SAFETY: The slice is bounds-checked and guaranteed to reside within the pre-allocated array storage.
-            unsafe {
-                let ptr = self.storage.as_mut_ptr().add(start);
-                Some(std::slice::from_raw_parts_mut(ptr, size))
-            }
+        if size == 0 || align == 0 || !align.is_power_of_two() {
+            return None;
         }
+        let base = self.storage.as_ptr() as usize;
+        let current = base.checked_add(self.offset)?;
+        let aligned = current.checked_add(align - 1)? & !(align - 1);
+        let padding = aligned.checked_sub(current)?;
+        let total = size.checked_add(padding)?;
+        let end = self.offset.checked_add(total)?;
+        if end > self.storage.len() {
+            return None;
+        }
+        let start = self.offset.checked_add(padding)?;
+        self.offset = end;
+        Some(&mut self.storage[start..start + size])
     }
 }
 
-/// Compilation constant embedding the PTX bytecode.
-///
-/// The original `kernels/fused_gemm.ptx` contained only a no-op `.entry
-/// stub` and has been REMOVED (P0-1). Loading it as production "fused GEMM"
-/// is what this quarantine prevents: `GpuEngine::new` now requires an
-/// explicit real PTX source and fails closed otherwise.
+/// The removed legacy PTX stub. Kept as an empty compatibility constant so
+/// callers cannot accidentally execute fake work.
 pub const FUSED_GEMM_PTX: &str = "";
 
-/// Errors that can occur in the hybrid engine.
-#[derive(Debug, Clone)]
+/// Errors produced by the experimental engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
-    /// GPU API error (e.g. cudarc or driver initialization fail).
+    /// CUDA/driver/module error.
     GpuError(String),
-    /// Alignment validation or size constraint violation.
+    /// Invalid query/key/output/alignment layout.
     InvalidLayout(String),
-    /// Resources or memory exhausted.
+    /// Scratch/device memory exhausted.
     OutOfMemory,
 }
 
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EngineError::GpuError(msg) => write!(f, "GPU Engine Error: {msg}"),
-            EngineError::InvalidLayout(msg) => write!(f, "Invalid Memory Layout: {msg}"),
-            EngineError::OutOfMemory => write!(f, "Out of Memory in Engine Arena"),
+            Self::GpuError(msg) => write!(f, "GPU Engine Error: {msg}"),
+            Self::InvalidLayout(msg) => write!(f, "Invalid Memory Layout: {msg}"),
+            Self::OutOfMemory => f.write_str("Out of Memory in Engine Arena"),
         }
     }
 }
 
 impl Error for EngineError {}
 
-/// CPU static SIMD execution module with on-the-fly register-level dequantization.
-///
-/// Implements fused, instruction-level conditional compilation dispatching on ARM Neon (AArch64)
-/// and Intel/AMD AVX-512 (x86_64), alongside a fallback portable scalar path.
+/// CPU INT4 scoring engine with architecture-specific SIMD acceleration.
 pub struct CpuSimdEngine;
 
 impl CpuSimdEngine {
-    /// Run fused dequantization and FMA (Fused Multiply-Add) calculation.
+    /// Compatibility wrapper for historical callers.
     ///
-    /// Accepts quantized inputs and scales, dequantizes them directly in register vectors
-    /// and performs the dot product, avoiding multi-pass RAM reads.
-    ///
-    /// - Quantized inputs are treated as paired 4-bit INT4 (packed in `u8` bytes).
-    /// - Scale factor scales the dequantized values.
-    /// - Dimension must be a multiple of the SIMD register width.
+    /// Invalid input fails closed: the supplied output is zeroed and no panic
+    /// escapes. New code should use [`Self::try_dequant_and_fma`] to receive a
+    /// structured error.
     pub fn dequant_and_fma(query: &[f32], quant_keys: &[u8], scale: f32, out_scores: &mut [f32]) {
-        let dim = query.len();
-        let num_keys = quant_keys.len() / (dim / 2);
-
-        for k in 0..num_keys {
-            let key_offset = k * (dim / 2);
-            let k_slice = &quant_keys[key_offset..key_offset + (dim / 2)];
-            out_scores[k] = Self::vector_dot_product(query, k_slice, scale);
-        }
+        out_scores.fill(0.0);
+        let _ = Self::try_dequant_and_fma(query, quant_keys, scale, out_scores);
     }
 
-    #[inline(always)]
-    fn vector_dot_product(query: &[f32], quant_key: &[u8], scale: f32) -> f32 {
+    /// Validate and score all packed INT4 keys.
+    ///
+    /// Returns the number of scores written. A key occupies
+    /// `ceil(query.len()/2)` bytes. The key buffer must contain a whole number
+    /// of keys and the output must be large enough for all of them.
+    pub fn try_dequant_and_fma(
+        query: &[f32],
+        quant_keys: &[u8],
+        scale: f32,
+        out_scores: &mut [f32],
+    ) -> Result<usize, EngineError> {
         let dim = query.len();
-        // Memory safety guard: ensure dimension is valid, non-zero, and aligned
-        if dim == 0 || !dim.is_multiple_of(16) || quant_key.len() < dim / 2 {
-            return Self::vector_dot_product_scalar(query, quant_key, scale);
+        if dim == 0 {
+            return Err(EngineError::InvalidLayout(
+                "query dimension must be non-zero".to_string(),
+            ));
+        }
+        if !scale.is_finite() {
+            return Err(EngineError::InvalidLayout(
+                "scale must be finite".to_string(),
+            ));
+        }
+        if query.iter().any(|v| !v.is_finite()) {
+            return Err(EngineError::InvalidLayout(
+                "query contains non-finite values".to_string(),
+            ));
+        }
+        let packed_per_key = dim.div_ceil(2);
+        if quant_keys.len() % packed_per_key != 0 {
+            return Err(EngineError::InvalidLayout(format!(
+                "packed key buffer length {} is not a multiple of {packed_per_key}",
+                quant_keys.len()
+            )));
+        }
+        let num_keys = quant_keys.len() / packed_per_key;
+        if out_scores.len() < num_keys {
+            return Err(EngineError::InvalidLayout(format!(
+                "output has {} scores but {num_keys} are required",
+                out_scores.len()
+            )));
         }
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx512f") {
-                // SAFETY: avx512f feature is explicitly checked and dimensions are guaranteed to be multiples of 16.
-                unsafe { Self::vector_dot_product_avx512(query, quant_key, scale) }
-            } else {
-                Self::vector_dot_product_scalar(query, quant_key, scale)
+        for (k, out) in out_scores.iter_mut().take(num_keys).enumerate() {
+            let start = k * packed_per_key;
+            let key = &quant_keys[start..start + packed_per_key];
+            *out = Self::vector_dot_product(query, key, scale)?;
+        }
+        Ok(num_keys)
+    }
+
+    #[inline]
+    fn vector_dot_product(query: &[f32], quant_key: &[u8], scale: f32) -> Result<f32, EngineError> {
+        let dim = query.len();
+        let needed = dim.div_ceil(2);
+        if dim == 0 || quant_key.len() != needed {
+            return Err(EngineError::InvalidLayout(
+                "query/key dimensions do not match".to_string(),
+            ));
+        }
+
+        // SIMD implementations process complete vectors only. Odd or
+        // non-register-multiple dimensions use the bounds-checked scalar path.
+        if dim.is_multiple_of(16) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::is_x86_feature_detected!("avx512f") {
+                    // SAFETY: feature detection and exact packed-key validation
+                    // above satisfy the implementation preconditions.
+                    return Ok(unsafe { Self::vector_dot_product_avx512(query, quant_key, scale) });
+                }
             }
         }
 
         #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: Neon features are statically guaranteed on aarch64 and dimensions are aligned.
-            unsafe { Self::vector_dot_product_neon(query, quant_key, scale) }
+        if dim.is_multiple_of(4) {
+            // SAFETY: Advanced SIMD is part of the AArch64 baseline and the
+            // validated key has two nibbles for every query element.
+            return Ok(unsafe { Self::vector_dot_product_neon(query, quant_key, scale) });
         }
 
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            Self::vector_dot_product_scalar(query, quant_key, scale)
-        }
+        Ok(Self::vector_dot_product_scalar(query, quant_key, scale))
     }
 
-    /// AVX-512 implementation (x86_64)
-    ///
-    /// # Safety
-    /// Caller must guarantee that the `avx512f` instruction set is supported by the CPU.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f")]
     unsafe fn vector_dot_product_avx512(query: &[f32], quant_key: &[u8], scale: f32) -> f32 {
         use std::arch::x86_64::*;
 
-        let dim = query.len();
-        let mut sum_vec = _mm512_setzero_ps();
+        let mut sum = _mm512_setzero_ps();
         let scale_vec = _mm512_set1_ps(scale);
-        let eight_vec = _mm512_set1_ps(8.0);
-
-        // Process in chunks of 16 f32s (needs 8 bytes of INT4)
-        for i in (0..dim).step_by(16) {
-            let q_ptr = query.as_ptr().add(i);
-            let q_vec = _mm512_loadu_ps(q_ptr);
-
-            // Fetch 8 bytes containing 16 4-bit nibbles
-            let key_byte_ptr = quant_key.as_ptr().add(i / 2);
-            let raw_bytes = std::ptr::read(key_byte_ptr as *const u64);
-
-            // Extract lower and upper nibbles to floats
-            let mut k_unpacked = [0.0f32; 16];
+        let eight = _mm512_set1_ps(8.0);
+        for i in (0..query.len()).step_by(16) {
+            let q = _mm512_loadu_ps(query.as_ptr().add(i));
+            let raw = std::ptr::read_unaligned(quant_key.as_ptr().add(i / 2) as *const u64);
+            let mut unpacked = [0.0f32; 16];
             for j in 0..8 {
-                let byte = ((raw_bytes >> (j * 8)) & 0xFF) as u8;
-                let lo = (byte & 0x0F) as f32;
-                let hi = (byte >> 4) as f32;
-                k_unpacked[j * 2] = lo;
-                k_unpacked[j * 2 + 1] = hi;
+                let byte = ((raw >> (j * 8)) & 0xff) as u8;
+                unpacked[2 * j] = (byte & 0x0f) as f32;
+                unpacked[2 * j + 1] = (byte >> 4) as f32;
             }
-
-            let k_raw_vec = _mm512_loadu_ps(k_unpacked.as_ptr());
-            // level = (nibble - 8) * scale
-            let k_level = _mm512_sub_ps(k_raw_vec, eight_vec);
-            let k_vec = _mm512_mul_ps(k_level, scale_vec);
-
-            sum_vec = _mm512_fmadd_ps(q_vec, k_vec, sum_vec);
+            let levels = _mm512_sub_ps(_mm512_loadu_ps(unpacked.as_ptr()), eight);
+            let values = _mm512_mul_ps(levels, scale_vec);
+            sum = _mm512_add_ps(sum, _mm512_mul_ps(q, values));
         }
 
-        // Standard AVX-512 reduction to f32 using stable intrinsics.
-        // Extract the low and high 256-bit vectors, add them, and then reduce down via SSE.
-        let lo = _mm512_castps512_ps256(sum_vec);
-        let hi = _mm512_extractf32x8_ps::<1>(sum_vec);
+        let lo = _mm512_castps512_ps256(sum);
+        let hi = _mm512_extractf32x8_ps::<1>(sum);
         let sum256 = _mm256_add_ps(lo, hi);
-
-        let hi128 = _mm256_extractf128_ps::<1>(sum256);
         let lo128 = _mm256_castps256_ps128(sum256);
+        let hi128 = _mm256_extractf128_ps::<1>(sum256);
         let sum128 = _mm_add_ps(lo128, hi128);
-
-        let shuf = _mm_movehdup_ps(sum128);
-        let sum64 = _mm_add_ps(sum128, shuf);
-        let shuf2 = _mm_movehl_ps(sum64, sum64);
-        let final_sum = _mm_add_ss(sum64, shuf2);
-
-        _mm_cvtss_f32(final_sum)
+        let pair = _mm_add_ps(sum128, _mm_movehdup_ps(sum128));
+        _mm_cvtss_f32(_mm_add_ss(pair, _mm_movehl_ps(pair, pair)))
     }
 
-    /// ARM Neon implementation (aarch64)
-    ///
-    /// # Safety
-    /// Safe on all normal ARM64 (AArch64) target platforms.
     #[cfg(target_arch = "aarch64")]
     unsafe fn vector_dot_product_neon(query: &[f32], quant_key: &[u8], scale: f32) -> f32 {
         use std::arch::aarch64::*;
 
-        let dim = query.len();
-        let mut sum_vec = vdupq_n_f32(0.0);
+        let mut sum = vdupq_n_f32(0.0);
         let scale_vec = vdupq_n_f32(scale);
-        let eight_vec = vdupq_n_f32(8.0);
-
-        // Process in chunks of 4 f32s (needs 2 bytes of INT4)
-        for i in (0..dim).step_by(4) {
-            let q_ptr = query.as_ptr().add(i);
-            let q_vec = vld1q_f32(q_ptr);
-
-            let key_byte_ptr = quant_key.as_ptr().add(i / 2);
-            let b0 = *key_byte_ptr;
-            let b1 = *key_byte_ptr.add(1);
-
-            let n0 = (b0 & 0x0F) as f32;
-            let n1 = (b0 >> 4) as f32;
-            let n2 = (b1 & 0x0F) as f32;
-            let n3 = (b1 >> 4) as f32;
-
-            let k_unpacked = [n0, n1, n2, n3];
-            let k_raw_vec = vld1q_f32(k_unpacked.as_ptr());
-            let k_level = vsubq_f32(k_raw_vec, eight_vec);
-            let k_vec = vmulq_f32(k_level, scale_vec);
-
-            sum_vec = vfmaq_f32(sum_vec, q_vec, k_vec);
+        let eight = vdupq_n_f32(8.0);
+        for i in (0..query.len()).step_by(4) {
+            let q = vld1q_f32(query.as_ptr().add(i));
+            let b0 = *quant_key.as_ptr().add(i / 2);
+            let b1 = *quant_key.as_ptr().add(i / 2 + 1);
+            let unpacked = [
+                (b0 & 0x0f) as f32,
+                (b0 >> 4) as f32,
+                (b1 & 0x0f) as f32,
+                (b1 >> 4) as f32,
+            ];
+            let levels = vsubq_f32(vld1q_f32(unpacked.as_ptr()), eight);
+            sum = vfmaq_f32(sum, q, vmulq_f32(levels, scale_vec));
         }
-
-        vaddvq_f32(sum_vec)
+        vaddvq_f32(sum)
     }
 
-    /// Fallback portable scalar path
     fn vector_dot_product_scalar(query: &[f32], quant_key: &[u8], scale: f32) -> f32 {
-        let dim = query.len();
-        let mut sum = 0.0f32;
-        for d in 0..dim {
-            let byte_idx = d >> 1;
-            let byte = quant_key[byte_idx];
-            let nibble = if d & 1 == 0 { byte & 0x0F } else { byte >> 4 };
-            let level = (nibble as i32 - 8) as f32;
-            let val = level * scale;
-            sum += query[d] * val;
-        }
-        sum
+        query
+            .iter()
+            .enumerate()
+            .map(|(d, &q)| {
+                let byte = quant_key[d >> 1];
+                let nibble = if d & 1 == 0 { byte & 0x0f } else { byte >> 4 };
+                q * (nibble as i32 - 8) as f32 * scale
+            })
+            .sum()
     }
 }
-
-// ── CUDA engine integration conditionally compiled ────────────────────────
 
 #[cfg(feature = "cuda")]
 extern "C" {
@@ -319,6 +295,7 @@ extern "C" {
 #[cfg(feature = "cuda")]
 const CUDA_HOST_REGISTER_DEVICEMAP: u32 = 0x02;
 
+/// Experimental CUDA engine. The production backend is `slhav2-vram`.
 #[cfg(feature = "cuda")]
 pub struct GpuEngine {
     device: std::sync::Arc<cudarc::driver::CudaDevice>,
@@ -326,105 +303,85 @@ pub struct GpuEngine {
 
 #[cfg(feature = "cuda")]
 impl GpuEngine {
-    /// Initialize a new GpuEngine from an explicit REAL PTX module.
-    ///
-    /// Fails closed: an empty PTX source (the removed stub) is rejected, and
-    /// the kernel name must resolve to a real entry point. The old path that
-    /// loaded the no-op `"stub"` kernel is gone.
-    pub fn new_with_ptx(
-        ptx_src: &'static str,
-        kernel_name: &'static str,
-    ) -> Result<Self, EngineError> {
+    /// Load an explicitly supplied non-empty PTX module and kernel.
+    pub fn new_with_ptx(ptx_src: &'static str, kernel_name: &'static str) -> Result<Self, EngineError> {
         use cudarc::nvrtc::Ptx;
-
-        if ptx_src.trim().is_empty() {
+        if ptx_src.trim().is_empty() || kernel_name.trim().is_empty() {
             return Err(EngineError::GpuError(
-                "refusing to load an empty PTX module (the removed no-op stub)".to_string(),
+                "explicit non-empty PTX and kernel name are required".to_string(),
             ));
         }
-
-        let dev = cudarc::driver::CudaDevice::new(0)
-            .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
-
-        dev.load_ptx(Ptx::from_src(ptx_src), "fused_gemm", &[kernel_name])
-            .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
-
-        Ok(Self { device: dev })
+        let device = cudarc::driver::CudaDevice::new(0)
+            .map_err(|e| EngineError::GpuError(format!("{e:?}")))?;
+        device
+            .load_ptx(Ptx::from_src(ptx_src), "fused_gemm", &[kernel_name])
+            .map_err(|e| EngineError::GpuError(format!("{e:?}")))?;
+        Ok(Self { device })
     }
 
-    /// The legacy constructor. The original no-op stub is gone, so this
-    /// fails closed rather than loading a fake kernel.
+    /// Legacy constructor: fails closed because the bundled stub was removed.
     pub fn new() -> Result<Self, EngineError> {
         Err(EngineError::GpuError(
-            "GpuEngine::new requires an explicit real PTX module; \
-             use new_with_ptx (the removed no-op stub kernel is quarantined)"
+            "GpuEngine::new has no production kernel; use new_with_ptx or slhav2-vram"
                 .to_string(),
         ))
     }
 
-    /// Pinned host registration helper to register a memory region for zero-copy.
-    ///
-    /// Returns an owning RAII handle; the region stays registered until the
-    /// handle is dropped (`cudaHostUnregister`). The old API registered
-    /// without any unregister (P0-2) and allowed the buffer to move or be
-    /// freed while CUDA still treated it as registered.
+    /// Register non-empty host storage and return an RAII unregister guard.
     pub fn register_pinned_memory<'a>(
         &self,
         buffer: &'a mut [u8],
     ) -> Result<PinnedHostRegion<'a>, EngineError> {
-        // SAFETY: The pointer and length represent a valid mutable slice allocated by Rust.
-        unsafe {
-            let res = cudaHostRegister(
-                buffer.as_mut_ptr() as *mut std::ffi::c_void,
+        if buffer.is_empty() {
+            return Err(EngineError::InvalidLayout(
+                "cannot pin an empty host region".to_string(),
+            ));
+        }
+        let result = unsafe {
+            cudaHostRegister(
+                buffer.as_mut_ptr().cast(),
                 buffer.len(),
                 CUDA_HOST_REGISTER_DEVICEMAP,
-            );
-            if res == 0 {
-                Ok(PinnedHostRegion {
-                    base: buffer.as_mut_ptr(),
-                    len: buffer.len(),
-                    _lifetime: std::marker::PhantomData,
-                })
-            } else {
-                Err(EngineError::GpuError(format!(
-                    "cudaHostRegister failed with code {res}"
-                )))
-            }
+            )
+        };
+        if result != 0 {
+            return Err(EngineError::GpuError(format!(
+                "cudaHostRegister failed with code {result}"
+            )));
         }
+        Ok(PinnedHostRegion {
+            base: buffer.as_mut_ptr(),
+            len: buffer.len(),
+            _lifetime: std::marker::PhantomData,
+        })
     }
 
-    /// Launch the kernel on the device (the caller supplied the real kernel
-    /// name at construction).
+    /// Launch the explicitly loaded kernel.
     pub fn launch_kernel(&self, kernel_name: &str, param: u64) -> Result<(), EngineError> {
         use cudarc::driver::LaunchAsync;
-
+        if kernel_name.trim().is_empty() {
+            return Err(EngineError::InvalidLayout(
+                "kernel name must be non-empty".to_string(),
+            ));
+        }
         let func = self
             .device
             .get_func("fused_gemm", kernel_name)
-            .ok_or_else(|| EngineError::GpuError(format!("Kernel '{kernel_name}' not found")))?;
-
+            .ok_or_else(|| EngineError::GpuError(format!("kernel '{kernel_name}' not found")))?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (1, 1, 1),
             block_dim: (1, 1, 1),
             shared_mem_bytes: 0,
         };
-
-        // SAFETY: The kernel launch parameters match the PTX kernel parameters.
         unsafe {
             func.launch(cfg, (param,))
-                .map_err(|e| EngineError::GpuError(format!("{:?}", e)))?;
+                .map_err(|e| EngineError::GpuError(format!("{e:?}")))?;
         }
-
         Ok(())
     }
 }
 
-/// RAII owner of a CUDA host-pinned registration.
-///
-/// The region must not be moved or freed while registered; dropping this
-/// handle unregisters it. The old code registered without any unregister
-/// (P0-2) and the buffer could be freed while CUDA still treated it as
-/// registered.
+/// RAII ownership of a CUDA host registration.
 #[cfg(feature = "cuda")]
 pub struct PinnedHostRegion<'a> {
     base: *mut u8,
@@ -435,76 +392,53 @@ pub struct PinnedHostRegion<'a> {
 #[cfg(feature = "cuda")]
 impl Drop for PinnedHostRegion<'_> {
     fn drop(&mut self) {
-        // SAFETY: `cudaHostUnregister` on a region registered by this handle;
-        // the pointer is the exact base returned by the registration call.
-        unsafe {
-            cudaHostUnregister(self.base as *mut std::ffi::c_void);
-        }
+        let _ = unsafe { cudaHostUnregister(self.base.cast()) };
     }
 }
 
 #[cfg(feature = "cuda")]
 impl PinnedHostRegion<'_> {
-    /// The pinned base pointer.
     pub fn as_ptr(&self) -> *const u8 {
         self.base
     }
 
-    /// The pinned byte length.
     pub fn len(&self) -> usize {
         self.len
     }
 
-    /// Whether the region is empty.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 }
 
-// ── CUDA engine integration fallback stub (non-cuda targets) ──────────────
-
+/// Non-CUDA fail-closed placeholder.
 #[cfg(not(feature = "cuda"))]
 pub struct GpuEngine;
 
 #[cfg(not(feature = "cuda"))]
 impl GpuEngine {
-    /// Initialize a dummy GpuEngine returning initialization error or fallback.
     pub fn new() -> Result<Self, EngineError> {
-        Err(EngineError::GpuError(
-            "CUDA hardware target is not enabled/compiled".to_string(),
-        ))
+        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
     }
 
-    /// Create from a real PTX module (unavailable without the feature).
     pub fn new_with_ptx(
         _ptx_src: &'static str,
         _kernel_name: &'static str,
     ) -> Result<Self, EngineError> {
-        Err(EngineError::GpuError(
-            "CUDA support is disabled".to_string(),
-        ))
+        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
     }
 
-    /// Pinned host registration (unavailable without the feature).
     pub fn register_pinned_memory(&self, _buffer: &mut [u8]) -> Result<(), EngineError> {
-        Err(EngineError::GpuError(
-            "CUDA support is disabled".to_string(),
-        ))
+        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
     }
 
-    /// Launch kernel (unavailable without the feature).
     pub fn launch_kernel(&self, _kernel_name: &str, _param: u64) -> Result<(), EngineError> {
-        Err(EngineError::GpuError(
-            "CUDA support is disabled".to_string(),
-        ))
+        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
     }
 }
 
-/// Orchestrates the pipeline/overlapping between layers N and N+1.
-///
-/// Demonstrates the overlapping/pipelining pattern:
-/// - CPU-SIMD dequantizes the weights of Layer N+1 in the background
-/// - While GPU executes the GEMM kernel for Layer N in parallel.
+/// Experimental pipeline step. The GPU launch is validated first; CPU scoring
+/// then runs through the fail-closed compatibility wrapper.
 pub fn pipeline_execution_step(
     gpu_engine: &GpuEngine,
     kernel_name: &str,
@@ -514,17 +448,13 @@ pub fn pipeline_execution_step(
     layer_n_plus_1_scale: f32,
     layer_n_plus_1_scores: &mut [f32],
 ) -> Result<(), EngineError> {
-    // 1. Launch GPU Kernel for Layer N (non-blocking)
     gpu_engine.launch_kernel(kernel_name, layer_n_gpu_param)?;
-
-    // 2. Overlap with CPU SIMD dequantization + scoring of Layer N+1
-    CpuSimdEngine::dequant_and_fma(
+    CpuSimdEngine::try_dequant_and_fma(
         layer_n_plus_1_query,
         layer_n_plus_1_keys,
         layer_n_plus_1_scale,
         layer_n_plus_1_scores,
-    );
-
+    )?;
     Ok(())
 }
 
@@ -533,34 +463,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cache_aligned_buffer_layout() {
-        let buf: CacheAlignedBuffer<f32, 16> = CacheAlignedBuffer::new([0.0f32; 16]);
-        assert_eq!(std::mem::align_of_val(&buf), 64);
-        assert_eq!(std::mem::size_of_val(&buf), 64);
+    fn cache_alignment_is_stable() {
+        let buf = CacheAlignedBuffer::new([0.0f32; 16]);
+        assert_eq!(std::mem::align_of_val(&buf), CACHE_ALIGNMENT);
+        assert_eq!(std::mem::size_of_val(&buf), CACHE_ALIGNMENT);
     }
 
     #[test]
-    fn test_fixed_arena_zero_allocation() {
+    fn fixed_arena_rejects_bad_alignment_and_overflow() {
         let mut arena = FixedArena::new();
-        let s1 = arena.alloc(128, 64).unwrap();
-        assert_eq!(s1.len(), 128);
-        assert_eq!(s1.as_ptr() as usize % 64, 0);
-
-        let s2 = arena.alloc(256, 64).unwrap();
-        assert_eq!(s2.len(), 256);
-        assert_eq!(s2.as_ptr() as usize % 64, 0);
+        assert!(arena.alloc(1, 0).is_none());
+        assert!(arena.alloc(1, 3).is_none());
+        assert!(arena.alloc(128, 64).is_some());
+        arena.reset();
+        let s = arena.alloc(128, 64).unwrap();
+        assert_eq!(s.as_ptr() as usize % 64, 0);
     }
 
     #[test]
-    fn test_cpu_simd_dequant_equivalence() {
-        let query = vec![1.5f32; 128];
-        let mut keys = vec![0u8; 64]; // INT4 keys
-        for i in 0..64 {
-            keys[i] = 0x88; // zero-point nibbles -> yields 0.0f32
-        }
+    fn zero_dimension_and_short_output_fail_without_panicking() {
+        let mut out = [9.0f32; 1];
+        assert!(CpuSimdEngine::try_dequant_and_fma(&[], &[], 1.0, &mut out).is_err());
+        CpuSimdEngine::dequant_and_fma(&[], &[], 1.0, &mut out);
+        assert_eq!(out, [0.0]);
 
-        let mut scores = vec![999.0f32; 1];
-        CpuSimdEngine::dequant_and_fma(&query, &keys, 1.0, &mut scores);
+        let q = [1.0f32; 16];
+        let keys = [0x88u8; 16]; // two keys, eight bytes each
+        assert!(CpuSimdEngine::try_dequant_and_fma(&q, &keys, 1.0, &mut out).is_err());
+    }
+
+    #[test]
+    fn scalar_and_simd_contract_scores_zero_point() {
+        let query = [1.5f32; 128];
+        let keys = [0x88u8; 64];
+        let mut scores = [999.0f32; 1];
+        assert_eq!(
+            CpuSimdEngine::try_dequant_and_fma(&query, &keys, 1.0, &mut scores).unwrap(),
+            1
+        );
         assert_eq!(scores[0], 0.0);
+    }
+
+    #[test]
+    fn odd_dimension_is_supported_safely_by_scalar_path() {
+        let query = [1.0f32; 3];
+        let keys = [0x98u8, 0x08u8]; // levels 0,1,0 for first three nibbles
+        let mut score = [0.0f32; 1];
+        CpuSimdEngine::try_dequant_and_fma(&query, &keys, 1.0, &mut score).unwrap();
+        assert_eq!(score[0], 1.0);
     }
 }
