@@ -25,24 +25,70 @@ pub struct KvTopology {
 }
 
 impl KvTopology {
-    /// Raw bytes occupied by K/V for one logical token.
+    /// Validate dimensions and element widths before they participate in
+    /// memory-budget decisions.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.layers == 0 {
+            return Err("KV topology must contain at least one layer");
+        }
+        if self.kv_heads == 0 {
+            return Err("KV topology must contain at least one KV head");
+        }
+        if self.head_dim_k == 0 {
+            return Err("KV topology head dimension must be non-zero");
+        }
+        if self.k_bytes_per_elem == 0 {
+            return Err("KV topology K element width must be non-zero");
+        }
+        if self.has_v && self.v_bytes_per_elem == 0 {
+            return Err("KV topology V element width must be non-zero when V is present");
+        }
+        Ok(())
+    }
+
+    /// Checked raw K/V bytes occupied by one logical token.
     ///
     /// K and V element widths are accounted independently. The current public
     /// topology uses the same head dimension for K and V; runtimes with a
     /// distinct V dimension must normalize that dimension before constructing
-    /// this compatibility type (a future schema revision may expose it
-    /// separately without changing the accounting rule).
-    pub fn raw_bytes_per_token(&self) -> u64 {
-        let vectors = (self.layers as u64)
-            .saturating_mul(self.kv_heads as u64)
-            .saturating_mul(self.head_dim_k as u64);
-        let k = vectors.saturating_mul(self.k_bytes_per_elem as u64);
+    /// this compatibility type.
+    pub fn try_raw_bytes_per_token(&self) -> Result<u64, &'static str> {
+        self.validate()?;
+        let layers = u64::try_from(self.layers).map_err(|_| "KV layer count exceeds u64")?;
+        let heads = u64::try_from(self.kv_heads).map_err(|_| "KV head count exceeds u64")?;
+        let head_dim =
+            u64::try_from(self.head_dim_k).map_err(|_| "KV head dimension exceeds u64")?;
+        let k_width = u64::try_from(self.k_bytes_per_elem)
+            .map_err(|_| "KV K element width exceeds u64")?;
+        let v_width = u64::try_from(self.v_bytes_per_elem)
+            .map_err(|_| "KV V element width exceeds u64")?;
+
+        let vectors = layers
+            .checked_mul(heads)
+            .and_then(|value| value.checked_mul(head_dim))
+            .ok_or("KV vector geometry overflows u64")?;
+        let k = vectors
+            .checked_mul(k_width)
+            .ok_or("KV K bytes per token overflow u64")?;
         let v = if self.has_v {
-            vectors.saturating_mul(self.v_bytes_per_elem as u64)
+            vectors
+                .checked_mul(v_width)
+                .ok_or("KV V bytes per token overflow u64")?
         } else {
             0
         };
-        k.saturating_add(v)
+        k.checked_add(v)
+            .ok_or("KV total bytes per token overflow u64")
+    }
+
+    /// Raw K/V bytes occupied by one logical token.
+    ///
+    /// # Panics
+    /// Panics for an invalid or overflowing topology. Runtime/untrusted model
+    /// metadata should use [`Self::try_raw_bytes_per_token`] instead.
+    pub fn raw_bytes_per_token(&self) -> u64 {
+        self.try_raw_bytes_per_token()
+            .expect("valid non-overflowing KV topology")
     }
 }
 
@@ -83,6 +129,21 @@ impl ContextObservation {
             ram_total,
             model_positional_limit: None,
         }
+    }
+
+    /// Validate externally supplied resource/model metadata before control.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.topology.validate()?;
+        if self.vram_total != 0 && self.vram_available > self.vram_total {
+            return Err("VRAM available bytes exceed VRAM total bytes");
+        }
+        if self.ram_total != 0 && self.ram_available > self.ram_total {
+            return Err("RAM available bytes exceed RAM total bytes");
+        }
+        self.logical_tokens
+            .checked_add(self.predicted_growth)
+            .ok_or("logical token forecast overflows u64")?;
+        Ok(())
     }
 }
 
@@ -161,14 +222,15 @@ pub struct ElasticContext {
 
 impl ElasticContext {
     pub fn new(resource_id: &str, vram_budget_bytes: u64, topology: KvTopology) -> Self {
+        topology
+            .validate()
+            .expect("ElasticContext requires a valid KV topology");
         let mut budget = BudgetTree::new();
         let node = budget.add_root(0, vram_budget_bytes, vram_budget_bytes, 0);
         let backend = ContextBackend {
             vram_budget: vram_budget_bytes,
             ..ContextBackend::default()
         };
-        // The context-level controller is a decision engine only. Physical
-        // mutation belongs to the single canonical ElasticKvCache backend.
         let config = ControllerConfig {
             dry_run: true,
             ..ControllerConfig::standard()
@@ -210,19 +272,36 @@ impl ElasticContext {
         &mut self.cache
     }
 
-    pub fn raw_kv_bytes(&self) -> u64 {
+    /// Checked total raw KV bytes for the current logical context.
+    pub fn try_raw_kv_bytes(&self) -> Result<u64, &'static str> {
         self.logical_tokens
-            .saturating_mul(self.topology.raw_bytes_per_token())
+            .checked_mul(self.topology.try_raw_bytes_per_token()?)
+            .ok_or("logical raw KV bytes overflow u64")
+    }
+
+    /// Total raw KV bytes for the current logical context.
+    ///
+    /// # Panics
+    /// Panics only when previously accepted topology/token state cannot be
+    /// represented in `u64`; runtime control paths use checked arithmetic.
+    pub fn raw_kv_bytes(&self) -> u64 {
+        self.try_raw_kv_bytes()
+            .expect("valid non-overflowing logical KV byte count")
     }
 
     /// Observe workload/resources, choose one ECA action and apply that exact
     /// action to the physical cache.
     pub fn step(&mut self, obs: &ContextObservation) -> Result<ActionRequest, &'static str> {
-        self.logical_tokens = obs.logical_tokens;
-        self.topology = obs.topology;
-        self.telemetry.step = obs.step;
-        self.telemetry.logical_tokens = obs.logical_tokens;
+        obs.validate().map_err(|error| {
+            self.telemetry.hard_constraint_violations =
+                self.telemetry.hard_constraint_violations.saturating_add(1);
+            error
+        })?;
 
+        let logical_forecast = obs
+            .logical_tokens
+            .checked_add(obs.predicted_growth)
+            .ok_or("logical token forecast overflows u64")?;
         let effective_limit = match (self.model_positional_limit, obs.model_positional_limit) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),
@@ -230,23 +309,30 @@ impl ElasticContext {
             (None, None) => None,
         };
         self.telemetry.model_positional_limit = effective_limit;
-        if let Some(limit) = effective_limit {
-            if obs.logical_tokens.saturating_add(obs.predicted_growth) > limit {
-                self.telemetry.hard_constraint_violations =
-                    self.telemetry.hard_constraint_violations.saturating_add(1);
-                return Err("model positional limit would be exceeded (hard constraint)");
-            }
+        if effective_limit.is_some_and(|limit| logical_forecast > limit) {
+            self.telemetry.hard_constraint_violations =
+                self.telemetry.hard_constraint_violations.saturating_add(1);
+            return Err("model positional limit would be exceeded (hard constraint)");
         }
 
-        let bytes_per_token = obs.topology.raw_bytes_per_token();
-        let raw_now = obs.logical_tokens.saturating_mul(bytes_per_token);
-        let raw_forecast = obs
+        let bytes_per_token = obs.topology.try_raw_bytes_per_token()?;
+        let raw_now = obs
             .logical_tokens
-            .saturating_add(obs.predicted_growth)
-            .saturating_mul(bytes_per_token);
-        let growth_bytes = obs.predicted_growth.saturating_mul(bytes_per_token);
+            .checked_mul(bytes_per_token)
+            .ok_or("current raw KV byte count overflows u64")?;
+        let raw_forecast = logical_forecast
+            .checked_mul(bytes_per_token)
+            .ok_or("forecast raw KV byte count overflows u64")?;
+        let growth_bytes = obs
+            .predicted_growth
+            .checked_mul(bytes_per_token)
+            .ok_or("predicted KV growth byte count overflows u64")?;
         let growth_shortfall = growth_bytes.saturating_sub(obs.vram_available);
 
+        self.logical_tokens = obs.logical_tokens;
+        self.topology = obs.topology;
+        self.telemetry.step = obs.step;
+        self.telemetry.logical_tokens = obs.logical_tokens;
         self.telemetry.raw_kv_bytes = raw_now;
         self.telemetry.raw_kv_forecast = raw_forecast;
         self.telemetry.vram_available = obs.vram_available;
@@ -256,23 +342,39 @@ impl ElasticContext {
         self.telemetry.vram_pressure = if obs.vram_total == 0 {
             0.0
         } else {
-            (obs.vram_total.saturating_sub(obs.vram_available) as f64 / obs.vram_total as f64)
-                .clamp(0.0, 1.0)
+            (obs.vram_total - obs.vram_available) as f64 / obs.vram_total as f64
         };
 
         let budget = self.controller_budget_bytes();
         let resident = self.cache.resident_bytes() as u64;
-        // Control pressure is based on what is physically resident plus the
-        // forecast growth that cannot fit in currently available VRAM. We do
-        // not confuse the full logical raw history with resident bytes.
-        let control_used = resident.saturating_add(growth_shortfall);
-        let eca_obs = Observation::new(obs.step, control_used, budget, obs.active_tokens as f64);
-        let decision = self.controller.step(eca_obs)?;
+        let resident_and_growth = resident.saturating_add(growth_shortfall);
+        let system_pressure_used = scaled_system_pressure(
+            obs.vram_total,
+            obs.vram_available,
+            budget,
+        );
+        // Both local cache demand and global VRAM pressure are first-class
+        // controller inputs. The stronger one wins; logical raw history is
+        // deliberately not confused with physical residency.
+        let control_used = resident_and_growth.max(system_pressure_used);
+        let eca_observation =
+            Observation::new(obs.step, control_used, budget, obs.active_tokens as f64);
+        let decision = self.controller.step(eca_observation)?;
         let action = decision.action;
 
-        let release_target = resident
+        let recovery_target = budget.saturating_mul(3) / 4;
+        let mut release_target = resident
             .saturating_sub(growth_shortfall)
-            .min(budget.saturating_mul(3) / 4);
+            .min(recovery_target);
+        if matches!(action, ActionRequest::Demote | ActionRequest::Offload)
+            && resident > 0
+            && release_target >= resident
+        {
+            // High global VRAM pressure may demand action even with no forecast
+            // growth. Force at least one 32-byte WARM rung (or one eviction if
+            // no HOT tile exists) instead of turning the decision into a no-op.
+            release_target = resident.saturating_sub(32);
+        }
         let target = match action {
             ActionRequest::Demote | ActionRequest::Offload => release_target as usize,
             _ => budget as usize,
@@ -328,6 +430,16 @@ impl ElasticContext {
     }
 }
 
+fn scaled_system_pressure(total: u64, available: u64, budget: u64) -> u64 {
+    if total == 0 || budget == 0 {
+        return 0;
+    }
+    let used = total - available;
+    let numerator = (used as u128).saturating_mul(budget as u128);
+    let scaled = numerator.div_ceil(total as u128);
+    u64::try_from(scaled.min(budget as u128)).expect("clamped to u64 budget")
+}
+
 pub mod elastic_context_telemetry_mod {
     #[derive(Clone, Debug, Default)]
     pub struct ContextTelemetry {
@@ -361,8 +473,8 @@ pub mod elastic_context_telemetry_mod {
     }
 }
 
-pub use elastic_context_telemetry_mod::ContextTelemetry;
 pub use crate::elastic_cache::PhysicalTier as CacheTier;
+pub use elastic_context_telemetry_mod::ContextTelemetry;
 pub type ContextTier = PhysicalTier;
 
 #[cfg(test)]
@@ -381,20 +493,32 @@ mod tests {
     }
 
     fn tile() -> [u8; 128] {
-        let mut t = [0u8; 128];
-        t[96..100].copy_from_slice(&1.0f32.to_le_bytes());
-        t[120..128].fill(255);
-        t
+        let mut tile = [0u8; 128];
+        tile[96..100].copy_from_slice(&1.0f32.to_le_bytes());
+        tile[120..128].fill(255);
+        tile
     }
 
     #[test]
     fn raw_bytes_per_token_accounts_k_and_v_widths_independently() {
-        let mut t = small_topology();
-        assert_eq!(t.raw_bytes_per_token(), 28 * 4 * 128 * (2 + 2));
-        t.v_bytes_per_elem = 1;
-        assert_eq!(t.raw_bytes_per_token(), 28 * 4 * 128 * (2 + 1));
-        t.has_v = false;
-        assert_eq!(t.raw_bytes_per_token(), 28 * 4 * 128 * 2);
+        let mut topology = small_topology();
+        assert_eq!(topology.raw_bytes_per_token(), 28 * 4 * 128 * (2 + 2));
+        topology.v_bytes_per_elem = 1;
+        assert_eq!(topology.raw_bytes_per_token(), 28 * 4 * 128 * (2 + 1));
+        topology.has_v = false;
+        assert_eq!(topology.raw_bytes_per_token(), 28 * 4 * 128 * 2);
+    }
+
+    #[test]
+    fn invalid_topology_and_resource_observations_fail_closed() {
+        let mut bad = small_topology();
+        bad.layers = 0;
+        assert!(bad.try_raw_bytes_per_token().is_err());
+
+        let mut ctx = ElasticContext::new("ctx", 1 << 20, small_topology());
+        let obs = ContextObservation::new(1, 1, small_topology(), 1025, 1024, 1, 1);
+        assert!(ctx.step(&obs).is_err());
+        assert_eq!(ctx.telemetry.hard_constraint_violations, 1);
     }
 
     #[test]
@@ -465,6 +589,29 @@ mod tests {
         let action = ctx.step(&obs).unwrap();
         assert_eq!(action, ActionRequest::Demote);
         assert!(ctx.cache().resident_bytes() < before);
+    }
+
+    #[test]
+    fn high_system_vram_pressure_drives_real_demotion_without_growth() {
+        let budget = 1024;
+        let mut ctx = ElasticContext::new("ctx", budget, small_topology());
+        for _ in 0..4 {
+            ctx.cache_mut().insert(tile());
+        }
+        let before = ctx.cache().resident_bytes();
+        let obs = ContextObservation::new(
+            1,
+            4,
+            small_topology(),
+            100,
+            1000,
+            1000,
+            2000,
+        );
+        let action = ctx.step(&obs).unwrap();
+        assert_eq!(action, ActionRequest::Demote);
+        assert!(ctx.cache().resident_bytes() < before);
+        assert!((ctx.telemetry.vram_pressure - 0.9).abs() < 1e-12);
     }
 
     #[test]
