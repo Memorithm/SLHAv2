@@ -33,13 +33,37 @@ struct slha_layer_state;
 /** Experimental CPU-side compressed K tile store.
  *
  * One tile per (layer, cache position). Capacity is fixed per layer and
- * position indices are bounds-checked. No unbounded growth. */
+ * position indices are bounds-checked. No unbounded growth.
+ *
+ * Storage is an array of `alignas(128)` tile structs so every element is a
+ * valid `SciRustSlhaTile` target — the old `std::vector<std::byte>` storage
+ * had no alignment guarantee and callers cast its raw pointer to
+ * `const SciRustSlhaTile*`.
+ *
+ * Lifetime contract: `read()` returns a pointer that remains valid until the
+ * next write to the SAME slot, or any clear/reset of the store. Callers that
+ * need a pointer that outlives those operations must copy the tile out.
+ * Concurrent `write()`/`clear_layer()`/`reset()` on OTHER slots are safe
+ * (single mutex, no reallocation after init); concurrent access to the SAME
+ * slot is not safe to hold across the lock.
+ */
 struct slha_tile_store {
+    static constexpr size_t TILE_ALIGN = 128;
     size_t n_layers = 0;
     size_t capacity = 0;
     size_t tile_bytes = 0;
-    std::vector<std::byte> tiles;
+    // `alignas(128)` on the element type is dropped by std::vector (it only
+    // guarantees the type's natural alignment), so instead we keep the
+    // buffer as bytes and rely on a 128-aligned allocation: the base of the
+    // vector's heap buffer is at least `alignof(max_align_t)` and the tile
+    // stride is a multiple of 128, but that does NOT guarantee 128 alignment
+    // of every element. The correct fix is an aligned allocator; use the
+    // simplest sound one: allocate via `aligned_alloc`-style storage owned
+    // by the store itself (see init()), and expose `tile_base()`.
+    std::vector<unsigned char> tiles;
     std::vector<uint8_t> valid;
+    /// Base of the 128-aligned tile region (owned by `tiles` after init).
+    size_t tile_base_offset = 0;
     mutable std::mutex mutex;
 
     bool init(size_t n_layers, size_t capacity, size_t tile_bytes);
@@ -119,10 +143,13 @@ int slha_get_num_layers();
 
 slha_layer_state * slha_get_layer_state(int32_t il);
 
-/** Intercept the default KV-cache allocation of llama.cpp for the K-cache tensor,
- *  substituting the large FP16/FP32 buffer with a compact 128-byte SLHAv2 tile buffer.
- *  Reduces memory physical size from (head_dim * n_kv_heads * n_tokens * sizeof(float))
- *  down to exactly (n_tokens * 128) bytes. */
+/** Hook at the K-cache allocation seam.
+ *
+ * The GGML K tensor keeps its real type and shape (this hook never mutates
+ * tensor metadata — the old ne[]/nb[] rewriting was an unsound physical-KV
+ * trick and is gone). SLHA tiles live in the external `g_slha_tile_store`,
+ * filled by the K-transform callbacks; the hook only validates runtime
+ * expectations and reports the projected reduction accounting. */
 void slha_intercept_k_cache_allocation(
     ggml_tensor * k_tensor,
     int64_t n_tokens,

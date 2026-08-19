@@ -480,8 +480,16 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
             return -1;
         }
 
-        // Create layer states for up to 128 layers (will be initialized on first use)
-        state.num_layers = 128;
+        // Create layer states sized from the model's OBSERVED layer count
+        // (graph builds call slha_get_layer_state before execution). The
+        // old fixed 128-layer array silently truncated larger models.
+        int32_t observed = g_observed_num_layers.load(std::memory_order_acquire);
+        if (observed <= 0) {
+            std::cerr << "[SLHA] layer-state init before any layer was "
+                         "observed; refusing to guess a layer count\n";
+            return -1;
+        }
+        state.num_layers = observed;
         state.layers.resize(state.num_layers);
         for (int32_t i = 0; i < state.num_layers; ++i) {
             state.layers[i].layer_id = i;
@@ -513,9 +521,25 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
         }
 
         // Initialize the compressed K side store.
+        //
+        // The store is sized from the model's OBSERVED layer count (graph
+        // builds call slha_get_layer_state before execution), not from an
+        // arbitrary 128-layer cap: a model with more layers must not be
+        // silently truncated. Layers beyond the observed count are rejected
+        // by the bounds checks.
         if (mode == SLHA_KV_TILESTORE || state.score_mode != SLHA_SCORE_OFF) {
-            const size_t n_layers = 128;
-            const size_t capacity = 16384; // max positions per layer (handles 12×512 chunks + margin)
+            int32_t observed = g_observed_num_layers.load(std::memory_order_acquire);
+            if (observed <= 0) {
+                std::cerr << "[SLHA] tile store init before any layer was "
+                             "observed; refusing to guess a layer count\n";
+                return -1;
+            }
+            const size_t n_layers = static_cast<size_t>(observed);
+            // Capacity per layer: positions are bounded by the KV cache the
+            // runtime actually allocates. 16384 remains the documented
+            // maximum supported by this tile-store layout; positions beyond
+            // it fail closed (write returns false, no silent truncation).
+            const size_t capacity = 16384;
             if (!g_slha_tile_store.init(n_layers, capacity, slha_tile_size())) {
                 std::cerr << "[SLHA] failed to initialize tile store\n";
                 return -1;
@@ -538,14 +562,22 @@ bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes
     if (tile_bytes == 0) {
         return false;
     }
-    tiles.assign(n_layers * capacity * tile_bytes, std::byte{0});
+    // 128-aligned tile region: allocate TILE_ALIGN-1 extra bytes and point
+    // the tile base at the first 128-aligned offset. Every element of the
+    // store then satisfies the `SciRustSlhaTile` alignment regardless of
+    // vector growth (the buffer never reallocates after init).
+    const size_t total = n_layers * capacity * tile_bytes;
+    tiles.assign(total + TILE_ALIGN - 1, 0);
+    const uintptr_t raw = reinterpret_cast<uintptr_t>(tiles.data());
+    const size_t pad = (TILE_ALIGN - (raw % TILE_ALIGN)) % TILE_ALIGN;
+    tile_base_offset = pad;
     valid.assign(n_layers * capacity, 0);
     return true;
 }
 
 void slha_tile_store::reset() {
     std::lock_guard<std::mutex> lock(mutex);
-    tiles.assign(tiles.size(), std::byte{0});
+    std::fill(tiles.begin(), tiles.end(), 0);
     std::fill(valid.begin(), valid.end(), 0);
 }
 
@@ -556,7 +588,7 @@ void slha_tile_store::clear_layer(int32_t layer_id) {
     if (layer >= n_layers || capacity == 0 || tile_bytes == 0) return;
     const size_t valid_base = layer * capacity;
     std::memset(&valid[valid_base], 0, capacity);
-    const size_t tile_byte_offset = layer * capacity * tile_bytes;
+    const size_t tile_byte_offset = tile_base_offset + layer * capacity * tile_bytes;
     std::memset(&tiles[tile_byte_offset], 0, capacity * tile_bytes);
 }
 
@@ -567,7 +599,7 @@ bool slha_tile_store::write(int32_t layer_id, size_t position, const void * tile
     if (layer >= n_layers || position >= capacity || tile_bytes == 0) {
         return false;
     }
-    const size_t idx = (layer * capacity + position) * tile_bytes;
+    const size_t idx = tile_base_offset + (layer * capacity + position) * tile_bytes;
     std::memcpy(tiles.data() + idx, tile, tile_bytes);
     valid[layer * capacity + position] = 1;
     return true;
@@ -583,7 +615,7 @@ const void * slha_tile_store::read(int32_t layer_id, size_t position) const {
     if (!valid[layer * capacity + position]) {
         return nullptr;
     }
-    return tiles.data() + (layer * capacity + position) * tile_bytes;
+    return tiles.data() + tile_base_offset + (layer * capacity + position) * tile_bytes;
 }
 
 bool slha_tile_store::check_capacity(int32_t layer_id, size_t position) const {
@@ -889,31 +921,35 @@ void slha_intercept_k_cache_allocation(
     int64_t head_dim,
     int64_t n_kv_heads
 ) {
+    // The previous implementation rewrote `k_tensor->ne[]/nb[]` to pretend a
+    // GGML K tensor was an I8 byte buffer (n_tokens * 128 bytes). That was
+    // not a sound physical KV implementation: the tensor had already been
+    // allocated with the real `type_k`, rewriting metadata does not change
+    // the physical allocation, `sizeof(float)` does not describe arbitrary
+    // GGML K types, and other llama.cpp code assumes the original shape.
+    //
+    // The honest design is an EXTERNAL SLHA-owned store (g_slha_tile_store)
+    // filled by the K-transform callbacks; the GGML cache tensor keeps its
+    // real type and shape. This function is retained as a hook point that
+    // validates the runtime's expectations and reports the accounting the
+    // external store replaces.
+    //
+    // Physical memory reduction is therefore delivered by the tile store,
+    // never by mutating the GGML tensor.
     if (!k_tensor) {
         return;
     }
 
-    // Calculate memory requirements
-    const int64_t original_bytes = n_tokens * head_dim * n_kv_heads * sizeof(float);
+    const int64_t original_bytes = n_tokens * head_dim * n_kv_heads * static_cast<int64_t>(ggml_type_size(k_tensor->type));
     const int64_t reduced_bytes = n_tokens * 128; // 128 bytes per token (SLHAv2 tile size)
 
-    // Substitute default size/elements to physically allocate only 128 bytes per token.
-    // We treat the K-cache tensor elements as 8-bit bytes (type GGML_TYPE_I8) of length (n_tokens * 128).
-    k_tensor->ne[0] = reduced_bytes;
-    k_tensor->ne[1] = 1;
-    k_tensor->ne[2] = 1;
-    k_tensor->ne[3] = 1;
-
-    // Strides
-    k_tensor->nb[0] = 1;
-    k_tensor->nb[1] = reduced_bytes;
-    k_tensor->nb[2] = reduced_bytes;
-    k_tensor->nb[3] = reduced_bytes;
-
-    std::cout << "[SLHA] Physical memory reduction active: substituted large K-cache tensor ("
-              << original_bytes << " bytes) with compact 128-byte/token quantized SLHAv2 tiles ("
-              << reduced_bytes << " bytes, " << (static_cast<double>(original_bytes) / reduced_bytes)
-              << "x reduction)!\n";
+    std::cout << "[SLHA] K-cache hook: GGML tensor keeps its real type/shape ("
+              << ggml_type_name(k_tensor->type) << ", " << original_bytes
+              << " bytes for " << n_tokens << " tokens x " << head_dim
+              << " x " << n_kv_heads << "); SLHA tiles live in the external "
+              << "tile store (" << reduced_bytes << " bytes, "
+              << (static_cast<double>(original_bytes) / static_cast<double>(std::max<int64_t>(reduced_bytes, 1)))
+              << "x projected reduction).\n";
 }
 
 namespace {
@@ -929,9 +965,12 @@ int32_t slha_codec_from_env() {
     if (codec_str == "grouped") return SLHA_CODEC_INT4_GROUPED;
     if (codec_str == "nf4")    return SLHA_CODEC_NF4;
     if (codec_str == "tq3")    return SLHA_CODEC_TQ3;
+    // Unknown codecs FAIL CLOSED: silently mapping an explicit user choice
+    // to another codec corrupts reproducibility (P1-6). A permissive mode
+    // may exist later only with explicit telemetry recording the fallback.
     std::cerr << "[SLHA] unknown SLHA_CODEC='" << codec_str
-              << "', falling back to mixed\n";
-    return SLHA_CODEC_MIXED;
+              << "'; refusing to run with a silently substituted codec\n";
+    std::exit(1);
 }
 
 std::string slha_layer_path(const std::string & weights_dir, int32_t layer_id) {
