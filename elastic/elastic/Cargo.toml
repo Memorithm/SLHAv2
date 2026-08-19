@@ -1,0 +1,15 @@
+[package]
+name = "elastic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Elastic resource language facade: the intended public programming model for adaptive resources."
+keywords = ["elastic", "resource", "language"]
+categories = ["algorithms"]
+
+[dependencies]
+elastic-core = { path = "../elastic-core" }
+elastic-runtime = { path = "../elastic-runtime" }
+elastic-macros = { path = "../elastic-macros" }

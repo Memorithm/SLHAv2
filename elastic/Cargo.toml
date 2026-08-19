@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "elastic-core",
+    "elastic-runtime",
+    "elastic-macros",
+    "elastic-testkit",
+    "elastic",
+]
+default-members = ["elastic-core", "elastic-runtime", "elastic-macros", "elastic-testkit", "elastic"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "PolyForm-Noncommercial-1.0.0"
+authors = ["Forge CHECKUPAUTO <forge@checkupauto.io>"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

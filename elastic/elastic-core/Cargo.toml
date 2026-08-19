@@ -1,0 +1,12 @@
+[package]
+name = "elastic-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Elastic resource language core: generic constrained adaptive-resource control (ECA) traits and types."
+keywords = ["elastic", "resource", "control", "adaptation"]
+categories = ["algorithms", "no-std"]
+
+[dependencies]

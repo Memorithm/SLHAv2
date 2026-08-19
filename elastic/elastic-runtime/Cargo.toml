@@ -1,0 +1,13 @@
+[package]
+name = "elastic-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Elastic resource language runtime: observers, controllers, telemetry, journaling, coordination."
+keywords = ["elastic", "runtime", "control", "telemetry"]
+categories = ["algorithms"]
+
+[dependencies]
+elastic-core = { path = "../elastic-core" }
