@@ -1,15 +1,11 @@
-//! The generic Elastic Control Algorithm (ECA) controller.
+//! Generic Elastic Control Algorithm (ECA).
 //!
-//! The controller is generic over the resource's observation type and the
-//! backend that executes actions. It implements the full cycle:
-//!
-//! ```text
-//! OBSERVE → MODEL → PREDICT → OPTIMIZE → ACT → VERIFY → LEARN
-//! ```
-//!
-//! with hard constraints (`ElasticConstraints`) evaluated before any utility
-//! optimization, hysteresis/anti-thrash, deterministic forecasting, and
-//! decision traces for explainability and dry-run mode.
+//! The controller implements the deterministic cycle
+//! `OBSERVE → MODEL → PREDICT → OPTIMIZE → ACT → VERIFY → LEARN`.
+//! Generic backend actions are verified but are not implicitly claimed to be
+//! transactional: resources needing rollback must either expose an atomic
+//! backend operation or use the explicit [`crate::transaction`] seam. The
+//! SLHAv2 physical cache uses snapshot/rollback around multi-slot actions.
 
 use crate::budget::BudgetTree;
 use crate::decision::{Candidate, DecisionTrace, Rejection};
@@ -20,24 +16,23 @@ use crate::reason::{code, Reason};
 use crate::transaction::{run_transaction, Transaction, TransitionOutcome};
 use crate::{ElasticResource, LogicalStep, StateId};
 
-/// An observation of the resource state at one step.
+/// Resource state observed at one deterministic logical step.
 #[derive(Clone, Debug)]
 pub struct Observation {
-    /// Logical step (injected clock; deterministic mode never uses
-    /// wall-clock time).
+    /// Injected logical clock.
     pub step: LogicalStep,
-    /// Bytes currently committed/used by the resource.
+    /// Bytes currently committed by the resource.
     pub used_bytes: u64,
-    /// Total capacity the resource can commit (hard physical/format bound).
+    /// Runtime physical/format capacity.
     pub capacity_bytes: u64,
-    /// Application-level demand signal (tokens, queue length, …).
+    /// Application demand signal (tokens, queue length, etc.).
     pub demand: f64,
-    /// Extra domain observations (latency, quality, …); optional.
+    /// Optional domain-specific observation.
     pub extra: f64,
 }
 
 impl Observation {
-    /// Create an observation.
+    /// Construct an observation with `extra = 0`.
     pub const fn new(step: LogicalStep, used_bytes: u64, capacity_bytes: u64, demand: f64) -> Self {
         Self {
             step,
@@ -49,108 +44,101 @@ impl Observation {
     }
 }
 
-/// A backend action request produced by the controller.
+/// Backend action selected by the ECA.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionRequest {
-    /// Nothing to do.
+    /// No adaptation.
     None,
-    /// Demote units (release bytes).
+    /// Release bytes by moving to a cheaper representation.
     Demote,
-    /// Promote units (restore bytes).
+    /// Restore bytes to a richer representation.
     Promote,
-    /// Offload units to a slower tier.
+    /// Move bytes to a slower/non-resident tier.
     Offload,
-    /// Restore units from a slower tier.
+    /// Restore bytes from a slower/non-resident tier.
     Restore,
-    /// Prefetch units predicted to be needed.
+    /// Prefetch predicted-needed data.
     Prefetch,
-    /// Rebalance between tiers.
+    /// Rebalance resources between tiers.
     Rebalance,
-    /// Explicit operator action (already applied; just verified).
+    /// Explicit externally initiated action.
     Operator(&'static str),
 }
 
 impl ActionRequest {
-    /// Stable name for traces.
+    /// Stable action name for traces and telemetry.
     pub fn name(&self) -> &'static str {
         match self {
-            ActionRequest::None => "none",
-            ActionRequest::Demote => "demote",
-            ActionRequest::Promote => "promote",
-            ActionRequest::Offload => "offload",
-            ActionRequest::Restore => "restore",
-            ActionRequest::Prefetch => "prefetch",
-            ActionRequest::Rebalance => "rebalance",
-            ActionRequest::Operator(a) => a,
+            Self::None => "none",
+            Self::Demote => "demote",
+            Self::Promote => "promote",
+            Self::Offload => "offload",
+            Self::Restore => "restore",
+            Self::Prefetch => "prefetch",
+            Self::Rebalance => "rebalance",
+            Self::Operator(name) => name,
         }
     }
 }
 
-/// The decision a controller step produces.
+/// Decision and complete explainability trace for one step.
 #[derive(Clone, Debug)]
 pub struct Decision {
-    /// The action to execute.
+    /// Selected action.
     pub action: ActionRequest,
-    /// Full trace for explainability / journaling.
+    /// Decision trace.
     pub trace: DecisionTrace,
 }
 
-/// How a backend executes an action. The controller never mutates resources
-/// directly; the backend does, through this trait (optionally
-/// transactionally).
+/// Backend contract for one ECA resource.
+///
+/// Each mutating method must either be atomic for that resource or be wrapped
+/// in an explicit transaction by the caller. [`ElasticController::step`] never
+/// fabricates rollback semantics that the backend cannot provide.
 pub trait ElasticBackend {
-    /// Error type for backend operations.
+    /// Backend error type.
     type Error: core::fmt::Debug;
 
-    /// Execute a demote action (release a target amount).
+    /// Release approximately `target_bytes` through demotion.
     fn demote(&mut self, target_bytes: u64) -> Result<u64, Self::Error>;
-
-    /// Execute a promote action (restore a target amount).
+    /// Restore approximately `target_bytes` through promotion.
     fn promote(&mut self, target_bytes: u64) -> Result<u64, Self::Error>;
-
-    /// Execute an offload action.
+    /// Release approximately `target_bytes` through offload.
     fn offload(&mut self, target_bytes: u64) -> Result<u64, Self::Error>;
-
-    /// Execute a restore action.
+    /// Restore approximately `target_bytes` from offload.
     fn restore(&mut self, target_bytes: u64) -> Result<u64, Self::Error>;
-
-    /// Execute a prefetch action.
+    /// Prefetch predicted-needed data.
     fn prefetch(&mut self) -> Result<(), Self::Error>;
-
-    /// Execute a rebalance action.
+    /// Rebalance tiers/resources.
     fn rebalance(&mut self) -> Result<(), Self::Error>;
-
-    /// Verify that the post-action state satisfies the hard invariants
-    /// (budget, residency, pins). Returns `Ok(true)` when verified.
+    /// Verify the backend after an action. `expected_used` is the controller's
+    /// saturating estimate based on the backend-reported byte delta.
     fn verify(&mut self, expected_used: u64) -> Result<bool, Self::Error>;
 }
 
-/// Configuration of the generic controller.
+/// Deterministic ECA configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct ControllerConfig {
-    /// Hysteresis watermarks.
+    /// Hysteresis pressure watermarks.
     pub watermarks: Watermarks,
-    /// Cooldown steps after an action (anti-thrash).
+    /// Cooldown after an action.
     pub cooldown_steps: u64,
-    /// Minimum steps between two adaptations.
+    /// Minimum interval between adaptations.
     pub min_interval_steps: u64,
     /// EWMA alpha for pressure smoothing.
     pub smooth_alpha: f64,
-    /// EWMA beta for the trend.
+    /// Trend beta for forecasting.
     pub trend_beta: f64,
-    /// Maximum absolute trend per step.
+    /// Maximum absolute forecast trend per step.
     pub max_trend: f64,
-    /// If `true`, run in dry-run mode: produce decisions but never execute.
+    /// Produce decisions without executing backend actions.
     pub dry_run: bool,
-    /// If `true`, use transactional transitions (requires a transactional
-    /// backend).
-    pub transactional: bool,
-    /// Forecast horizon in steps for exhaustion prediction.
+    /// Forecast horizon used for predictive exhaustion.
     pub forecast_horizon: u64,
 }
 
 impl ControllerConfig {
-    /// A deterministic default configuration.
+    /// Standard deterministic policy.
     pub const fn standard() -> Self {
         Self {
             watermarks: Watermarks::standard(),
@@ -160,12 +148,11 @@ impl ControllerConfig {
             trend_beta: 0.2,
             max_trend: 0.1,
             dry_run: false,
-            transactional: true,
             forecast_horizon: 4,
         }
     }
 
-    /// Same as [`Self::standard`] but in dry-run (explain) mode.
+    /// Standard policy in decision-only/explain mode.
     pub const fn explain() -> Self {
         Self {
             dry_run: true,
@@ -174,11 +161,7 @@ impl ControllerConfig {
     }
 }
 
-/// The generic Elastic controller.
-///
-/// `R` is the resource, `B` the backend. The controller is deterministic:
-/// given the same observations, budgets, history and configuration it
-/// produces the same decisions.
+/// Deterministic controller for resource `R` and backend `B`.
 pub struct ElasticController<R, B> {
     resource: R,
     backend: B,
@@ -189,15 +172,15 @@ pub struct ElasticController<R, B> {
     forecast: Forecast,
     gate: HysteresisGate,
     last_action_step: LogicalStep,
-    /// Step of the last promotion (0 = never).
     last_promoted_step: LogicalStep,
     last_pressure: f64,
     history: alloc::vec::Vec<f64>,
 }
 
 impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
-    /// Create a controller with an initial budget tree. `budget_node` is the
-    /// node this resource commits against (hierarchical coordination).
+    /// Construct a controller. When `budget_node` exists, its hard limit
+    /// tightens runtime capacity and its soft target becomes the preferred
+    /// recovery occupancy.
     pub fn new(
         resource: R,
         backend: B,
@@ -226,22 +209,22 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
         }
     }
 
-    /// The resource under control.
+    /// Controlled resource.
     pub fn resource(&self) -> &R {
         &self.resource
     }
 
-    /// The backend (read access for telemetry).
+    /// Backend read access for telemetry.
     pub fn backend(&self) -> &B {
         &self.backend
     }
 
-    /// The budget tree (read access for telemetry/reporting).
+    /// Budget tree read access.
     pub fn budget(&self) -> &BudgetTree {
         &self.budget
     }
 
-    /// The resource's budget node, if configured.
+    /// Configured resource budget node.
     pub fn budget_node(&self) -> Option<usize> {
         self.budget_node
     }
@@ -251,32 +234,28 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
         self.last_pressure
     }
 
-    /// The recent pressure history (bounded; for LEARN/telemetry).
+    /// Bounded recent pressure history.
     pub fn history(&self) -> &[f64] {
         &self.history
     }
 
-    /// Compute a deterministic state id from the current budget/history.
+    /// Deterministic state identifier.
     pub fn state_id(&self) -> StateId {
-        let mut h = crate::StateId::default();
-        h = h
+        let mut hash = crate::StateId::default();
+        hash = hash
             .wrapping_mul(31)
             .wrapping_add(self.last_pressure.to_bits());
-        h = h
+        hash = hash
             .wrapping_mul(31)
             .wrapping_add(self.budget.total_committed());
-        h = h.wrapping_mul(31).wrapping_add(self.history.len() as u64);
-        h
+        hash.wrapping_mul(31)
+            .wrapping_add(self.history.len() as u64)
     }
 
-    /// Run one control step. This is the ECA cycle entry point.
-    ///
-    /// Returns the decision; when not in dry-run, the backend executes it and
-    /// the trace is completed with the actual outcome and verification.
+    /// Execute one complete ECA cycle.
     pub fn step(&mut self, obs: Observation) -> Result<Decision, B::Error> {
-        // ── OBSERVE ──────────────────────────────────────────────────────────
-        let raw_pressure =
-            Pressure::from_used(obs.used_bytes, obs.capacity_bytes, self.config.watermarks);
+        let capacity = self.effective_capacity(obs.capacity_bytes);
+        let raw_pressure = Pressure::from_used(obs.used_bytes, capacity, self.config.watermarks);
         let smoothed = self.smoother.push(raw_pressure.value);
         self.last_pressure = smoothed;
         self.history.push(smoothed);
@@ -284,7 +263,6 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
             self.history.remove(0);
         }
 
-        // ── MODEL / PREDICT ──────────────────────────────────────────────────
         self.forecast.observe(smoothed);
         let forecast_pressure = self.forecast.forecast(self.config.forecast_horizon);
         let exhaustion = steps_to_exhaustion(&self.forecast, 1.0);
@@ -294,38 +272,23 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
         trace.pressure_level = raw_pressure.level;
         trace.forecast_pressure = Some(forecast_pressure.clamp(0.0, 1.0));
 
-        // ── OPTIMIZE ─────────────────────────────────────────────────────────
-        // Hard constraints first: critical pressure overrides everything.
         let action = if raw_pressure.level == PressureLevel::Critical {
+            let bytes_over = obs.used_bytes.saturating_sub(capacity);
             trace.consider(
-                Candidate::new(
-                    "demote",
-                    obs.used_bytes.saturating_sub(obs.capacity_bytes) as f64,
-                    0.0,
-                    0.0,
-                    0.0,
-                ),
+                Candidate::new("demote", bytes_over as f64, 0.0, 0.0, 0.0),
                 None,
             );
             trace.choose(
                 ActionRequest::Demote.name(),
                 Reason::new(code::HARD_CONSTRAINT),
-                obs.used_bytes.saturating_sub(obs.capacity_bytes) as f64,
+                bytes_over as f64,
                 0.0,
             );
             ActionRequest::Demote
         } else if let Some(steps) = exhaustion {
             if steps <= self.config.forecast_horizon && !self.gate.state().is_active() {
-                // Predictive elasticity: act before exhaustion (but never
-                // re-fire while the hysteresis gate is already active).
                 trace.consider(
-                    Candidate::new(
-                        "demote",
-                        (obs.used_bytes - obs.capacity_bytes.min(obs.used_bytes)) as f64,
-                        0.0,
-                        0.0,
-                        0.0,
-                    ),
+                    Candidate::new("demote", self.release_target(obs.used_bytes, capacity) as f64, 0.0, 0.0, 0.0),
                     None,
                 );
                 trace.choose(
@@ -336,14 +299,10 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
                 );
                 ActionRequest::Demote
             } else {
-                self.no_action(&mut trace, &obs);
+                self.no_action(&mut trace);
                 ActionRequest::None
             }
         } else if self.gate.update(smoothed, obs.step) {
-            // The gate reports the action should be held (Active) or has just
-            // been entered; execute only when the gate is Active (the very
-            // first activation sets it Active), and never re-execute an
-            // already-executed step.
             if self.gate.state().is_active()
                 && (self.last_action_step != self.gate.last_action_step()
                     || self.last_action_step == 0)
@@ -357,21 +316,18 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
                 );
                 ActionRequest::Demote
             } else {
-                self.no_action(&mut trace, &obs);
+                self.no_action(&mut trace);
                 ActionRequest::None
             }
         } else if smoothed <= self.config.watermarks.low
             && self.gate.state() == crate::hysteresis::HysteresisState::Idle
         {
-            // Low pressure: promote exactly once per pressure episode. The
-            // cooldown (keyed on the gate's last-action step) prevents
-            // re-promoting every step; the min-interval guard prevents
-            // promote/demote oscillation.
             if self.gate.in_cooldown(obs.step) {
-                self.no_action(&mut trace, &obs);
+                self.no_action(&mut trace);
                 ActionRequest::None
             } else if self.last_promoted_step == 0
-                || obs.step.saturating_sub(self.last_promoted_step) > self.config.cooldown_steps * 2
+                || obs.step.saturating_sub(self.last_promoted_step)
+                    > self.config.cooldown_steps.saturating_mul(2)
             {
                 self.last_promoted_step = obs.step;
                 self.gate.note_opposite_action(obs.step);
@@ -384,27 +340,50 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
                 );
                 ActionRequest::Promote
             } else {
-                self.no_action(&mut trace, &obs);
+                self.no_action(&mut trace);
                 ActionRequest::None
             }
         } else {
-            // Idle normal band: nothing to do.
-            self.no_action(&mut trace, &obs);
+            self.no_action(&mut trace);
             ActionRequest::None
         };
 
         let mut decision = Decision { action, trace };
-
-        // ── ACT / VERIFY ─────────────────────────────────────────────────────
         if !self.config.dry_run && action != ActionRequest::None {
-            let (outcome, verified) = self.execute(action, obs)?;
+            let (outcome, verified) = self.execute(action, &obs, capacity)?;
             decision.trace.complete(outcome, verified);
         }
-
         Ok(decision)
     }
 
-    fn no_action(&mut self, trace: &mut DecisionTrace, _obs: &Observation) {
+    fn effective_capacity(&self, runtime_capacity: u64) -> u64 {
+        let budget_limit = self
+            .budget_node
+            .and_then(|index| self.budget.node(index).ok())
+            .map(|node| node.hard_limit)
+            .unwrap_or(runtime_capacity);
+        runtime_capacity.min(budget_limit)
+    }
+
+    fn recovery_target(&self, capacity: u64) -> u64 {
+        let configured = self
+            .budget_node
+            .and_then(|index| self.budget.node(index).ok())
+            .map(|node| node.soft_target)
+            .filter(|&target| target > 0)
+            .unwrap_or_else(|| capacity.saturating_mul(3) / 4);
+        configured.min(capacity)
+    }
+
+    fn release_target(&self, used: u64, capacity: u64) -> u64 {
+        used.saturating_sub(self.recovery_target(capacity))
+    }
+
+    fn restore_target(&self, used: u64, capacity: u64) -> u64 {
+        self.recovery_target(capacity).saturating_sub(used)
+    }
+
+    fn no_action(&self, trace: &mut DecisionTrace) {
         trace.consider(
             Candidate::new("none", 0.0, 0.0, 0.0, 0.0),
             Some(Rejection::CostTooHigh),
@@ -414,26 +393,24 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
     fn execute(
         &mut self,
         action: ActionRequest,
-        obs: Observation,
+        obs: &Observation,
+        capacity: u64,
     ) -> Result<(&'static str, bool), B::Error> {
-        let target = obs
-            .used_bytes
-            .saturating_sub(obs.capacity_bytes.saturating_mul(3) / 4);
         let (outcome, expected_used) = match action {
             ActionRequest::Demote => {
-                let released = self.backend.demote(target)?;
+                let released = self.backend.demote(self.release_target(obs.used_bytes, capacity))?;
                 ("demoted", obs.used_bytes.saturating_sub(released))
             }
             ActionRequest::Promote => {
-                let restored = self.backend.promote(target)?;
+                let restored = self.backend.promote(self.restore_target(obs.used_bytes, capacity))?;
                 ("promoted", obs.used_bytes.saturating_add(restored))
             }
             ActionRequest::Offload => {
-                let released = self.backend.offload(target)?;
+                let released = self.backend.offload(self.release_target(obs.used_bytes, capacity))?;
                 ("offloaded", obs.used_bytes.saturating_sub(released))
             }
             ActionRequest::Restore => {
-                let restored = self.backend.restore(target)?;
+                let restored = self.backend.restore(self.restore_target(obs.used_bytes, capacity))?;
                 ("restored", obs.used_bytes.saturating_add(restored))
             }
             ActionRequest::Prefetch => {
@@ -447,20 +424,118 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
             ActionRequest::None => ("none", obs.used_bytes),
             ActionRequest::Operator(name) => (name, obs.used_bytes),
         };
-        // Verify the post-action invariant (budget/residency).
         let verified = self.backend.verify(expected_used)?;
         Ok((outcome, verified))
     }
 
-    /// Run a transactional transition through the backend, if supported.
-    ///
-    /// `T` is a transaction whose state is `S`; this is the generic
-    /// transactional seam (see [`run_transaction`]).
+    /// Run an explicit prepare/validate/commit/rollback transition.
     pub fn run_transaction<T: Transaction<State = S> + crate::transaction::RollbackAware, S>(
         &mut self,
         tx: &mut T,
         state: &mut S,
     ) -> TransitionOutcome {
         run_transaction(tx, state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct Resource(&'static str);
+    impl ElasticResource for Resource {
+        fn resource_id(&self) -> &str {
+            self.0
+        }
+    }
+
+    #[derive(Default)]
+    struct Backend {
+        demoted: u64,
+        promoted: u64,
+        last_verified: u64,
+    }
+
+    impl ElasticBackend for Backend {
+        type Error = ();
+
+        fn demote(&mut self, bytes: u64) -> Result<u64, Self::Error> {
+            self.demoted = self.demoted.saturating_add(bytes);
+            Ok(bytes)
+        }
+        fn promote(&mut self, bytes: u64) -> Result<u64, Self::Error> {
+            self.promoted = self.promoted.saturating_add(bytes);
+            Ok(bytes)
+        }
+        fn offload(&mut self, bytes: u64) -> Result<u64, Self::Error> {
+            self.demote(bytes)
+        }
+        fn restore(&mut self, bytes: u64) -> Result<u64, Self::Error> {
+            self.promote(bytes)
+        }
+        fn prefetch(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn rebalance(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn verify(&mut self, expected: u64) -> Result<bool, Self::Error> {
+            self.last_verified = expected;
+            Ok(true)
+        }
+    }
+
+    fn controller(capacity: u64, soft: u64) -> ElasticController<Resource, Backend> {
+        let mut budget = BudgetTree::new();
+        let node = budget.add_root(0, capacity, soft, 0);
+        ElasticController::new(
+            Resource("test"),
+            Backend::default(),
+            ControllerConfig::standard(),
+            budget,
+            Some(node),
+        )
+    }
+
+    #[test]
+    fn low_pressure_promotion_requests_nonzero_bytes() {
+        let mut controller = controller(1000, 750);
+        let decision = controller.step(Observation::new(10, 100, 1000, 1.0)).unwrap();
+        assert_eq!(decision.action, ActionRequest::Promote);
+        assert_eq!(controller.backend().promoted, 650);
+        assert_eq!(controller.backend().last_verified, 750);
+    }
+
+    #[test]
+    fn high_pressure_demotes_toward_soft_target() {
+        let mut controller = controller(1000, 750);
+        let decision = controller.step(Observation::new(1, 1100, 2000, 1.0)).unwrap();
+        assert_eq!(decision.action, ActionRequest::Demote);
+        assert_eq!(controller.backend().demoted, 350);
+        assert_eq!(controller.backend().last_verified, 750);
+    }
+
+    #[test]
+    fn budget_hard_limit_tightens_runtime_capacity() {
+        let mut controller = controller(1000, 750);
+        let decision = controller.step(Observation::new(1, 1100, 10_000, 1.0)).unwrap();
+        assert_eq!(decision.action, ActionRequest::Demote);
+    }
+
+    #[test]
+    fn explain_mode_never_mutates_backend() {
+        let mut budget = BudgetTree::new();
+        let node = budget.add_root(0, 1000, 750, 0);
+        let mut controller = ElasticController::new(
+            Resource("test"),
+            Backend::default(),
+            ControllerConfig::explain(),
+            budget,
+            Some(node),
+        );
+        let decision = controller.step(Observation::new(1, 1100, 1000, 1.0)).unwrap();
+        assert_eq!(decision.action, ActionRequest::Demote);
+        assert_eq!(controller.backend().demoted, 0);
     }
 }
