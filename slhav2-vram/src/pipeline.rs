@@ -2,6 +2,7 @@ use crate::codec;
 use crate::mem::tile::SerializedTile;
 use crate::traits::{DeviceAllocation, DeviceEngine};
 
+/// Inputs for CPU reference scoring.
 pub struct ScoringInput<'a, E: DeviceEngine> {
     pub engine: &'a E,
     pub tiles: &'a [SerializedTile],
@@ -10,16 +11,50 @@ pub struct ScoringInput<'a, E: DeviceEngine> {
     pub scores: &'a mut [f32],
 }
 
-pub fn score_tiles_cpu(input: ScoringInput<'_, impl DeviceEngine<Alloc = impl DeviceAllocation>>) {
-    let q_coarse = input.q_coarse;
-    let q_sign = input.q_sign;
-    let scores = input.scores;
-
-    for (i, tile) in input.tiles.iter().enumerate() {
-        scores[i] = tile.score(q_coarse, q_sign);
+/// Checked CPU reference scoring.
+pub fn try_score_tiles_cpu<E: DeviceEngine>(input: ScoringInput<'_, E>) -> Result<(), String> {
+    if input.q_coarse.len() != codec::D_C {
+        return Err(format!(
+            "q_coarse must contain exactly {} f32 values, got {}",
+            codec::D_C,
+            input.q_coarse.len()
+        ));
     }
+    if input.q_sign.len() != codec::RESIDUAL_WORDS {
+        return Err(format!(
+            "q_sign must contain exactly {} u64 values, got {}",
+            codec::RESIDUAL_WORDS,
+            input.q_sign.len()
+        ));
+    }
+    if input.scores.len() < input.tiles.len() {
+        return Err(format!(
+            "scores has {} entries but {} tiles require scores",
+            input.scores.len(),
+            input.tiles.len()
+        ));
+    }
+    for (index, tile) in input.tiles.iter().enumerate() {
+        input.scores[index] = tile
+            .try_score(input.q_coarse, input.q_sign)
+            .map_err(|error| format!("tile {index}: {error}"))?;
+    }
+    Ok(())
 }
 
+/// Compatibility wrapper for CPU scoring.
+///
+/// Invalid input fails closed by zeroing the output instead of indexing past a
+/// caller-provided buffer. New code should use [`try_score_tiles_cpu`].
+pub fn score_tiles_cpu<E: DeviceEngine>(mut input: ScoringInput<'_, E>) {
+    input.scores.fill(0.0);
+    let _ = try_score_tiles_cpu(input);
+}
+
+/// Copy trusted serialized tiles to a generic device allocation.
+///
+/// CUDA production paths should prefer [`GpuScoringPipeline`], which validates
+/// codec flags before device mutation.
 pub fn copy_tiles_to_gpu<E: DeviceEngine>(
     engine: &E,
     tiles: &[SerializedTile],
@@ -30,14 +65,15 @@ pub fn copy_tiles_to_gpu<E: DeviceEngine>(
         .len()
         .checked_mul(codec::TILE_BYTES)
         .expect("copy_tiles_to_gpu: byte count overflow");
-    let mut buf = vec![0u8; total];
-    for (i, tile) in tiles.iter().enumerate() {
-        let off = i * codec::TILE_BYTES;
-        buf[off..off + codec::TILE_BYTES].copy_from_slice(&tile.0);
+    let mut buffer = vec![0u8; total];
+    for (index, tile) in tiles.iter().enumerate() {
+        let start = index * codec::TILE_BYTES;
+        buffer[start..start + codec::TILE_BYTES].copy_from_slice(&tile.0);
     }
-    engine.copy_to_device(&buf, dst_alloc, offset)
+    engine.copy_to_device(&buffer, dst_alloc, offset)
 }
 
+/// Copy little-endian f32 scores from a generic device allocation.
 pub fn copy_scores_from_gpu<E: DeviceEngine>(
     engine: &E,
     src_alloc: &E::Alloc,
@@ -45,65 +81,43 @@ pub fn copy_scores_from_gpu<E: DeviceEngine>(
     num_scores: usize,
 ) -> Result<Vec<f32>, E::Error> {
     let total = num_scores
-        .checked_mul(4)
+        .checked_mul(core::mem::size_of::<f32>())
         .expect("copy_scores_from_gpu: byte count overflow");
-    let mut buf = vec![0u8; total];
-    engine.copy_to_host(src_alloc, offset, &mut buf)?;
-    let scores = buf
+    let mut buffer = vec![0u8; total];
+    engine.copy_to_host(src_alloc, offset, &mut buffer)?;
+    Ok(buffer
         .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    Ok(scores)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
 }
 
-/// A persistent GPU scoring pipeline for the CUDA backend.
+/// Persistent validated CUDA scoring pipeline.
 ///
-/// The convenience helpers ([`copy_tiles_to_gpu`]/[`copy_scores_from_gpu`])
-/// re-upload the entire tile set and re-copy all scores on every call — for a
-/// growing KV cache scored every decode step that is O(cache) PCIe traffic
-/// per token, which negates the point of a device-resident arena.
-///
-/// This pipeline owns one persistent device arena plus a per-step staging
-/// buffer. It tracks which tiles changed since the last upload (a dirty
-/// bitmap) and issues only the dirty subset to the device on a stream,
-/// overlapping the H2D copy, the kernel launch and the D2H copy. The final
-/// sync is a single `cuStreamSynchronize` instead of a context-wide
-/// `cuCtxSynchronize` per batch.
-///
-/// Construction is hardware-bound (requires a live `cuda::CudaEngine`, a
-/// loaded module kernel and a device arena of `capacity_bytes`); see the CUDA
-/// integration tests for a full usage example. The type is absent when
-/// `build.rs` cannot generate PTX, even if the Cargo feature is enabled.
+/// Serialized 128-byte tiles remain resident in one device allocation. New
+/// tiles can be appended with [`Self::upload`], while existing slots can be
+/// replaced with [`Self::update_slot`] when an elastic transition changes a
+/// tile representation/flags. Every tile is codec-validated before host mirror
+/// or device state is modified.
 #[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 pub struct GpuScoringPipeline {
     engine: crate::backends::cuda::CudaEngine,
     kernel: crate::backends::cuda::CudaFunction,
     stream: crate::backends::cuda::CudaStream,
-    /// Persistent device arena of serialized tiles.
     tiles_dev: crate::backends::cuda::CudaAllocation,
-    /// Persistent device score buffer (one f32 per tile slot).
     scores_dev: crate::backends::cuda::CudaAllocation,
     q_coarse_dev: crate::backends::cuda::CudaAllocation,
     q_sign_dev: crate::backends::cuda::CudaAllocation,
-    /// Host-side mirror of the arena, for dirty comparison.
     host_tiles: Vec<u8>,
-    /// Per-tile dirty bits (1 = needs upload).
-    dirty: Vec<bool>,
-    /// Number of tiles currently resident.
     resident: usize,
-    /// Host staging buffer for the dirty subset.
     staging: Vec<u8>,
-    /// Host staging buffer for scores.
     score_buf: Vec<u8>,
-    /// Persistent q_coarse staging (D_C f32s).
     q_coarse_buf: Vec<u8>,
-    /// Persistent q_sign staging (RESIDUAL_WORDS u64s).
     q_sign_buf: Vec<u8>,
 }
 
 #[cfg(all(feature = "cuda", slhav2_cuda_ptx))]
 impl GpuScoringPipeline {
-    /// Create a pipeline with a persistent device arena of `capacity_bytes`.
+    /// Create a pipeline backed by `capacity_bytes` of device tile storage.
     pub fn new(
         engine: &crate::backends::cuda::CudaEngine,
         kernel: &crate::backends::cuda::CudaFunction,
@@ -115,10 +129,13 @@ impl GpuScoringPipeline {
                 "GpuScoringPipeline: capacity too small for one tile".into(),
             ));
         }
-        let tiles_dev = engine.allocate(capacity_bytes)?;
-        let scores_dev = engine.allocate(max_tiles * 4)?;
-        let q_coarse_dev = engine.allocate(codec::D_C * 4)?;
-        let q_sign_dev = engine.allocate(codec::RESIDUAL_WORDS * 8)?;
+        let usable_tile_bytes = max_tiles
+            .checked_mul(codec::TILE_BYTES)
+            .ok_or_else(|| crate::backends::cuda::CudaError("tile capacity overflow".into()))?;
+        let tiles_dev = engine.allocate(usable_tile_bytes)?;
+        let scores_dev = engine.allocate(max_tiles * core::mem::size_of::<f32>())?;
+        let q_coarse_dev = engine.allocate(codec::D_C * core::mem::size_of::<f32>())?;
+        let q_sign_dev = engine.allocate(codec::RESIDUAL_WORDS * core::mem::size_of::<u64>())?;
         let stream = crate::backends::cuda::CudaStream::new(engine)?;
         Ok(Self {
             engine: engine.clone(),
@@ -128,73 +145,69 @@ impl GpuScoringPipeline {
             scores_dev,
             q_coarse_dev,
             q_sign_dev,
-            host_tiles: vec![0u8; capacity_bytes],
-            dirty: vec![false; max_tiles],
+            host_tiles: vec![0u8; usable_tile_bytes],
             resident: 0,
             staging: vec![0u8; codec::TILE_BYTES],
-            score_buf: Vec::with_capacity(max_tiles * 4),
-            q_coarse_buf: vec![0u8; codec::D_C * 4],
-            q_sign_buf: vec![0u8; codec::RESIDUAL_WORDS * 8],
+            score_buf: Vec::with_capacity(max_tiles * core::mem::size_of::<f32>()),
+            q_coarse_buf: Vec::with_capacity(codec::D_C * core::mem::size_of::<f32>()),
+            q_sign_buf: Vec::with_capacity(codec::RESIDUAL_WORDS * core::mem::size_of::<u64>()),
         })
     }
 
-    /// Upload (or refresh) tiles into the persistent arena, uploading only the
-    /// dirty subset. Returns the slot of the first uploaded tile.
+    /// Append validated tiles and return the first assigned slot.
+    ///
+    /// Validation happens for the complete batch before the first device copy,
+    /// preventing a partially appended batch when a later tile has invalid
+    /// codec flags.
     pub fn upload(
         &mut self,
         tiles: &[SerializedTile],
     ) -> Result<usize, crate::backends::cuda::CudaError> {
         if tiles.is_empty() {
-            return Ok(0);
+            return Ok(self.resident);
         }
+        self.validate_tiles(tiles)?;
         let start = self.resident;
-        let needed = start + tiles.len();
-        if needed > self.dirty.len() {
+        let needed = start
+            .checked_add(tiles.len())
+            .ok_or_else(|| crate::backends::cuda::CudaError("resident tile count overflow".into()))?;
+        if needed > self.capacity_tiles() {
             return Err(crate::backends::cuda::CudaError(format!(
                 "GpuScoringPipeline: arena holds {} tiles, need {needed}",
-                self.dirty.len()
+                self.capacity_tiles()
             )));
         }
 
-        for (i, t) in tiles.iter().enumerate() {
-            let slot = start + i;
-            let off = slot * codec::TILE_BYTES;
-            // Compare against the host mirror; upload only if changed.
-            if self.host_tiles[off..off + codec::TILE_BYTES] != t.0 {
-                self.staging.copy_from_slice(&t.0);
-                self.engine
-                    .copy_to_device_at(&self.staging, &mut self.tiles_dev, off)?;
-                self.host_tiles[off..off + codec::TILE_BYTES].copy_from_slice(&t.0);
-            }
-            self.dirty[slot] = false;
+        for (offset, tile) in tiles.iter().enumerate() {
+            self.write_slot(start + offset, tile)?;
         }
         self.resident = needed;
         Ok(start)
     }
 
-    /// Score all resident tiles on the pipeline's stream, then sync. `scores`
-    /// must have at least `self.resident` entries.
+    /// Replace an existing resident slot after validating the tile.
+    pub fn update_slot(
+        &mut self,
+        slot: usize,
+        tile: &SerializedTile,
+    ) -> Result<(), crate::backends::cuda::CudaError> {
+        if slot >= self.resident {
+            return Err(crate::backends::cuda::CudaError(format!(
+                "GpuScoringPipeline: slot {slot} is not resident (resident={})",
+                self.resident
+            )));
+        }
+        self.validate_tile(slot, tile)?;
+        self.write_slot(slot, tile)
+    }
+
+    /// Score all resident tiles. Query dimensions must be exact.
     pub fn score_into(
         &mut self,
         q_coarse: &[f32],
         q_sign: &[u64],
         scores: &mut [f32],
     ) -> Result<(), crate::backends::cuda::CudaError> {
-        if self.resident == 0 {
-            return Ok(());
-        }
-        if scores.len() < self.resident {
-            return Err(crate::backends::cuda::CudaError(format!(
-                "GpuScoringPipeline: scores buffer has {} entries, need {}",
-                scores.len(),
-                self.resident
-            )));
-        }
-
-        // Validate the query before touching the device: the kernel assumes
-        // exactly D_C f32 coarse values and RESIDUAL_WORDS u64 sign words.
-        // A shorter query would leave stale bytes from a previous step in
-        // the persistent device buffers and silently produce wrong scores.
         if q_coarse.len() != codec::D_C {
             return Err(crate::backends::cuda::CudaError(format!(
                 "GpuScoringPipeline: q_coarse must be exactly {} f32 values, got {}",
@@ -209,22 +222,30 @@ impl GpuScoringPipeline {
                 q_sign.len()
             )));
         }
+        if scores.len() < self.resident {
+            return Err(crate::backends::cuda::CudaError(format!(
+                "GpuScoringPipeline: scores buffer has {} entries, need {}",
+                scores.len(),
+                self.resident
+            )));
+        }
+        if self.resident == 0 {
+            return Ok(());
+        }
 
-        // Refresh q on the device (query changes every step).
         self.q_coarse_buf.clear();
-        for &v in q_coarse {
-            self.q_coarse_buf.extend_from_slice(&v.to_le_bytes());
+        for &value in q_coarse {
+            self.q_coarse_buf.extend_from_slice(&value.to_le_bytes());
         }
         self.q_sign_buf.clear();
-        for &v in q_sign {
-            self.q_sign_buf.extend_from_slice(&v.to_le_bytes());
+        for &value in q_sign {
+            self.q_sign_buf.extend_from_slice(&value.to_le_bytes());
         }
         self.engine
             .copy_to_device_at(&self.q_coarse_buf, &mut self.q_coarse_dev, 0)?;
         self.engine
             .copy_to_device_at(&self.q_sign_buf, &mut self.q_sign_dev, 0)?;
 
-        // Launch on the stream.
         self.engine.score_tiles_on_stream(
             &self.q_coarse_dev,
             &self.q_sign_dev,
@@ -235,21 +256,128 @@ impl GpuScoringPipeline {
             &self.stream,
         )?;
 
-        // Async copy the scores back, then sync once.
-        let nbytes = self.resident * 4;
+        let nbytes = self
+            .resident
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| crate::backends::cuda::CudaError("score byte count overflow".into()))?;
         self.score_buf.resize(nbytes, 0);
-        self.engine
-            .copy_to_host_async(&self.scores_dev, 0, &mut self.score_buf, &self.stream)?;
+        self.engine.copy_to_host_async(
+            &self.scores_dev,
+            0,
+            &mut self.score_buf,
+            &self.stream,
+        )?;
         self.stream.synchronize()?;
 
-        for (i, c) in self.score_buf.chunks_exact(4).enumerate() {
-            scores[i] = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        for (index, chunk) in self.score_buf.chunks_exact(4).enumerate() {
+            scores[index] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         Ok(())
     }
 
-    /// Number of tiles currently resident in the persistent arena.
+    /// Number of active resident slots.
     pub fn resident(&self) -> usize {
         self.resident
+    }
+
+    /// Maximum number of serialized tiles in the device arena.
+    pub fn capacity_tiles(&self) -> usize {
+        self.host_tiles.len() / codec::TILE_BYTES
+    }
+
+    fn validate_tiles(
+        &self,
+        tiles: &[SerializedTile],
+    ) -> Result<(), crate::backends::cuda::CudaError> {
+        for (offset, tile) in tiles.iter().enumerate() {
+            self.validate_tile(self.resident + offset, tile)?;
+        }
+        Ok(())
+    }
+
+    fn validate_tile(
+        &self,
+        slot: usize,
+        tile: &SerializedTile,
+    ) -> Result<(), crate::backends::cuda::CudaError> {
+        codec::validate_codec(tile.flags()).map_err(|error| {
+            crate::backends::cuda::CudaError(format!(
+                "GpuScoringPipeline: invalid codec flags for slot {slot}: {error}"
+            ))
+        })
+    }
+
+    fn write_slot(
+        &mut self,
+        slot: usize,
+        tile: &SerializedTile,
+    ) -> Result<(), crate::backends::cuda::CudaError> {
+        let offset = slot
+            .checked_mul(codec::TILE_BYTES)
+            .ok_or_else(|| crate::backends::cuda::CudaError("tile offset overflow".into()))?;
+        let end = offset
+            .checked_add(codec::TILE_BYTES)
+            .ok_or_else(|| crate::backends::cuda::CudaError("tile end overflow".into()))?;
+        if end > self.host_tiles.len() {
+            return Err(crate::backends::cuda::CudaError(format!(
+                "GpuScoringPipeline: slot {slot} exceeds arena capacity {}",
+                self.capacity_tiles()
+            )));
+        }
+        if self.host_tiles[offset..end] == tile.0 {
+            return Ok(());
+        }
+        self.staging.copy_from_slice(&tile.0);
+        self.engine
+            .copy_to_device_at(&self.staging, &mut self.tiles_dev, offset)?;
+        self.host_tiles[offset..end].copy_from_slice(&tile.0);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::cpu::CpuEngine;
+
+    fn valid_tile() -> SerializedTile {
+        let mut tile = SerializedTile::zeroed();
+        tile.set_scale(1.0);
+        tile.set_group_scales(&[255; codec::N_GROUP_SCALES]);
+        tile
+    }
+
+    #[test]
+    fn checked_cpu_scoring_rejects_short_output() {
+        let engine = CpuEngine::new();
+        let tiles = [valid_tile(), valid_tile()];
+        let query = [0.0f32; codec::D_C];
+        let signs = [0u64; codec::RESIDUAL_WORDS];
+        let mut scores = [1.0f32; 1];
+        let result = try_score_tiles_cpu(ScoringInput {
+            engine: &engine,
+            tiles: &tiles,
+            q_coarse: &query,
+            q_sign: &signs,
+            scores: &mut scores,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compatibility_cpu_wrapper_fails_closed() {
+        let engine = CpuEngine::new();
+        let tiles = [valid_tile(), valid_tile()];
+        let query = [0.0f32; codec::D_C];
+        let signs = [0u64; codec::RESIDUAL_WORDS];
+        let mut scores = [7.0f32; 1];
+        score_tiles_cpu(ScoringInput {
+            engine: &engine,
+            tiles: &tiles,
+            q_coarse: &query,
+            q_sign: &signs,
+            scores: &mut scores,
+        });
+        assert_eq!(scores, [0.0]);
     }
 }
