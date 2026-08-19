@@ -1,34 +1,3 @@
-# Rust build artifacts
-target/
-
-# Cargo lock file (generated)
-# Uncomment if you want to ignore Cargo.lock
-# Cargo.lock
-
-# IDE files
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Benchmark reports
-*.svg
-*.html
-
-# Python artifacts (scripts/dump_activations.py)
-__pycache__/
-*.pyc
-
-# Trained projection weights (scirust::weights / train_on_real_activations)
-*.slhw
-
-# Rapport slha-audit genere (host-specific, ex. aarch64 NEON/cache)
-/audit.json
-
-# Generated CUDA PTX artifacts
-/slhav2-vram/kernels/*.ptx
+/target
+**/*.rs.bk
+.commandcode/
