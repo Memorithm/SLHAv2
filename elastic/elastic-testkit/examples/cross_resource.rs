@@ -1,14 +1,14 @@
-//! Cross-resource example: ElasticQueue + ElasticWorkers sharing a
-//! coordinator budget — proves the ECA coordinates TWO resources with one
-//! shared hierarchical budget.
+//! Cross-resource example: two local ECAs admitted through one real shared
+//! [`ElasticCoordinator`] budget.
 //!
-//! Run: `cargo run -p elastic-testkit --example cross_resource`
+//! The controllers retain independent local pressure models, while the
+//! coordinator is the single authority for shared byte commitments.
 
-use elastic_core::budget::BudgetTree;
 use elastic_core::controller::{
-    ActionRequest, ControllerConfig, ElasticBackend, ElasticController, Observation,
+    ControllerConfig, ElasticBackend, ElasticController, Observation,
 };
 use elastic_core::ElasticResource;
+use elastic_runtime::coordinator::ElasticCoordinator;
 
 #[derive(Debug, Clone)]
 struct QueueResource(String);
@@ -31,77 +31,153 @@ struct CountingBackend {
     released: u64,
     restored: u64,
 }
+
 impl ElasticBackend for CountingBackend {
     type Error = &'static str;
+
     fn demote(&mut self, target_bytes: u64) -> Result<u64, Self::Error> {
-        self.released += target_bytes;
+        self.released = self.released.saturating_add(target_bytes);
         Ok(target_bytes)
     }
+
     fn promote(&mut self, target_bytes: u64) -> Result<u64, Self::Error> {
-        self.restored += target_bytes;
+        self.restored = self.restored.saturating_add(target_bytes);
         Ok(target_bytes)
     }
+
     fn offload(&mut self, target_bytes: u64) -> Result<u64, Self::Error> {
         self.demote(target_bytes)
     }
+
     fn restore(&mut self, target_bytes: u64) -> Result<u64, Self::Error> {
         self.promote(target_bytes)
     }
+
     fn prefetch(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+
     fn rebalance(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+
     fn verify(&mut self, _expected_used: u64) -> Result<bool, Self::Error> {
         Ok(true)
     }
 }
 
-fn main() {
-    // Shared hierarchical budget: org -> tenant -> session -> {queue, workers}.
-    let mut tree = BudgetTree::new();
-    let org = tree.add_root(0, 100_000, 80_000, 20_000);
-    let tenant = tree.add_child(org, 5, 60_000, 50_000, 10_000).unwrap();
-    let session = tree.add_child(tenant, 5, 40_000, 30_000, 5_000).unwrap();
-    let queue_node = tree.add_child(session, 5, 20_000, 15_000, 0).unwrap();
-    let workers_node = tree.add_child(session, 5, 20_000, 15_000, 0).unwrap();
+fn set_commitment(
+    coordinator: &mut ElasticCoordinator,
+    resource: &str,
+    current: u64,
+    desired: u64,
+) -> u64 {
+    if desired > current {
+        let delta = desired - current;
+        if coordinator.commit(resource, delta).is_ok() {
+            desired
+        } else {
+            current
+        }
+    } else if current > desired {
+        let delta = current - desired;
+        coordinator
+            .release(resource, delta)
+            .expect("resource owns its previous commitment");
+        desired
+    } else {
+        current
+    }
+}
 
+fn main() {
+    let mut coordinator = ElasticCoordinator::new();
+    let org = coordinator.tree_mut().add_root(0, 100_000, 80_000, 0);
+    let tenant = coordinator
+        .tree_mut()
+        .add_child(org, 5, 60_000, 50_000, 0)
+        .unwrap();
+    let session = coordinator
+        .tree_mut()
+        .add_child(tenant, 5, 30_000, 26_000, 0)
+        .unwrap();
+    let queue_node = coordinator
+        .tree_mut()
+        .add_child(session, 5, 20_000, 15_000, 4_000)
+        .unwrap();
+    let workers_node = coordinator
+        .tree_mut()
+        .add_child(session, 5, 20_000, 15_000, 4_000)
+        .unwrap();
+    coordinator.register("queue", queue_node, 5).unwrap();
+    coordinator.register("workers", workers_node, 5).unwrap();
+
+    // Controllers get the same static topology/limits, while live commitments
+    // are admitted through the single coordinator above.
+    let topology = coordinator.tree().clone();
     let mut queue = ElasticController::new(
         QueueResource("queue".into()),
         CountingBackend::default(),
         ControllerConfig::standard(),
-        tree.clone(),
+        topology.clone(),
         Some(queue_node),
     );
     let mut workers = ElasticController::new(
         WorkerResource("workers".into()),
         CountingBackend::default(),
         ControllerConfig::standard(),
-        tree,
+        topology,
         Some(workers_node),
     );
 
-    // Queue pressure rises while workers stay moderate.
+    let mut queue_committed = 0u64;
+    let mut workers_committed = 0u64;
+
     for step in 1..=30u64 {
-        let q_used = if step <= 12 {
-            12_000 + step * 700
-        } else {
-            18_000
-        };
-        let w_used = 9_000 + step * 100;
-        let dq = queue
-            .step(Observation::new(step, q_used.min(20_000), 20_000, 10.0))
-            .expect("queue step");
-        let dw = workers
-            .step(Observation::new(step, w_used.min(20_000), 20_000, 5.0))
-            .expect("workers step");
-        println!(
-            "step {step:>2} queue={:<7} workers={:<7}",
-            dq.action.name(),
-            dw.action.name()
+        let queue_desired = (10_000 + step * 500).min(20_000);
+        let workers_desired = (8_000 + step * 350).min(20_000);
+
+        // Deterministic admission order for the example. A production policy
+        // can schedule requests by priority before calling commit().
+        queue_committed = set_commitment(
+            &mut coordinator,
+            "queue",
+            queue_committed,
+            queue_desired,
         );
-        let _ = ActionRequest::None; // silence unused import lint on some cfgs
+        workers_committed = set_commitment(
+            &mut coordinator,
+            "workers",
+            workers_committed,
+            workers_desired,
+        );
+
+        let queue_decision = queue
+            .step(Observation::new(
+                step,
+                queue_committed,
+                20_000,
+                queue_desired as f64,
+            ))
+            .expect("queue step");
+        let worker_decision = workers
+            .step(Observation::new(
+                step,
+                workers_committed,
+                20_000,
+                workers_desired as f64,
+            ))
+            .expect("worker step");
+
+        assert!(coordinator.total_committed() <= 30_000);
+        println!(
+            "step {step:>2} shared={:>5}/30000 queue={:>5}({:<7}) workers={:>5}({:<7})",
+            coordinator.total_committed(),
+            queue_committed,
+            queue_decision.action.name(),
+            workers_committed,
+            worker_decision.action.name(),
+        );
     }
 
     println!(
@@ -114,5 +190,8 @@ fn main() {
         workers.backend().released,
         workers.backend().restored
     );
-    println!("cross-resource ECA demo complete (deterministic).");
+    println!(
+        "shared coordinator final commitment: {} bytes",
+        coordinator.total_committed()
+    );
 }
