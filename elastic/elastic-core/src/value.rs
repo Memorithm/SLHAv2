@@ -30,12 +30,16 @@ impl<T: Copy + PartialOrd> AdaptiveValue<T> {
     }
 
     /// The currently effective value, if any.
+    ///
+    /// An inverted adaptive range has no valid implicit current value. This
+    /// fails closed as `None` instead of silently selecting one invalid bound.
     pub fn current(&self) -> Option<T> {
         match self.contract {
-            ElasticValue::Fixed(v) | ElasticValue::Pinned(v) => Some(v),
-            ElasticValue::Adaptive { min, max } => {
-                self.assigned.or(Some(if min >= max { min } else { max }))
+            ElasticValue::Fixed(value) | ElasticValue::Pinned(value) => Some(value),
+            ElasticValue::Adaptive { min, max } if min <= max => {
+                self.assigned.or(Some(max))
             }
+            ElasticValue::Adaptive { .. } => None,
             ElasticValue::Auto => self.assigned,
         }
     }
@@ -62,38 +66,49 @@ mod tests {
 
     #[test]
     fn fixed_cannot_change() {
-        let mut v = AdaptiveValue::new(ElasticValue::Fixed(16384u64));
-        assert_eq!(v.current(), Some(16384));
-        assert!(v.assign(32768).is_err());
-        assert!(!v.is_adaptive());
+        let mut value = AdaptiveValue::new(ElasticValue::Fixed(16384u64));
+        assert_eq!(value.current(), Some(16384));
+        assert!(value.assign(32768).is_err());
+        assert!(!value.is_adaptive());
     }
 
     #[test]
     fn auto_owned_by_controller() {
-        let mut v = AdaptiveValue::new(ElasticValue::Auto);
-        assert_eq!(v.current(), None);
-        assert!(v.is_adaptive());
-        v.assign(4096).unwrap();
-        assert_eq!(v.current(), Some(4096));
+        let mut value = AdaptiveValue::new(ElasticValue::Auto);
+        assert_eq!(value.current(), None);
+        assert!(value.is_adaptive());
+        value.assign(4096).unwrap();
+        assert_eq!(value.current(), Some(4096));
     }
 
     #[test]
     fn adaptive_range_enforced() {
-        let mut v = AdaptiveValue::new(ElasticValue::Adaptive {
+        let mut value = AdaptiveValue::new(ElasticValue::Adaptive {
             min: 1024,
             max: 65536,
         });
-        assert!(v.is_adaptive());
-        assert!(v.assign(512).is_err());
-        assert!(v.assign(65536).is_ok());
-        assert!(v.assign(70000).is_err());
+        assert_eq!(value.current(), Some(65536));
+        assert!(value.is_adaptive());
+        assert!(value.assign(512).is_err());
+        assert!(value.assign(65536).is_ok());
+        assert!(value.assign(70000).is_err());
+    }
+
+    #[test]
+    fn inverted_adaptive_range_fails_closed() {
+        let mut value = AdaptiveValue::new(ElasticValue::Adaptive {
+            min: 65536u64,
+            max: 1024u64,
+        });
+        assert_eq!(value.current(), None);
+        assert!(value.assign(4096).is_err());
     }
 
     #[test]
     fn pinned_protected() {
-        let mut v = AdaptiveValue::new(ElasticValue::Pinned(128u64));
-        assert_eq!(v.current(), Some(128));
-        assert!(v.assign(64).is_err());
-        assert!(!v.is_adaptive());
+        let mut value = AdaptiveValue::new(ElasticValue::Pinned(128u64));
+        assert_eq!(value.current(), Some(128));
+        assert!(value.assign(64).is_err());
+        assert!(!value.is_adaptive());
     }
 }
