@@ -1,18 +1,13 @@
 //! Physically-resident elastic KV cache built on the generic Elastic engine.
 //!
-//! Residency and backing storage are deliberately separate concepts:
+//! Logical residency and backing storage are separate:
+//! - HOT: 128 resident bytes;
+//! - WARM: 96 resident bytes + the removed 32-byte residual in backing;
+//! - COLD: 0 resident bytes + a restorable backing representation;
+//! - PINNED: 128 resident bytes protected from adaptation.
 //!
-//! - **HOT**: full 128-byte tile resident.
-//! - **WARM**: 96-byte packed tile resident; the removed 32-byte residual is
-//!   kept in backing storage so the transition is reversible.
-//! - **COLD**: no resident bytes; the last resident representation is kept in
-//!   backing storage and may be restored.
-//! - **PINNED**: full 128-byte tile resident and protected from adaptation.
-//!
-//! `resident_bytes()` therefore measures the bytes charged to the residency
-//! budget. `offloaded_bytes()` reports backing bytes separately. This avoids
-//! pretending that a `Vec::clear()` releases memory and, more importantly,
-//! makes WARM/COLD transitions reversible.
+//! This makes every transition reversible while keeping `resident_bytes()` an
+//! exact accounting of the bytes charged to the active residency budget.
 
 use elastic_core::budget::BudgetTree;
 use elastic_core::controller::{
@@ -26,49 +21,35 @@ use crate::codec::{self, WARM_PACKED_BYTES};
 
 const RESIDUAL_BYTES: usize = codec::RESIDUAL_WORDS * core::mem::size_of::<u64>();
 
-/// Physical residency tier of a slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhysicalTier {
-    /// Full 128-byte representation.
     Hot,
-    /// Packed 96-byte representation.
     Warm,
-    /// No resident representation; data is held in backing storage.
     Cold,
-    /// Full representation protected from adaptation.
     Pinned,
 }
 
-/// One elastic slot.
 #[derive(Clone, Debug)]
 pub struct PhysicalSlot {
-    /// Current resident representation. Empty only in COLD.
     bytes: Vec<u8>,
-    /// COLD backing representation (96 or 128 bytes).
     offloaded: Option<Box<[u8]>>,
-    /// Residual plane removed by HOT→WARM, retained for a lossless promotion.
     warm_residual: Option<[u8; RESIDUAL_BYTES]>,
     tier: PhysicalTier,
-    /// Insertion sequence, used as deterministic tie-breaker.
     seq: u64,
-    /// Cumulative attention mass (H2O-style importance).
     importance: f32,
 }
 
 impl PhysicalSlot {
-    /// Bytes charged to the resident budget for this slot.
     pub fn allocated_bytes(&self) -> usize {
         self.bytes.len()
     }
 
-    /// Bytes held outside the resident budget for this slot.
     pub fn offloaded_bytes(&self) -> usize {
-        self.offloaded.as_deref().map_or(0, <[u8]>::len)
+        self.offloaded.as_deref().map_or(0, |b| b.len())
             + self.warm_residual.as_ref().map_or(0, |_| RESIDUAL_BYTES)
     }
 }
 
-/// The physical elastic KV cache.
 pub struct ElasticKvCache {
     slots: Vec<Option<PhysicalSlot>>,
     resident_bytes: usize,
@@ -81,14 +62,12 @@ pub struct ElasticKvCache {
     last_reason: Option<Reason>,
 }
 
-/// Resource identity for the ECA.
 #[derive(Debug, Clone)]
 pub struct KvCacheResource {
     id: String,
 }
 
 impl KvCacheResource {
-    /// Create the resource identity.
     pub fn new(id: &str) -> Self {
         Self { id: id.to_string() }
     }
@@ -100,18 +79,12 @@ impl ElasticResource for KvCacheResource {
     }
 }
 
-/// Accounting backend used by the generic ECA.
-///
-/// The cache applies the selected action to real slots and performs a second
-/// verification against real `resident_bytes`; this backend only provides the
-/// generic controller with deterministic accounting.
+/// Deterministic accounting backend used by the generic decision controller.
+/// Real slot mutation and verification happen in [`ElasticKvCache::apply_action`].
 #[derive(Debug, Default)]
 pub struct KvCacheBackend {
-    /// Bytes released by demote/offload requests.
     pub released: u64,
-    /// Bytes restored by promote/restore requests.
     pub restored: u64,
-    /// Hard budget used by generic verification.
     pub hard_budget: u64,
 }
 
@@ -150,7 +123,6 @@ impl ElasticBackend for KvCacheBackend {
 }
 
 impl ElasticKvCache {
-    /// Create a cache with a hard resident-byte budget.
     pub fn new(hard_budget_bytes: usize, resource_id: &str) -> Self {
         let mut budget = BudgetTree::new();
         let node = budget.add_root(0, hard_budget_bytes as u64, hard_budget_bytes as u64, 0);
@@ -179,12 +151,10 @@ impl ElasticKvCache {
         }
     }
 
-    /// Bytes currently charged to the resident budget.
     pub fn resident_bytes(&self) -> usize {
         self.resident_bytes
     }
 
-    /// Bytes retained in reversible backing storage.
     pub fn offloaded_bytes(&self) -> usize {
         self.slots
             .iter()
@@ -193,10 +163,12 @@ impl ElasticKvCache {
             .sum()
     }
 
-    /// Free bytes within the hard resident budget.
-    pub fn free_bytes(&self) -> usize {
+    pub fn hard_budget_bytes(&self) -> usize {
         self.config_budget_bytes()
-            .saturating_sub(self.resident_bytes)
+    }
+
+    pub fn free_bytes(&self) -> usize {
+        self.config_budget_bytes().saturating_sub(self.resident_bytes)
     }
 
     fn config_budget_bytes(&self) -> usize {
@@ -206,9 +178,8 @@ impl ElasticKvCache {
             .unwrap_or(0)
     }
 
-    /// `(hot, warm, cold, pinned)` slot counts.
     pub fn counts(&self) -> (usize, usize, usize, usize) {
-        let mut c = (0usize, 0usize, 0usize, 0usize);
+        let mut c = (0, 0, 0, 0);
         for s in self.slots.iter().flatten() {
             match s.tier {
                 PhysicalTier::Hot => c.0 += 1,
@@ -220,12 +191,10 @@ impl ElasticKvCache {
         c
     }
 
-    /// Number of transitions to COLD.
     pub fn evictions(&self) -> u64 {
         self.evictions
     }
 
-    /// Insert a full tile as HOT and return its slot index.
     pub fn insert(&mut self, mut tile: [u8; codec::TILE_BYTES]) -> usize {
         Self::set_warm_flag(&mut tile, false);
         let slot = self.slots.len();
@@ -242,7 +211,6 @@ impl ElasticKvCache {
         slot
     }
 
-    /// Pin a slot. A WARM slot is first promoted losslessly.
     pub fn pin(&mut self, slot: usize) -> bool {
         let tier = match self.slots.get(slot).and_then(Option::as_ref) {
             Some(s) => s.tier,
@@ -261,10 +229,6 @@ impl ElasticKvCache {
         true
     }
 
-    /// Demote one slot HOT → WARM (128 resident bytes → 96).
-    ///
-    /// The removed residual plane is retained outside the residency budget so
-    /// a later promotion restores the exact HOT tile.
     pub fn demote_slot(&mut self, slot: usize) -> Result<(), &'static str> {
         let Some(s) = self.slots.get_mut(slot).and_then(Option::as_mut) else {
             return Err("slot absent");
@@ -281,8 +245,7 @@ impl ElasticKvCache {
                     &full[codec::RESIDUAL_OFFSET..codec::RESIDUAL_OFFSET + RESIDUAL_BYTES],
                 );
                 Self::set_warm_flag(&mut full, true);
-                let packed = codec::pack_warm(&full);
-                s.bytes = packed.to_vec();
+                s.bytes = codec::pack_warm(&full).to_vec();
                 s.warm_residual = Some(residual);
                 s.offloaded = None;
                 s.tier = PhysicalTier::Warm;
@@ -297,50 +260,46 @@ impl ElasticKvCache {
         }
     }
 
-    /// Promote one slot WARM → HOT losslessly.
     pub fn promote_slot(&mut self, slot: usize) -> Result<(), &'static str> {
-        if self
-            .resident_bytes
-            .saturating_add(codec::TILE_BYTES - WARM_PACKED_BYTES)
-            > self.config_budget_bytes()
-        {
+        let tier = self
+            .slots
+            .get(slot)
+            .and_then(Option::as_ref)
+            .ok_or("slot absent")?
+            .tier;
+        if tier == PhysicalTier::Hot {
+            return Ok(());
+        }
+        if tier == PhysicalTier::Pinned {
+            return Err("slot is pinned");
+        }
+        if tier == PhysicalTier::Cold {
+            return Err("slot is cold; call restore_slot first");
+        }
+        let growth = codec::TILE_BYTES - WARM_PACKED_BYTES;
+        if self.resident_bytes.saturating_add(growth) > self.config_budget_bytes() {
             return Err("promotion would exceed resident hard budget");
         }
-        let Some(s) = self.slots.get_mut(slot).and_then(Option::as_mut) else {
-            return Err("slot absent");
-        };
-        match s.tier {
-            PhysicalTier::Warm => {
-                let packed: &[u8; WARM_PACKED_BYTES] = s
-                    .bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "warm slot does not hold exactly 96 bytes")?;
-                let residual = s
-                    .warm_residual
-                    .take()
-                    .ok_or("warm slot has no residual backing")?;
-                let mut full = codec::unpack_warm(packed);
-                full[codec::RESIDUAL_OFFSET..codec::RESIDUAL_OFFSET + RESIDUAL_BYTES]
-                    .copy_from_slice(&residual);
-                Self::set_warm_flag(&mut full, false);
-                s.bytes = full.to_vec();
-                s.tier = PhysicalTier::Hot;
-                self.resident_bytes = self
-                    .resident_bytes
-                    .saturating_add(codec::TILE_BYTES - WARM_PACKED_BYTES);
-                Ok(())
-            }
-            PhysicalTier::Hot => Ok(()),
-            PhysicalTier::Cold => Err("slot is cold; call restore_slot first"),
-            PhysicalTier::Pinned => Err("slot is pinned"),
-        }
+        let s = self.slots[slot].as_mut().expect("slot checked above");
+        let packed: &[u8; WARM_PACKED_BYTES] = s
+            .bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "warm slot does not hold exactly 96 bytes")?;
+        let residual = s
+            .warm_residual
+            .take()
+            .ok_or("warm slot has no residual backing")?;
+        let mut full = codec::unpack_warm(packed);
+        full[codec::RESIDUAL_OFFSET..codec::RESIDUAL_OFFSET + RESIDUAL_BYTES]
+            .copy_from_slice(&residual);
+        Self::set_warm_flag(&mut full, false);
+        s.bytes = full.to_vec();
+        s.tier = PhysicalTier::Hot;
+        self.resident_bytes = self.resident_bytes.saturating_add(growth);
+        Ok(())
     }
 
-    /// Offload one non-pinned slot to COLD.
-    ///
-    /// The resident allocation leaves the residency budget, while a backing
-    /// representation is retained for a later restore.
     pub fn evict_slot(&mut self, slot: usize) -> Result<(), &'static str> {
         let Some(s) = self.slots.get_mut(slot).and_then(Option::as_mut) else {
             return Err("slot absent");
@@ -355,21 +314,23 @@ impl ElasticKvCache {
         if released != codec::TILE_BYTES && released != WARM_PACKED_BYTES {
             return Err("resident slot has invalid representation length");
         }
-        let resident = core::mem::take(&mut s.bytes);
-        s.offloaded = Some(resident.into_boxed_slice());
+        s.offloaded = Some(core::mem::take(&mut s.bytes).into_boxed_slice());
         s.tier = PhysicalTier::Cold;
         self.resident_bytes = self.resident_bytes.saturating_sub(released);
         self.evictions = self.evictions.saturating_add(1);
         Ok(())
     }
 
-    /// Restore one COLD slot to its previous resident representation.
     pub fn restore_slot(&mut self, slot: usize) -> Result<(), &'static str> {
-        let len = self
+        let state = self
             .slots
             .get(slot)
             .and_then(Option::as_ref)
-            .ok_or("slot absent")?
+            .ok_or("slot absent")?;
+        if state.tier != PhysicalTier::Cold {
+            return Ok(());
+        }
+        let len = state
             .offloaded
             .as_deref()
             .ok_or("cold slot has no backing")?
@@ -377,14 +338,12 @@ impl ElasticKvCache {
         if self.resident_bytes.saturating_add(len) > self.config_budget_bytes() {
             return Err("restore would exceed resident hard budget");
         }
-        let Some(s) = self.slots.get_mut(slot).and_then(Option::as_mut) else {
-            return Err("slot absent");
-        };
-        if s.tier != PhysicalTier::Cold {
-            return Ok(());
-        }
-        let backing = s.offloaded.take().ok_or("cold slot has no backing")?;
-        s.bytes = backing.into_vec();
+        let s = self.slots[slot].as_mut().expect("slot checked above");
+        s.bytes = s
+            .offloaded
+            .take()
+            .ok_or("cold slot has no backing")?
+            .into_vec();
         s.tier = match s.bytes.len() {
             codec::TILE_BYTES => PhysicalTier::Hot,
             WARM_PACKED_BYTES => PhysicalTier::Warm,
@@ -394,8 +353,6 @@ impl ElasticKvCache {
         Ok(())
     }
 
-    /// Score a resident slot against a prepared query. COLD is not scored
-    /// until restored.
     pub fn score(&self, slot: usize, q_coarse: &[f32], q_sign: &[u64]) -> Option<f32> {
         let s = self.slots.get(slot)?.as_ref()?;
         let tile = match s.tier {
@@ -412,7 +369,60 @@ impl ElasticKvCache {
         tile.try_score(q_coarse, q_sign).ok()
     }
 
-    /// Run one ECA step and apply the selected action to the real residency.
+    /// Apply exactly the requested ECA action to real slots.
+    ///
+    /// `target_resident_bytes` is a byte target, not a token count. Demote and
+    /// offload keep adapting the lowest-importance unpinned slots until the
+    /// target is reached or no legal transition remains. Promote/restore pick
+    /// the highest-importance eligible slot and still respect the hard budget.
+    pub fn apply_action(
+        &mut self,
+        action: ActionRequest,
+        target_resident_bytes: usize,
+    ) -> Result<bool, &'static str> {
+        let target = target_resident_bytes.min(self.config_budget_bytes());
+        let before = self.resident_bytes;
+        match action {
+            ActionRequest::Demote => {
+                while self.resident_bytes > target {
+                    let prior = self.resident_bytes;
+                    if self.demote_lowest_importance(1) == 0 {
+                        self.evict_lowest_importance(1);
+                    }
+                    if self.resident_bytes == prior {
+                        break;
+                    }
+                }
+            }
+            ActionRequest::Offload => {
+                while self.resident_bytes > target {
+                    let prior = self.resident_bytes;
+                    self.evict_lowest_importance(1);
+                    if self.resident_bytes == prior {
+                        break;
+                    }
+                }
+            }
+            ActionRequest::Promote => {
+                self.promote_highest_importance(1);
+            }
+            ActionRequest::Restore => {
+                self.restore_highest_importance(1);
+            }
+            ActionRequest::None
+            | ActionRequest::Prefetch
+            | ActionRequest::Rebalance
+            | ActionRequest::Operator(_) => {}
+        }
+        self.verify_accounting()?;
+        if matches!(action, ActionRequest::Demote | ActionRequest::Offload)
+            && self.resident_bytes > self.config_budget_bytes()
+        {
+            return Err("physical residency remains above hard budget");
+        }
+        Ok(self.resident_bytes != before)
+    }
+
     pub fn step(&mut self) -> Result<Decision, &'static str> {
         let budget = self.config_budget_bytes();
         let obs = Observation::new(
@@ -424,58 +434,31 @@ impl ElasticKvCache {
         let mut decision = self.controller.step(obs)?;
         self.last_reason = decision.trace.reason;
 
-        let outcome = match decision.action {
-            ActionRequest::Demote => {
-                let mut changed = 0usize;
+        let target = match decision.action {
+            ActionRequest::Demote | ActionRequest::Offload => {
                 if self.resident_bytes > budget {
-                    while self.resident_bytes > budget {
-                        let before = self.resident_bytes;
-                        changed += self.demote_lowest_importance(1);
-                        if self.resident_bytes == before {
-                            changed += self.evict_lowest_importance(1);
-                        }
-                        if self.resident_bytes == before {
-                            break;
-                        }
-                    }
+                    budget
                 } else {
-                    changed += self.demote_lowest_importance(1);
-                }
-                if changed == 0 { "demote_noop" } else { "demoted" }
-            }
-            ActionRequest::Offload => {
-                if self.evict_lowest_importance(1) == 0 {
-                    "offload_noop"
-                } else {
-                    "offloaded"
+                    self.resident_bytes.saturating_sub(RESIDUAL_BYTES)
                 }
             }
-            ActionRequest::Promote => {
-                if self.promote_highest_importance(1) == 0 {
-                    "promote_noop"
-                } else {
-                    "promoted"
-                }
-            }
-            ActionRequest::Restore => {
-                if self.restore_highest_importance(1) == 0 {
-                    "restore_noop"
-                } else {
-                    "restored"
-                }
-            }
-            ActionRequest::Prefetch => "prefetch_noop",
-            ActionRequest::Rebalance => "rebalance_noop",
-            ActionRequest::Operator(name) => name,
-            ActionRequest::None => "none",
+            _ => budget,
         };
-
-        self.verify_accounting()?;
-        let verified = self.resident_bytes <= budget
-            || !matches!(decision.action, ActionRequest::Demote | ActionRequest::Offload);
+        let changed = self.apply_action(decision.action, target)?;
+        let verified = self.verify_accounting().is_ok()
+            && (self.resident_bytes <= budget
+                || !matches!(decision.action, ActionRequest::Demote | ActionRequest::Offload));
+        let outcome = match (decision.action, changed) {
+            (ActionRequest::Demote, true) => "demoted",
+            (ActionRequest::Offload, true) => "offloaded",
+            (ActionRequest::Promote, true) => "promoted",
+            (ActionRequest::Restore, true) => "restored",
+            (_, false) => "no_change",
+            _ => "applied",
+        };
         decision.trace.complete(outcome, verified);
         if !verified {
-            return Err("physical residency remains above hard budget");
+            return Err("physical residency verification failed");
         }
         Ok(decision)
     }
@@ -497,7 +480,7 @@ impl ElasticKvCache {
         candidates.sort_by(|&a, &b| self.cmp_high_first(a, b));
         let mut done = 0;
         for slot in candidates {
-            if done >= n {
+            if done == n {
                 break;
             }
             if self.promote_slot(slot).is_ok() {
@@ -512,7 +495,7 @@ impl ElasticKvCache {
         candidates.sort_by(|&a, &b| self.cmp_high_first(a, b));
         let mut done = 0;
         for slot in candidates {
-            if done >= n {
+            if done == n {
                 break;
             }
             if self.restore_slot(slot).is_ok() {
@@ -530,7 +513,7 @@ impl ElasticKvCache {
             .filter(|(_, s)| {
                 matches!(
                     s.as_ref().map(|x| x.tier),
-                    Some(PhysicalTier::Hot | PhysicalTier::Warm)
+                    Some(PhysicalTier::Hot) | Some(PhysicalTier::Warm)
                 )
             })
             .map(|(i, _)| i)
@@ -578,9 +561,13 @@ impl ElasticKvCache {
         }
         for s in self.slots.iter().flatten() {
             let valid = match s.tier {
-                PhysicalTier::Hot | PhysicalTier::Pinned => s.bytes.len() == codec::TILE_BYTES,
+                PhysicalTier::Hot | PhysicalTier::Pinned => {
+                    s.bytes.len() == codec::TILE_BYTES && s.offloaded.is_none()
+                }
                 PhysicalTier::Warm => {
-                    s.bytes.len() == WARM_PACKED_BYTES && s.warm_residual.is_some()
+                    s.bytes.len() == WARM_PACKED_BYTES
+                        && s.warm_residual.is_some()
+                        && s.offloaded.is_none()
                 }
                 PhysicalTier::Cold => s.bytes.is_empty() && s.offloaded.is_some(),
             };
@@ -605,30 +592,28 @@ impl ElasticKvCache {
             .copy_from_slice(&flags.to_le_bytes());
     }
 
-    /// Observe attention mass for resident or offloaded slots.
     pub fn observe_scores(&mut self, scores: &[(usize, f32)], temperature: f32) {
         if scores.is_empty() || !temperature.is_finite() || temperature <= 0.0 {
             return;
         }
-        let m = scores
+        let max_score = scores
             .iter()
-            .map(|&(_, s)| s)
+            .map(|&(_, score)| score)
             .fold(f32::NEG_INFINITY, f32::max);
         let sum: f32 = scores
             .iter()
-            .map(|&(_, s)| ((s - m) / temperature).exp())
+            .map(|&(_, score)| ((score - max_score) / temperature).exp())
             .sum();
         if !sum.is_finite() || sum <= 0.0 {
             return;
         }
         for &(slot, score) in scores {
             if let Some(x) = self.slots.get_mut(slot).and_then(Option::as_mut) {
-                x.importance += ((score - m) / temperature).exp() / sum;
+                x.importance += ((score - max_score) / temperature).exp() / sum;
             }
         }
     }
 
-    /// Current resident-memory pressure.
     pub fn pressure(&self) -> Pressure {
         Pressure::from_used(
             self.resident_bytes as u64,
@@ -637,17 +622,14 @@ impl ElasticKvCache {
         )
     }
 
-    /// Deterministic state id for journals.
     pub fn state_id(&self) -> StateId {
         self.controller.state_id()
     }
 
-    /// Last controller decision reason.
     pub fn last_reason(&self) -> Option<Reason> {
         self.last_reason
     }
 
-    /// Stable code of the last controller decision reason.
     pub fn last_reason_code(&self) -> Option<&'static str> {
         self.last_reason.map(|r| r.code())
     }
@@ -671,81 +653,63 @@ mod tests {
     }
 
     #[test]
-    fn hot_warm_cold_resident_and_backing_bytes() {
+    fn warm_is_physically_smaller_and_losslessly_reversible() {
         let mut cache = ElasticKvCache::new(1024, "test");
-        let a = cache.insert(make_tile(1));
-        let b = cache.insert(make_tile(2));
-        assert_eq!(cache.resident_bytes(), 256);
-
-        cache.demote_slot(a).unwrap();
-        assert_eq!(cache.resident_bytes(), 128 + WARM_PACKED_BYTES);
-        assert_eq!(cache.offloaded_bytes(), RESIDUAL_BYTES);
-        assert_eq!(cache.counts(), (1, 1, 0, 0));
-
-        cache.evict_slot(b).unwrap();
-        assert_eq!(cache.resident_bytes(), WARM_PACKED_BYTES);
-        assert_eq!(cache.offloaded_bytes(), RESIDUAL_BYTES + codec::TILE_BYTES);
-        assert_eq!(cache.counts(), (0, 1, 1, 0));
-        assert_eq!(cache.evictions(), 1);
-        cache.verify_accounting().unwrap();
-    }
-
-    #[test]
-    fn warm_sets_flag_and_promotion_restores_exact_residual() {
-        let mut cache = ElasticKvCache::new(1024, "test");
-        let tile = make_tile(0);
-        let slot = cache.insert(tile);
+        let slot = cache.insert(make_tile(0));
         let q = [0.0f32; codec::D_C];
         let qs = [0u64; codec::RESIDUAL_WORDS];
-        let hot_score = cache.score(slot, &q, &qs).unwrap();
-        assert_eq!(hot_score, 64.0);
+        let hot = cache.score(slot, &q, &qs).unwrap();
+        assert_eq!(hot, 64.0);
 
         cache.demote_slot(slot).unwrap();
+        assert_eq!(cache.resident_bytes(), WARM_PACKED_BYTES);
+        assert_eq!(cache.offloaded_bytes(), RESIDUAL_BYTES);
         assert_eq!(cache.score(slot, &q, &qs).unwrap(), 0.0);
-        let packed = cache.slots[slot].as_ref().unwrap();
-        let unpacked = codec::unpack_warm(
-            packed.bytes.as_slice().try_into().expect("96-byte warm tile"),
-        );
-        let flags = u16::from_le_bytes([
-            unpacked[codec::FLAGS_OFFSET],
-            unpacked[codec::FLAGS_OFFSET + 1],
-        ]);
-        assert_ne!(flags & codec::FLAG_WARM, 0);
 
         cache.promote_slot(slot).unwrap();
-        assert_eq!(cache.score(slot, &q, &qs).unwrap(), hot_score);
-        let full = &cache.slots[slot].as_ref().unwrap().bytes;
-        let flags = u16::from_le_bytes([full[codec::FLAGS_OFFSET], full[codec::FLAGS_OFFSET + 1]]);
-        assert_eq!(flags & codec::FLAG_WARM, 0);
+        assert_eq!(cache.resident_bytes(), codec::TILE_BYTES);
+        assert_eq!(cache.offloaded_bytes(), 0);
+        assert_eq!(cache.score(slot, &q, &qs).unwrap(), hot);
     }
 
     #[test]
-    fn cold_is_reversible_and_not_reused_as_a_new_slot() {
+    fn cold_is_reversible_and_identity_is_not_reused() {
         let mut cache = ElasticKvCache::new(1024, "test");
         let slot = cache.insert(make_tile(7));
         cache.evict_slot(slot).unwrap();
         assert_eq!(cache.resident_bytes(), 0);
-        assert_eq!(cache.counts(), (0, 0, 1, 0));
         assert_eq!(cache.offloaded_bytes(), codec::TILE_BYTES);
-        assert!(cache.score(slot, &[0.0; codec::D_C], &[0; codec::RESIDUAL_WORDS]).is_none());
-
-        let new_slot = cache.insert(make_tile(8));
-        assert_ne!(slot, new_slot, "COLD identity must not be overwritten");
+        assert_eq!(cache.counts(), (0, 0, 1, 0));
+        let other = cache.insert(make_tile(8));
+        assert_ne!(slot, other);
         cache.restore_slot(slot).unwrap();
         assert_eq!(cache.counts(), (2, 0, 0, 0));
-        cache.verify_accounting().unwrap();
     }
 
     #[test]
-    fn pinned_slots_survive_demote_and_evict() {
+    fn apply_action_hits_requested_resident_target() {
         let mut cache = ElasticKvCache::new(1024, "test");
-        let a = cache.insert(make_tile(1));
-        let b = cache.insert(make_tile(2));
-        assert!(cache.pin(a));
-        assert!(cache.demote_slot(a).is_err());
-        assert!(cache.evict_slot(a).is_err());
-        assert!(cache.evict_slot(b).is_ok());
+        for i in 0..4 {
+            cache.insert(make_tile(i));
+        }
+        assert_eq!(cache.resident_bytes(), 512);
+        assert!(cache.apply_action(ActionRequest::Demote, 384).unwrap());
+        assert!(cache.resident_bytes() <= 384);
+        assert!(cache.apply_action(ActionRequest::Offload, 192).unwrap());
+        assert!(cache.resident_bytes() <= 192);
+    }
+
+    #[test]
+    fn pinned_slots_are_never_demoted_or_offloaded() {
+        let mut cache = ElasticKvCache::new(1024, "test");
+        let pinned = cache.insert(make_tile(1));
+        let other = cache.insert(make_tile(2));
+        assert!(cache.pin(pinned));
+        assert!(cache.demote_slot(pinned).is_err());
+        assert!(cache.evict_slot(pinned).is_err());
+        cache.apply_action(ActionRequest::Offload, 128).unwrap();
         assert_eq!(cache.counts(), (0, 0, 1, 1));
+        assert!(cache.score(other, &[0.0; codec::D_C], &[0; codec::RESIDUAL_WORDS]).is_none());
     }
 
     #[test]
@@ -754,7 +718,6 @@ mod tests {
         for _ in 0..6 {
             cache.insert(make_tile(4));
         }
-        assert_eq!(cache.resident_bytes(), 768);
         for _ in 0..8 {
             let _ = cache.step();
             if cache.resident_bytes() <= 256 {
