@@ -336,7 +336,7 @@ pub mod elastic_context_telemetry_mod {
         pub vram_total: u64,
         /// VRAM available.
         pub vram_available: u64,
-        /// VRAM pressure in [0,1].
+        /// VRAM pressure in `[0, 1]`.
         pub vram_pressure: f64,
         /// HOT tile count.
         pub hot_tiles: u64,

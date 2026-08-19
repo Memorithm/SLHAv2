@@ -2,7 +2,7 @@
 name = "slhav2-vram"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Hardware-agnostic VRAM management and SLHAv2 tile scoring on GPU."
 license = "PolyForm-Noncommercial-1.0.0"
 

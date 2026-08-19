@@ -11,8 +11,10 @@
 //! - [`elastic_budget!`]: declares a hierarchical budget with limits.
 //! - [`elastic_policy!`]: declares a policy struct (hard constraints,
 //!   objectives, hysteresis watermarks, flags).
-//! - [`elastic_transition!`]: executes a transactional prepare/verify/commit/
-//!   rollback block.
+//! - [`elastic_target!`]: declares a target/objective expression.
+//! - transactional transitions: written directly against
+//!   `elastic_core::transaction::{Transaction, run_transaction}` (prepare /
+//!   validate / commit / rollback), which the macro layer re-exports.
 
 use proc_macro::TokenStream;
 use quote::quote;
