@@ -1,25 +1,80 @@
-//! Multi-resource coordination: hierarchical budgets and headroom lending.
+//! Multi-resource coordination over one shared hierarchical budget tree.
 //!
-//! Independent elastic controllers must not fight each other (ElasticContext
-//! compresses to save VRAM while ElasticMemory sees free RAM and promotes,
-//! and ElasticKvCache demotes again). The coordinator owns the shared budget
-//! tree; each controller borrows headroom only when the parent budget allows
-//! it and no pinned guarantee is violated.
+//! Controllers may make independent local decisions, but all shared-resource
+//! admission/release must pass through this coordinator. Per-resource
+//! commitments are tracked separately even when several resources intentionally
+//! share the same budget node, so one resource can never release another's
+//! bytes.
+
+use core::fmt;
 
 use elastic_core::budget::{BudgetError, BudgetTree};
+
+/// Coordinator-level error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CoordinatorError {
+    /// Underlying hierarchical budget rejected the operation.
+    Budget(BudgetError),
+    /// Resource id is already registered.
+    DuplicateResource(String),
+    /// Resource id is not registered.
+    UnknownResource(String),
+    /// Release exceeds bytes committed by this specific resource.
+    ReleaseExceedsCommitment {
+        /// Resource id.
+        resource_id: String,
+        /// Requested release bytes.
+        requested: u64,
+        /// Resource-owned committed bytes.
+        committed: u64,
+    },
+    /// Per-resource accounting overflow.
+    AccountingOverflow(String),
+}
+
+impl From<BudgetError> for CoordinatorError {
+    fn from(value: BudgetError) -> Self {
+        Self::Budget(value)
+    }
+}
+
+impl fmt::Display for CoordinatorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Budget(error) => write!(f, "budget error: {error}"),
+            Self::DuplicateResource(id) => write!(f, "resource `{id}` is already registered"),
+            Self::UnknownResource(id) => write!(f, "resource `{id}` is not registered"),
+            Self::ReleaseExceedsCommitment {
+                resource_id,
+                requested,
+                committed,
+            } => write!(
+                f,
+                "resource `{resource_id}` cannot release {requested} bytes; it owns {committed}"
+            ),
+            Self::AccountingOverflow(id) => {
+                write!(f, "resource `{id}` commitment accounting overflow")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CoordinatorError {}
 
 /// A registered resource in the coordinator.
 #[derive(Clone, Debug)]
 pub struct RegisteredResource {
-    /// Resource identifier.
+    /// Stable resource identifier.
     pub resource_id: String,
     /// Budget node index in the shared tree.
     pub node: usize,
-    /// Priority class (higher = more important).
+    /// Priority metadata for higher-level arbitration.
     pub priority: u8,
+    /// Bytes committed by this resource through the coordinator.
+    pub committed: u64,
 }
 
-/// The coordinator: owns the shared budget tree and the resource registry.
+/// Shared multi-resource coordinator.
 #[derive(Clone, Debug, Default)]
 pub struct ElasticCoordinator {
     tree: BudgetTree,
@@ -32,36 +87,50 @@ impl ElasticCoordinator {
         Self::default()
     }
 
-    /// The shared budget tree (read access for telemetry).
+    /// Shared budget tree.
     pub fn tree(&self) -> &BudgetTree {
         &self.tree
     }
 
-    /// The mutable shared budget tree (for setup).
+    /// Mutable tree access for topology setup. Callers must finish topology
+    /// construction before admitting live resource commitments.
     pub fn tree_mut(&mut self) -> &mut BudgetTree {
         &mut self.tree
     }
 
-    /// Register a resource under an existing budget node.
+    /// Register a unique resource under an existing budget node.
     pub fn register(
         &mut self,
         resource_id: &str,
         node: usize,
         priority: u8,
-    ) -> Result<usize, BudgetError> {
-        self.tree.node(node)?; // validate existence
-        let idx = self.resources.len();
+    ) -> Result<usize, CoordinatorError> {
+        self.tree.node(node)?;
+        if self.find(resource_id).is_some() {
+            return Err(CoordinatorError::DuplicateResource(resource_id.to_string()));
+        }
+        let index = self.resources.len();
         self.resources.push(RegisteredResource {
             resource_id: resource_id.to_string(),
             node,
             priority,
+            committed: 0,
         });
-        Ok(idx)
+        Ok(index)
     }
 
     /// Look up a resource by id.
     pub fn find(&self, resource_id: &str) -> Option<&RegisteredResource> {
-        self.resources.iter().find(|r| r.resource_id == resource_id)
+        self.resources
+            .iter()
+            .find(|resource| resource.resource_id == resource_id)
+    }
+
+    fn find_index(&self, resource_id: &str) -> Result<usize, CoordinatorError> {
+        self.resources
+            .iter()
+            .position(|resource| resource.resource_id == resource_id)
+            .ok_or_else(|| CoordinatorError::UnknownResource(resource_id.to_string()))
     }
 
     /// Registered resources.
@@ -69,36 +138,50 @@ impl ElasticCoordinator {
         &self.resources
     }
 
-    /// Try to commit `bytes` for `resource_id` (borrowing from the parent
-    /// budget). Fails closed on hard-limit/parent/priority violations.
-    pub fn commit(&mut self, resource_id: &str, bytes: u64) -> Result<(), BudgetError> {
-        let reg = self.find(resource_id).ok_or(BudgetError::NoSuchNode)?;
-        let node = reg.node;
-        // Priority guard: a lower-priority borrower cannot displace a
-        // higher-priority tenant's reservation.
-        let parent = self.tree.node(node).map(|n| n.parent);
-        if let Ok(Some(p)) = parent {
-            let pnode = self.tree.node(p)?;
-            let pused = self.tree.committed_with_descendants(p)?;
-            let reserved = pnode.reservation;
-            let headroom = pnode.hard_limit.saturating_sub(pused);
-            if pused + bytes > pnode.hard_limit && reg.priority < pnode.priority {
-                return Err(BudgetError::PriorityViolated);
-            }
-            if headroom < bytes && reserved > 0 && reg.priority < pnode.priority {
-                return Err(BudgetError::PriorityViolated);
-            }
+    /// Bytes currently owned by one registered resource.
+    pub fn committed(&self, resource_id: &str) -> Result<u64, CoordinatorError> {
+        Ok(self
+            .resources
+            .get(self.find_index(resource_id)?)
+            .expect("index returned from same resource vector")
+            .committed)
+    }
+
+    /// Admit `bytes` for one resource through the single shared tree.
+    ///
+    /// Sibling reservations are enforced by [`BudgetTree::try_commit`]. The
+    /// `priority` field remains metadata for a future explicit preemption
+    /// policy; this coordinator never steals protected reservation implicitly.
+    pub fn commit(&mut self, resource_id: &str, bytes: u64) -> Result<(), CoordinatorError> {
+        let index = self.find_index(resource_id)?;
+        let node = self.resources[index].node;
+        let next = self.resources[index]
+            .committed
+            .checked_add(bytes)
+            .ok_or_else(|| CoordinatorError::AccountingOverflow(resource_id.to_string()))?;
+        self.tree.try_commit(node, bytes)?;
+        self.resources[index].committed = next;
+        Ok(())
+    }
+
+    /// Release bytes owned by one resource.
+    pub fn release(&mut self, resource_id: &str, bytes: u64) -> Result<(), CoordinatorError> {
+        let index = self.find_index(resource_id)?;
+        let committed = self.resources[index].committed;
+        if bytes > committed {
+            return Err(CoordinatorError::ReleaseExceedsCommitment {
+                resource_id: resource_id.to_string(),
+                requested: bytes,
+                committed,
+            });
         }
-        self.tree.try_commit(node, bytes)
+        let node = self.resources[index].node;
+        self.tree.release(node, bytes)?;
+        self.resources[index].committed = committed - bytes;
+        Ok(())
     }
 
-    /// Release `bytes` for `resource_id`.
-    pub fn release(&mut self, resource_id: &str, bytes: u64) -> Result<(), BudgetError> {
-        let reg = self.find(resource_id).ok_or(BudgetError::NoSuchNode)?;
-        self.tree.release(reg.node, bytes)
-    }
-
-    /// Total committed bytes across all resources.
+    /// Total bytes committed across the shared tree.
     pub fn total_committed(&self) -> u64 {
         self.tree.total_committed()
     }
@@ -109,38 +192,69 @@ mod tests {
     use super::*;
 
     fn coordinator() -> ElasticCoordinator {
-        let mut c = ElasticCoordinator::new();
-        let org = c.tree_mut().add_root(0, 1000, 800, 200);
-        let tenant = c.tree_mut().add_child(org, 5, 500, 400, 100).unwrap();
-        let session = c.tree_mut().add_child(tenant, 5, 400, 300, 50).unwrap();
-        c.register("ctx", session, 5).unwrap();
-        c.register("mem", session, 5).unwrap();
-        c
+        let mut coordinator = ElasticCoordinator::new();
+        let org = coordinator.tree_mut().add_root(0, 1000, 800, 0);
+        let tenant = coordinator
+            .tree_mut()
+            .add_child(org, 5, 700, 600, 0)
+            .unwrap();
+        let session = coordinator
+            .tree_mut()
+            .add_child(tenant, 5, 600, 500, 0)
+            .unwrap();
+        coordinator.register("ctx", session, 5).unwrap();
+        coordinator.register("mem", session, 5).unwrap();
+        coordinator
     }
 
     #[test]
-    fn resources_share_parent_budget() {
-        let mut c = coordinator();
-        assert!(c.commit("ctx", 300).is_ok());
-        // 300 + 200 = 500 > session limit 400.
-        assert_eq!(c.commit("mem", 200), Err(BudgetError::HardLimitExceeded));
-        assert_eq!(c.total_committed(), 300);
-        c.release("ctx", 300).unwrap();
-        assert!(c.commit("mem", 400).is_ok());
+    fn resources_share_one_real_budget() {
+        let mut coordinator = coordinator();
+        coordinator.commit("ctx", 300).unwrap();
+        coordinator.commit("mem", 250).unwrap();
+        assert_eq!(coordinator.total_committed(), 550);
+        assert_eq!(coordinator.committed("ctx").unwrap(), 300);
+        assert_eq!(coordinator.committed("mem").unwrap(), 250);
+        assert!(matches!(
+            coordinator.commit("mem", 100),
+            Err(CoordinatorError::Budget(BudgetError::HardLimitExceeded))
+        ));
     }
 
     #[test]
-    fn unknown_resource_fails_closed() {
-        let mut c = coordinator();
-        assert_eq!(c.commit("nope", 1), Err(BudgetError::NoSuchNode));
+    fn one_resource_cannot_release_anothers_commitment() {
+        let mut coordinator = coordinator();
+        coordinator.commit("ctx", 300).unwrap();
+        coordinator.commit("mem", 50).unwrap();
+        assert!(matches!(
+            coordinator.release("mem", 100),
+            Err(CoordinatorError::ReleaseExceedsCommitment { .. })
+        ));
+        assert_eq!(coordinator.total_committed(), 350);
+        assert_eq!(coordinator.committed("ctx").unwrap(), 300);
+        assert_eq!(coordinator.committed("mem").unwrap(), 50);
     }
 
     #[test]
-    fn higher_priority_borrows_first() {
-        let mut c = coordinator();
-        // Session hard limit 400; ctx (priority 5) commits 350.
-        c.commit("ctx", 350).unwrap();
-        // mem same priority: 350 + 100 = 450 > 400 -> hard limit.
-        assert_eq!(c.commit("mem", 100), Err(BudgetError::HardLimitExceeded));
+    fn release_updates_tree_and_resource_atomically() {
+        let mut coordinator = coordinator();
+        coordinator.commit("ctx", 300).unwrap();
+        coordinator.release("ctx", 125).unwrap();
+        assert_eq!(coordinator.committed("ctx").unwrap(), 175);
+        assert_eq!(coordinator.total_committed(), 175);
+    }
+
+    #[test]
+    fn duplicate_and_unknown_ids_fail_closed() {
+        let mut coordinator = coordinator();
+        let node = coordinator.find("ctx").unwrap().node;
+        assert!(matches!(
+            coordinator.register("ctx", node, 5),
+            Err(CoordinatorError::DuplicateResource(_))
+        ));
+        assert!(matches!(
+            coordinator.commit("nope", 1),
+            Err(CoordinatorError::UnknownResource(_))
+        ));
     }
 }
