@@ -1,9 +1,12 @@
 # Cargo workspace. The real crate lives in `scirust/`; this root manifest lets
-# `cargo build / test / clippy / bench` run from the repo root and operate on it.
+# `cargo build / test / clippy / bench` run from the repo root and operate on
+# the production-facing SLHAv2 crates.
 #
-# (This replaces a previous *second* `scirust` package declared here, whose
-#  bench and docs referenced a non-existent API — see CHANGELOG. A virtual
-#  workspace removes the duplication and keeps a single source of truth.)
+# The generic Elastic language/runtime is intentionally an extractable nested
+# workspace rooted at `elastic/Cargo.toml`. It is excluded here so Cargo sees a
+# single workspace root for every package. Root crates may still depend on
+# Elastic crates through explicit path dependencies; the nested workspace has
+# its own CI gates and lockfile.
 [workspace]
 resolver = "2"
 members = [
@@ -12,28 +15,14 @@ members = [
     "slha-c",
     "slha-python",
     "slhav2-vram",
-    "elastic/elastic-core",
-    "elastic/elastic-runtime",
-    "elastic/elastic-macros",
-    "elastic/elastic-testkit",
-    "elastic/elastic",
 ]
+exclude = ["elastic/*"]
+
 # Unqualified Cargo commands intentionally target the dependency-free `scirust`
 # core, preserving lightweight builds and unambiguous example/benchmark commands.
 # Product-wide build and validation surfaces must pass `--workspace` explicitly.
 default-members = ["scirust"]
 
-# Shared package metadata for the elastic incubator crates (they inherit via
-# `version.workspace = true` etc. from their nested workspace; the values here
-# must match the nested `elastic/Cargo.toml`).
-[workspace.package]
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.89"
-license = "PolyForm-Noncommercial-1.0.0"
-authors = ["Forge CHECKUPAUTO <forge@checkupauto.io>"]
-
-# Release profile lives at the workspace root (a member's [profile] is ignored).
 [profile.release]
 opt-level = 3
 lto = true
