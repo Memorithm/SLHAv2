@@ -6,11 +6,32 @@
 #  workspace removes the duplication and keeps a single source of truth.)
 [workspace]
 resolver = "2"
-members = ["scirust", "slha-mcp", "slha-c", "slha-python", "slhav2-vram"]
+members = [
+    "scirust",
+    "slha-mcp",
+    "slha-c",
+    "slha-python",
+    "slhav2-vram",
+    "elastic/elastic-core",
+    "elastic/elastic-runtime",
+    "elastic/elastic-macros",
+    "elastic/elastic-testkit",
+    "elastic/elastic",
+]
 # Unqualified Cargo commands intentionally target the dependency-free `scirust`
 # core, preserving lightweight builds and unambiguous example/benchmark commands.
 # Product-wide build and validation surfaces must pass `--workspace` explicitly.
 default-members = ["scirust"]
+
+# Shared package metadata for the elastic incubator crates (they inherit via
+# `version.workspace = true` etc. from their nested workspace; the values here
+# must match the nested `elastic/Cargo.toml`).
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "PolyForm-Noncommercial-1.0.0"
+authors = ["Forge CHECKUPAUTO <forge@checkupauto.io>"]
 
 # Release profile lives at the workspace root (a member's [profile] is ignored).
 [profile.release]

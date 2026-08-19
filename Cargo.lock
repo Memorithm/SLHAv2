@@ -167,6 +167,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
+name = "elastic"
+version = "0.1.0"
+dependencies = [
+ "elastic-core",
+ "elastic-macros",
+ "elastic-runtime",
+]
+
+[[package]]
+name = "elastic-core"
+version = "0.1.0"
+
+[[package]]
+name = "elastic-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "elastic-runtime"
+version = "0.1.0"
+dependencies = [
+ "elastic-core",
+]
+
+[[package]]
+name = "elastic-testkit"
+version = "0.1.0"
+dependencies = [
+ "elastic-core",
+ "elastic-runtime",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -464,6 +501,7 @@ name = "slhav2-vram"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "elastic-core",
  "libc",
  "scirust",
 ]

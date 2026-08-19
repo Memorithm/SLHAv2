@@ -115,6 +115,32 @@ pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
         .sum()
 }
 
+/// Bytes of a physically packed WARM tile: the full tile minus the
+/// 32-byte residual plane (which is zeroed and flagged `FLAG_WARM`).
+pub const WARM_PACKED_BYTES: usize = TILE_BYTES - RESIDUAL_WORDS * 8; // 96
+
+/// Pack a WARM tile into its physically smaller 96-byte form.
+///
+/// The residual bytes are semantically absent (the tile must carry
+/// `FLAG_WARM`); packing copies everything except the 32 residual bytes.
+/// The result is NOT a valid `SerializedTile` byte-for-byte; it is the
+/// WARM residency representation.
+pub fn pack_warm(tile: &[u8; TILE_BYTES]) -> [u8; WARM_PACKED_BYTES] {
+    let mut out = [0u8; WARM_PACKED_BYTES];
+    out[..RESIDUAL_OFFSET].copy_from_slice(&tile[..RESIDUAL_OFFSET]);
+    out[RESIDUAL_OFFSET..].copy_from_slice(&tile[RESIDUAL_OFFSET + RESIDUAL_WORDS * 8..]);
+    out
+}
+
+/// Unpack a 96-byte WARM form back into a full 128-byte tile (residual
+/// zeroed). The result carries the same flags (including `FLAG_WARM`).
+pub fn unpack_warm(packed: &[u8; WARM_PACKED_BYTES]) -> [u8; TILE_BYTES] {
+    let mut out = [0u8; TILE_BYTES];
+    out[..RESIDUAL_OFFSET].copy_from_slice(&packed[..RESIDUAL_OFFSET]);
+    out[RESIDUAL_OFFSET + RESIDUAL_WORDS * 8..].copy_from_slice(&packed[RESIDUAL_OFFSET..]);
+    out
+}
+
 pub fn score_hot(
     q_coarse: &[f32],
     q_sign: &[u64],

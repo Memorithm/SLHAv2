@@ -9,6 +9,8 @@ members = [
 ]
 default-members = ["elastic-core", "elastic-runtime", "elastic-macros", "elastic-testkit", "elastic"]
 
+# The nested workspace must also be buildable standalone; when built as part
+# of the parent workspace these are inherited from the parent.
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
