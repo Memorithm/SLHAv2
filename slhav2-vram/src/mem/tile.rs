@@ -55,8 +55,8 @@ impl SerializedTile {
 
     pub fn residual(&self) -> [u64; codec::RESIDUAL_WORDS] {
         let mut out = [0u64; codec::RESIDUAL_WORDS];
-        for (i, chunk) in self.raw_residual().chunks_exact(8).enumerate() {
-            out[i] = u64::from_le_bytes(chunk.try_into().expect("residual chunk is 8 bytes"));
+        for (i, chunk) in self.raw_residual().as_chunks::<8>().0.iter().enumerate() {
+            out[i] = u64::from_le_bytes(*chunk);
         }
         out
     }
