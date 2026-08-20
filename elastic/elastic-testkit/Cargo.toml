@@ -11,5 +11,5 @@ keywords = ["elastic", "testing", "simulation"]
 categories = ["development-tools"]
 
 [dependencies]
-elastic-core = { path = "../elastic-core" }
-elastic-runtime = { path = "../elastic-runtime" }
+elastic-core = { version = "0.1.0", path = "../elastic-core" }
+elastic-runtime = { version = "0.1.0", path = "../elastic-runtime" }
