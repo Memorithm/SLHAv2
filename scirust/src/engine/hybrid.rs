@@ -163,7 +163,7 @@ impl CpuSimdEngine {
             ));
         }
         let packed_per_key = dim.div_ceil(2);
-        if quant_keys.len() % packed_per_key != 0 {
+        if !quant_keys.len().is_multiple_of(packed_per_key) {
             return Err(EngineError::InvalidLayout(format!(
                 "packed key buffer length {} is not a multiple of {packed_per_key}",
                 quant_keys.len()
