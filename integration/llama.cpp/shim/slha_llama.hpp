@@ -35,31 +35,23 @@ struct slha_layer_state;
  * One tile per (layer, cache position). Capacity is fixed per layer and
  * position indices are bounds-checked. No unbounded growth.
  *
- * Storage is an array of `alignas(128)` tile structs so every element is a
- * valid `SciRustSlhaTile` target — the old `std::vector<std::byte>` storage
- * had no alignment guarantee and callers cast its raw pointer to
- * `const SciRustSlhaTile*`.
+ * The backing byte storage is over-allocated and `tile_base_offset` selects a
+ * 128-aligned tile region. Tile stride is the runtime SLHA tile size.
  *
- * Lifetime contract: `read()` returns a pointer that remains valid until the
- * next write to the SAME slot, or any clear/reset of the store. Callers that
- * need a pointer that outlives those operations must copy the tile out.
- * Concurrent `write()`/`clear_layer()`/`reset()` on OTHER slots are safe
- * (single mutex, no reallocation after init); concurrent access to the SAME
- * slot is not safe to hold across the lock.
+ * Lifetime contract: `read()` and `read_range()` return immutable, thread-local
+ * snapshots copied while `mutex` is held; no pointer into mutable store storage
+ * escapes the lock. A returned snapshot remains valid until the next
+ * `read()`/`read_range()` call on the SAME thread. `read_range()` is the API for
+ * callers that need a stable contiguous `SciRustSlhaTile[count]` range.
  */
 struct slha_tile_store {
     static constexpr size_t TILE_ALIGN = 128;
     size_t n_layers = 0;
     size_t capacity = 0;
     size_t tile_bytes = 0;
-    // `alignas(128)` on the element type is dropped by std::vector (it only
-    // guarantees the type's natural alignment), so instead we keep the
-    // buffer as bytes and rely on a 128-aligned allocation: the base of the
-    // vector's heap buffer is at least `alignof(max_align_t)` and the tile
-    // stride is a multiple of 128, but that does NOT guarantee 128 alignment
-    // of every element. The correct fix is an aligned allocator; use the
-    // simplest sound one: allocate via `aligned_alloc`-style storage owned
-    // by the store itself (see init()), and expose `tile_base()`.
+    // `std::vector<unsigned char>` does not guarantee 128-byte alignment, so
+    // the allocation includes TILE_ALIGN-1 bytes of slack and
+    // `tile_base_offset` selects a 128-aligned start inside it.
     std::vector<unsigned char> tiles;
     std::vector<uint8_t> valid;
     /// Base of the 128-aligned tile region (owned by `tiles` after init).
@@ -71,6 +63,7 @@ struct slha_tile_store {
     void clear_layer(int32_t layer_id);
     bool write(int32_t layer_id, size_t position, const void * tile);
     const void * read(int32_t layer_id, size_t position) const;
+    const void * read_range(int32_t layer_id, size_t position, size_t count) const;
     bool check_capacity(int32_t layer_id, size_t position) const;
 };
 
@@ -135,7 +128,10 @@ extern slha_tile_store g_slha_tile_store;
 slha_kv_mode slha_kv_mode_from_env();
 slha_score_mode slha_score_mode_from_env();
 
-int slha_global_init(const char * weights_dir, slha_kv_mode mode);
+/** Initialize SLHA integration with the model-derived layer count available at
+ * the llama KV-cache construction seam. `model_num_layers` must be non-zero and
+ * fit in the shim's int32 layer-id domain. */
+int slha_global_init(const char * weights_dir, slha_kv_mode mode, size_t model_num_layers);
 
 void slha_global_shutdown();
 
