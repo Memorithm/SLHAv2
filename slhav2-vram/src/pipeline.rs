@@ -1,6 +1,6 @@
 use crate::codec;
 use crate::mem::tile::SerializedTile;
-use crate::traits::{DeviceAllocation, DeviceEngine};
+use crate::traits::DeviceEngine;
 
 /// Inputs for CPU reference scoring.
 pub struct ScoringInput<'a, E: DeviceEngine> {
@@ -46,7 +46,7 @@ pub fn try_score_tiles_cpu<E: DeviceEngine>(input: ScoringInput<'_, E>) -> Resul
 ///
 /// Invalid input fails closed by zeroing the output instead of indexing past a
 /// caller-provided buffer. New code should use [`try_score_tiles_cpu`].
-pub fn score_tiles_cpu<E: DeviceEngine>(mut input: ScoringInput<'_, E>) {
+pub fn score_tiles_cpu<E: DeviceEngine>(input: ScoringInput<'_, E>) {
     input.scores.fill(0.0);
     let _ = try_score_tiles_cpu(input);
 }
@@ -168,9 +168,9 @@ impl GpuScoringPipeline {
         }
         self.validate_tiles(tiles)?;
         let start = self.resident;
-        let needed = start
-            .checked_add(tiles.len())
-            .ok_or_else(|| crate::backends::cuda::CudaError("resident tile count overflow".into()))?;
+        let needed = start.checked_add(tiles.len()).ok_or_else(|| {
+            crate::backends::cuda::CudaError("resident tile count overflow".into())
+        })?;
         if needed > self.capacity_tiles() {
             return Err(crate::backends::cuda::CudaError(format!(
                 "GpuScoringPipeline: arena holds {} tiles, need {needed}",
@@ -261,13 +261,13 @@ impl GpuScoringPipeline {
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| crate::backends::cuda::CudaError("score byte count overflow".into()))?;
         self.score_buf.resize(nbytes, 0);
-        self.engine.copy_to_host_async(
-            &self.scores_dev,
-            0,
-            &mut self.score_buf,
-            &self.stream,
-        )?;
+        // The scoring kernel executes asynchronously on `self.stream`.
+        // `score_buf` is ordinary Rust-owned pageable memory, so CUDA must
+        // not retain its pointer beyond this mutable borrow. Complete the
+        // stream first, then perform the synchronous device-to-host copy.
         self.stream.synchronize()?;
+        self.engine
+            .copy_to_host(&self.scores_dev, 0, &mut self.score_buf)?;
 
         for (index, chunk) in self.score_buf.chunks_exact(4).enumerate() {
             scores[index] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);

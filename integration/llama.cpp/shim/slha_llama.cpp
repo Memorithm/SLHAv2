@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <limits>
 #include <mutex>
+#include <new>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 #include <string>
@@ -535,13 +537,13 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
                 return -1;
             }
             const size_t n_layers = static_cast<size_t>(observed);
-            // Capacity per layer: positions are bounded by the KV cache the
-            // runtime actually allocates. 16384 remains the documented
-            // maximum supported by this tile-store layout; positions beyond
-            // it fail closed (write returns false, no silent truncation).
-            const size_t capacity = 16384;
-            if (!g_slha_tile_store.init(n_layers, capacity, slha_tile_size())) {
-                std::cerr << "[SLHA] failed to initialize tile store\n";
+            // Runtime context capacity is not known at global init. Keep only
+            // model-derived layer count and tile geometry here; the K-cache
+            // allocation hook sizes the store from llama.cpp's actual
+            // `n_tokens`. There is deliberately no SLHA-specific 16k/32k/128k
+            // context cap.
+            if (!g_slha_tile_store.init(n_layers, 0, slha_tile_size())) {
+                std::cerr << "[SLHA] failed to initialize empty tile store metadata\n";
                 return -1;
             }
         }
@@ -554,24 +556,104 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
     return 0;
 }
 
-bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes_) {
-    std::lock_guard<std::mutex> lock(mutex);
-    n_layers = n_layers_;
-    capacity = capacity_;
-    tile_bytes = tile_bytes_;
-    if (tile_bytes == 0) {
+namespace {
+
+bool slha_checked_store_geometry(
+    size_t n_layers,
+    size_t capacity,
+    size_t tile_bytes,
+    size_t * slots_out,
+    size_t * allocation_out
+) {
+    if (!slots_out || !allocation_out || n_layers == 0 || tile_bytes == 0) {
         return false;
     }
-    // 128-aligned tile region: allocate TILE_ALIGN-1 extra bytes and point
-    // the tile base at the first 128-aligned offset. Every element of the
-    // store then satisfies the `SciRustSlhaTile` alignment regardless of
-    // vector growth (the buffer never reallocates after init).
-    const size_t total = n_layers * capacity * tile_bytes;
-    tiles.assign(total + TILE_ALIGN - 1, 0);
-    const uintptr_t raw = reinterpret_cast<uintptr_t>(tiles.data());
-    const size_t pad = (TILE_ALIGN - (raw % TILE_ALIGN)) % TILE_ALIGN;
-    tile_base_offset = pad;
-    valid.assign(n_layers * capacity, 0);
+    if (capacity != 0 && n_layers > std::numeric_limits<size_t>::max() / capacity) {
+        return false;
+    }
+    const size_t slots = n_layers * capacity;
+    if (slots != 0 && tile_bytes > std::numeric_limits<size_t>::max() / slots) {
+        return false;
+    }
+    const size_t payload = slots * tile_bytes;
+    if (payload > std::numeric_limits<size_t>::max() - (slha_tile_store::TILE_ALIGN - 1)) {
+        return false;
+    }
+    *slots_out = slots;
+    *allocation_out = payload + slha_tile_store::TILE_ALIGN - 1;
+    return true;
+}
+
+bool slha_resize_empty_tile_store(
+    slha_tile_store & store,
+    size_t n_layers,
+    size_t capacity,
+    size_t tile_bytes
+) {
+    std::lock_guard<std::mutex> lock(store.mutex);
+    if (store.n_layers == n_layers && store.tile_bytes == tile_bytes && store.capacity >= capacity) {
+        return true;
+    }
+    // Growing the store discards its index. It is legal only before any live
+    // tile exists; active-context growth must pass through the llama KV
+    // clear/reallocation seam instead of silently losing resident history.
+    if (std::any_of(store.valid.begin(), store.valid.end(), [](uint8_t value) { return value != 0; })) {
+        return false;
+    }
+
+    size_t slots = 0;
+    size_t allocation = 0;
+    if (!slha_checked_store_geometry(n_layers, capacity, tile_bytes, &slots, &allocation)) {
+        return false;
+    }
+    try {
+        std::vector<unsigned char> next_tiles(allocation, 0);
+        std::vector<uint8_t> next_valid(slots, 0);
+        const uintptr_t raw = reinterpret_cast<uintptr_t>(next_tiles.data());
+        const size_t pad = (slha_tile_store::TILE_ALIGN - (raw % slha_tile_store::TILE_ALIGN))
+            % slha_tile_store::TILE_ALIGN;
+        store.tiles.swap(next_tiles);
+        store.valid.swap(next_valid);
+        store.tile_base_offset = pad;
+        store.n_layers = n_layers;
+        store.capacity = capacity;
+        store.tile_bytes = tile_bytes;
+    } catch (const std::bad_alloc &) {
+        return false;
+    } catch (const std::length_error &) {
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes_) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (std::any_of(valid.begin(), valid.end(), [](uint8_t value) { return value != 0; })) {
+        return false;
+    }
+    size_t slots = 0;
+    size_t allocation = 0;
+    if (!slha_checked_store_geometry(n_layers_, capacity_, tile_bytes_, &slots, &allocation)) {
+        return false;
+    }
+    try {
+        std::vector<unsigned char> next_tiles(allocation, 0);
+        std::vector<uint8_t> next_valid(slots, 0);
+        const uintptr_t raw = reinterpret_cast<uintptr_t>(next_tiles.data());
+        const size_t pad = (TILE_ALIGN - (raw % TILE_ALIGN)) % TILE_ALIGN;
+        tiles.swap(next_tiles);
+        valid.swap(next_valid);
+        tile_base_offset = pad;
+        n_layers = n_layers_;
+        capacity = capacity_;
+        tile_bytes = tile_bytes_;
+    } catch (const std::bad_alloc &) {
+        return false;
+    } catch (const std::length_error &) {
+        return false;
+    }
     return true;
 }
 
@@ -606,16 +688,29 @@ bool slha_tile_store::write(int32_t layer_id, size_t position, const void * tile
 }
 
 const void * slha_tile_store::read(int32_t layer_id, size_t position) const {
-    if (layer_id < 0) return nullptr;
+    if (layer_id < 0) {
+        return nullptr;
+    }
     const size_t layer = static_cast<size_t>(layer_id);
+    // Never expose mutable store storage after releasing `mutex`: a concurrent
+    // writer could otherwise race with a caller dereferencing the returned
+    // pointer. The public ABI is a 128-byte SLHA tile, so copy one immutable
+    // snapshot into thread-local, 128-aligned storage while still locked.
+    alignas(TILE_ALIGN) static thread_local unsigned char snapshot[128];
     std::lock_guard<std::mutex> lock(mutex);
-    if (layer >= n_layers || position >= capacity || tile_bytes == 0) {
+    if (tile_bytes != sizeof(snapshot) || layer >= n_layers || position >= capacity) {
         return nullptr;
     }
-    if (!valid[layer * capacity + position]) {
+    const size_t index = layer * capacity + position;
+    if (index >= valid.size() || valid[index] == 0) {
         return nullptr;
     }
-    return tiles.data() + tile_base_offset + (layer * capacity + position) * tile_bytes;
+    const size_t offset = tile_base_offset + index * tile_bytes;
+    if (offset > tiles.size() || tile_bytes > tiles.size() - offset) {
+        return nullptr;
+    }
+    std::memcpy(snapshot, tiles.data() + offset, tile_bytes);
+    return snapshot;
 }
 
 bool slha_tile_store::check_capacity(int32_t layer_id, size_t position) const {
@@ -936,20 +1031,46 @@ void slha_intercept_k_cache_allocation(
     //
     // Physical memory reduction is therefore delivered by the tile store,
     // never by mutating the GGML tensor.
-    if (!k_tensor) {
+    if (!k_tensor || n_tokens <= 0 || head_dim <= 0 || n_kv_heads <= 0) {
+        std::cerr << "[SLHA] invalid K-cache allocation metadata; refusing to size tile store\n";
         return;
     }
 
-    const int64_t original_bytes = n_tokens * head_dim * n_kv_heads * static_cast<int64_t>(ggml_type_size(k_tensor->type));
-    const int64_t reduced_bytes = n_tokens * 128; // 128 bytes per token (SLHAv2 tile size)
+    auto & state = get_global_state();
+    size_t n_layers = 0;
+    slha_kv_mode kv_mode = SLHA_KV_OFF;
+    slha_score_mode score_mode = SLHA_SCORE_OFF;
+    {
+        std::lock_guard<std::mutex> state_lock(state.mutex);
+        n_layers = state.layers.size();
+        kv_mode = state.kv_mode;
+        score_mode = state.score_mode;
+    }
+    const size_t runtime_capacity = static_cast<size_t>(n_tokens);
+    const size_t tile_bytes = slha_tile_size();
+    if ((kv_mode == SLHA_KV_TILESTORE || score_mode != SLHA_SCORE_OFF) &&
+        !slha_resize_empty_tile_store(g_slha_tile_store, n_layers, runtime_capacity, tile_bytes)) {
+        std::cerr << "[SLHA] failed to size tile store from runtime K-cache capacity="
+                  << runtime_capacity << "; active data is never reallocated in place\n";
+        return;
+    }
+
+    const size_t original_layer_bytes = ggml_nbytes(k_tensor);
+    if (runtime_capacity > std::numeric_limits<size_t>::max() / tile_bytes) {
+        std::cerr << "[SLHA] tile-store byte accounting overflow\n";
+        return;
+    }
+    const size_t reduced_layer_bytes = runtime_capacity * tile_bytes;
+    const double reduction = reduced_layer_bytes == 0
+        ? 0.0
+        : static_cast<double>(original_layer_bytes) / static_cast<double>(reduced_layer_bytes);
 
     std::cout << "[SLHA] K-cache hook: GGML tensor keeps its real type/shape ("
-              << ggml_type_name(k_tensor->type) << ", " << original_bytes
-              << " bytes for " << n_tokens << " tokens x " << head_dim
-              << " x " << n_kv_heads << "); SLHA tiles live in the external "
-              << "tile store (" << reduced_bytes << " bytes, "
-              << (static_cast<double>(original_bytes) / static_cast<double>(std::max<int64_t>(reduced_bytes, 1)))
-              << "x projected reduction).\n";
+              << ggml_type_name(k_tensor->type) << ", " << original_layer_bytes
+              << " bytes for runtime capacity " << runtime_capacity << " x head_dim "
+              << head_dim << " x kv_heads " << n_kv_heads << "); external SLHA "
+              << "capacity is derived from the runtime (" << reduced_layer_bytes
+              << " bytes/layer, " << reduction << "x projected per-layer reduction).\n";
 }
 
 namespace {

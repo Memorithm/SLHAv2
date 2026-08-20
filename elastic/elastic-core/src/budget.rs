@@ -199,8 +199,8 @@ impl BudgetTree {
             for (sibling_index, sibling) in self.nodes.iter().enumerate() {
                 if sibling.parent == Some(parent) && sibling_index != path_child {
                     let sibling_used = self.committed_with_descendants(sibling_index)?;
-                    protected = protected
-                        .saturating_add(sibling.reservation.saturating_sub(sibling_used));
+                    protected =
+                        protected.saturating_add(sibling.reservation.saturating_sub(sibling_used));
                 }
             }
             let projected = parent_used.saturating_add(bytes);

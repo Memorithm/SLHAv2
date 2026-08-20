@@ -82,7 +82,7 @@ impl fmt::Display for TierError {
 }
 
 /// A validated tier state machine.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TierMachine {
     tiers: alloc::vec::Vec<Tier>,
     transitions: alloc::vec::Vec<TierTransition>,
@@ -159,7 +159,11 @@ impl TierMachine {
 }
 
 fn validate_descriptor(tiers: &[Tier], tier: Tier) -> Result<(), TierError> {
-    let Some(canonical) = tiers.iter().copied().find(|candidate| candidate.name == tier.name) else {
+    let Some(canonical) = tiers
+        .iter()
+        .copied()
+        .find(|candidate| candidate.name == tier.name)
+    else {
         return Err(TierError::UnknownTier(tier.name));
     };
     if canonical.rank != tier.rank {
@@ -346,16 +350,28 @@ mod tests {
         assert_eq!(
             TierMachine::try_new(
                 alloc::vec![
-                    Tier { name: "hot", rank: 2 },
-                    Tier { name: "hot", rank: 1 }
+                    Tier {
+                        name: "hot",
+                        rank: 2
+                    },
+                    Tier {
+                        name: "hot",
+                        rank: 1
+                    }
                 ],
                 alloc::vec![]
             ),
             Err(TierError::DuplicateTier("hot"))
         );
 
-        let hot = Tier { name: "hot", rank: 2 };
-        let warm = Tier { name: "warm", rank: 1 };
+        let hot = Tier {
+            name: "hot",
+            rank: 2,
+        };
+        let warm = Tier {
+            name: "warm",
+            rank: 1,
+        };
         let edge = TierTransition {
             from: hot,
             to: warm,

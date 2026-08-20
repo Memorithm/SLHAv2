@@ -12,10 +12,41 @@
 //!   the call site and returns a target value whose feasibility is inspectable.
 
 use proc_macro::TokenStream;
-use quote::quote;
+use proc_macro_crate::{crate_name, FoundCrate};
+use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{braced, parse_macro_input, Token};
+
+/// Resolve the runtime path in the invoking crate rather than assuming that
+/// `elastic-core` is a direct dependency there.
+///
+/// Prefer the public `elastic` facade. Falling back to `elastic-core` keeps
+/// direct users of `elastic-macros` + `elastic-core` supported as well.
+/// `proc-macro-crate` also resolves Cargo dependency renames.
+fn elastic_runtime_path(span: proc_macro2::Span) -> syn::Result<proc_macro2::TokenStream> {
+    fn resolve(package: &str, canonical: &str) -> Option<proc_macro2::TokenStream> {
+        match crate_name(package).ok()? {
+            FoundCrate::Itself => {
+                let ident = format_ident!("{}", canonical.replace('-', "_"));
+                Some(quote!(::#ident))
+            }
+            FoundCrate::Name(name) => {
+                let ident = format_ident!("{}", name.replace('-', "_"));
+                Some(quote!(::#ident))
+            }
+        }
+    }
+
+    resolve("elastic", "elastic")
+        .or_else(|| resolve("elastic-core", "elastic_core"))
+        .ok_or_else(|| {
+            syn::Error::new(
+                span,
+                "elastic_state!: add a dependency on `elastic` (preferred) or `elastic-core`",
+            )
+        })
+}
 
 // ---------------------------------------------------------------------------
 // elastic_state!
@@ -81,6 +112,11 @@ impl Parse for StateInput {
 pub fn elastic_state(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as StateInput);
     let name = &input.enum_name;
+
+    let core_path = match elastic_runtime_path(name.span()) {
+        Ok(path) => path,
+        Err(error) => return error.to_compile_error().into(),
+    };
 
     if input.tiers.is_empty() {
         return syn::Error::new(name.span(), "elastic_state!: at least one tier is required")
@@ -175,10 +211,7 @@ pub fn elastic_state(input: TokenStream) -> TokenStream {
         .iter()
         .map(|(from, _)| from.clone())
         .collect();
-    let to_literals: Vec<String> = positive_edges
-        .iter()
-        .map(|(_, to)| to.clone())
-        .collect();
+    let to_literals: Vec<String> = positive_edges.iter().map(|(_, to)| to.clone()).collect();
     let edge_count = positive_edges.len();
 
     quote! {
@@ -188,8 +221,8 @@ pub fn elastic_state(input: TokenStream) -> TokenStream {
         }
 
         impl #name {
-            pub fn machine() -> &'static elastic_core::tiers::TierMachine {
-                use elastic_core::tiers::{Tier, TierMachine, TierTransition};
+            pub fn machine() -> &'static #core_path::tiers::TierMachine {
+                use #core_path::tiers::{Tier, TierMachine, TierTransition};
                 static MACHINE: std::sync::OnceLock<TierMachine> = std::sync::OnceLock::new();
                 MACHINE.get_or_init(|| {
                     let mut tiers = Vec::with_capacity(#n);
@@ -217,22 +250,22 @@ pub fn elastic_state(input: TokenStream) -> TokenStream {
             pub fn try_move(
                 &mut self,
                 to: #name,
-            ) -> Result<(), elastic_core::tiers::TierError> {
+            ) -> Result<(), #core_path::tiers::TierError> {
                 let from = *self;
                 Self::machine().transition(
-                    elastic_core::tiers::TierLike::as_tier(from),
-                    elastic_core::tiers::TierLike::as_tier(to),
+                    #core_path::tiers::TierLike::as_tier(from),
+                    #core_path::tiers::TierLike::as_tier(to),
                 )?;
                 *self = to;
                 Ok(())
             }
         }
 
-        impl elastic_core::tiers::TierLike for #name {
-            fn as_tier(self) -> elastic_core::tiers::Tier {
+        impl #core_path::tiers::TierLike for #name {
+            fn as_tier(self) -> #core_path::tiers::Tier {
                 match self {
                     #(
-                        Self::#variants => elastic_core::tiers::Tier {
+                        Self::#variants => #core_path::tiers::Tier {
                             name: #tier_literals,
                             rank: #ranks,
                         },
@@ -240,7 +273,7 @@ pub fn elastic_state(input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn from_tier(tier: elastic_core::tiers::Tier) -> Self {
+            fn from_tier(tier: #core_path::tiers::Tier) -> Self {
                 match tier.name {
                     #(#tier_literals => Self::#variants,)*
                     _ => panic!("elastic_state!: unknown tier `{}`", tier.name),
@@ -250,7 +283,7 @@ pub fn elastic_state(input: TokenStream) -> TokenStream {
 
         impl core::fmt::Display for #name {
             fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                let tier = elastic_core::tiers::TierLike::as_tier(*self);
+                let tier = #core_path::tiers::TierLike::as_tier(*self);
                 formatter.write_str(tier.name)
             }
         }

@@ -58,8 +58,8 @@ impl Error for CudaError {}
 /// driver is initialized (they are null-safe for unknown codes); falls back
 /// to a verified numeric rendering only when the driver is not yet
 /// initialized. The old hand-written table is gone: several of its mappings
-/// were wrong (e.g. 205 is `CUDA_ERROR_INVALID_CONTEXT`, not OOM; 700 is
-/// `CUDA_ERROR_INVALID_VALUE`).
+/// were wrong (e.g. 201 is `CUDA_ERROR_INVALID_CONTEXT`, not OOM; 700 is
+/// `CUDA_ERROR_ILLEGAL_ADDRESS`).
 fn cu_result_name(code: CUresult) -> String {
     // SAFETY: `cuGetErrorName`/`cuGetErrorString` write into the output
     // pointer only on success and return a CUresult; passing null outputs is
@@ -117,9 +117,21 @@ mod error_tests {
             name.contains("OUT_OF_MEMORY") || name.contains("UNKNOWN_CODE"),
             "got {name}"
         );
-        let name = cu_result_name(205);
+        let name = cu_result_name(201);
         assert!(
             name.contains("INVALID_CONTEXT") || name.contains("UNKNOWN_CODE"),
+            "got {name}"
+        );
+
+        let name = cu_result_name(205);
+        assert!(
+            name.contains("MAP_FAILED") || name.contains("UNKNOWN_CODE"),
+            "got {name}"
+        );
+
+        let name = cu_result_name(700);
+        assert!(
+            name.contains("ILLEGAL_ADDRESS") || name.contains("UNKNOWN_CODE"),
             "got {name}"
         );
         let name = cu_result_name(99999);
@@ -368,12 +380,47 @@ impl CudaEngine {
         CUDA_BACKING_ALLOCATIONS.load(Ordering::SeqCst)
     }
 
+    fn ensure_allocation_owner(
+        &self,
+        allocation: &CudaAllocation,
+        label: &str,
+    ) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &allocation.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: allocation belongs to a different CUDA context"
+            )))
+        }
+    }
+
+    fn ensure_function_owner(&self, function: &CudaFunction, label: &str) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &function.module.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: kernel belongs to a different CUDA context"
+            )))
+        }
+    }
+
+    fn ensure_stream_owner(&self, stream: &CudaStream, label: &str) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &stream.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: stream belongs to a different CUDA context"
+            )))
+        }
+    }
+
     pub fn copy_to_device_at(
         &self,
         src: &[u8],
         dst: &mut CudaAllocation,
         dst_offset_bytes: usize,
     ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(dst, "copy_to_device_at")?;
         let end = dst_offset_bytes
             .checked_add(src.len())
             .ok_or_else(|| CudaError("copy_to_device_at: offset + length overflow".into()))?;
@@ -411,6 +458,7 @@ impl CudaEngine {
         src_offset_bytes: usize,
         dst: &mut [u8],
     ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(src, "copy_to_host_at")?;
         let end = src_offset_bytes
             .checked_add(dst.len())
             .ok_or_else(|| CudaError("copy_to_host_at: offset + length overflow".into()))?;
@@ -458,12 +506,48 @@ impl CudaEngine {
             return Ok(());
         }
 
+        self.ensure_allocation_owner(q_coarse_dev, "score_tiles_at q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles_at q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles_at tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles_at scores")?;
+        self.ensure_function_owner(kernel, "score_tiles_at")?;
+
+        let n = num_tiles as usize;
+        let q_coarse_bytes = crate::codec::D_C * core::mem::size_of::<f32>();
+        let q_sign_bytes = crate::codec::RESIDUAL_WORDS * core::mem::size_of::<u64>();
+        let tile_bytes = n
+            .checked_mul(crate::codec::TILE_BYTES)
+            .ok_or_else(|| CudaError("score_tiles_at: tile byte count overflow".into()))?;
+        let score_bytes = n
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaError("score_tiles_at: score byte count overflow".into()))?;
+        let check_range = |label: &str, offset: usize, need: usize, len: usize| {
+            let end = offset
+                .checked_add(need)
+                .ok_or_else(|| CudaError(format!("score_tiles_at: {label} range overflow")))?;
+            if end > len {
+                return Err(CudaError(format!(
+                    "score_tiles_at: {label} offset {offset} + size {need} exceeds allocation size {len}"
+                )));
+            }
+            Ok(())
+        };
+        check_range(
+            "q_coarse",
+            q_coarse_offset,
+            q_coarse_bytes,
+            q_coarse_dev.len,
+        )?;
+        check_range("q_sign", q_sign_offset, q_sign_bytes, q_sign_dev.len)?;
+        check_range("tiles", tiles_offset, tile_bytes, tiles_dev.len)?;
+        check_range("scores", scores_offset, score_bytes, scores_dev.len)?;
+
         let q_coarse_ptr = q_coarse_dev.ptr + q_coarse_offset as u64;
         let q_sign_ptr = q_sign_dev.ptr + q_sign_offset as u64;
         let tiles_ptr = tiles_dev.ptr + tiles_offset as u64;
         let scores_ptr = scores_dev.ptr + scores_offset as u64;
 
-        let grid_dim = (num_tiles as usize).div_ceil(256) as u32;
+        let grid_dim = n.div_ceil(256) as u32;
         let block_dim = 256u32;
 
         let args: [*mut libc::c_void; 5] = [
@@ -536,6 +620,11 @@ impl CudaEngine {
         if num_tiles <= 0 {
             return Ok(());
         }
+        self.ensure_allocation_owner(q_coarse_dev, "score_tiles q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles scores")?;
+        self.ensure_function_owner(kernel, "score_tiles")?;
         let n = num_tiles as usize;
 
         // Bounds-check every buffer against the kernel's read/write ranges
@@ -629,6 +718,12 @@ impl CudaEngine {
         if num_tiles <= 0 {
             return Ok(());
         }
+        self.ensure_allocation_owner(q_coarse_dev, "score_tiles_on_stream q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles_on_stream q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles_on_stream tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles_on_stream scores")?;
+        self.ensure_function_owner(kernel, "score_tiles_on_stream")?;
+        self.ensure_stream_owner(stream, "score_tiles_on_stream")?;
         let n = num_tiles as usize;
 
         let tile_bytes = n
@@ -701,76 +796,6 @@ impl CudaEngine {
 
         Ok(())
     }
-
-    /// Async host→device copy on `stream`. Returns immediately; the copy
-    /// completes before any subsequent op enqueued on the same stream.
-    pub fn copy_to_device_async(
-        &self,
-        src: &[u8],
-        dst: &mut CudaAllocation,
-        dst_offset: usize,
-        stream: &CudaStream,
-    ) -> Result<(), CudaError> {
-        let end = dst_offset
-            .checked_add(src.len())
-            .ok_or_else(|| CudaError("copy_to_device_async: offset + length overflow".into()))?;
-        if end > dst.len {
-            return Err(CudaError(format!(
-                "copy_to_device_async: offset {dst_offset} + size {} exceeds allocation size {}",
-                src.len(),
-                dst.len
-            )));
-        }
-        // SAFETY: bounds checked above; `src` is a valid Rust slice; the
-        // context and stream are kept alive by their owning `Rc`s.
-        unsafe {
-            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
-            cuda_check(
-                cuMemcpyHtoDAsync_v2(
-                    dst.ptr + dst_offset as u64,
-                    src.as_ptr() as *const libc::c_void,
-                    src.len() as u64,
-                    stream.raw(),
-                ),
-                "cuMemcpyHtoDAsync_v2",
-            )
-        }
-    }
-
-    /// Async device→host copy on `stream`. Returns immediately; call
-    /// `stream.synchronize()` before reading `dst`.
-    pub fn copy_to_host_async(
-        &self,
-        src: &CudaAllocation,
-        src_offset: usize,
-        dst: &mut [u8],
-        stream: &CudaStream,
-    ) -> Result<(), CudaError> {
-        let end = src_offset
-            .checked_add(dst.len())
-            .ok_or_else(|| CudaError("copy_to_host_async: offset + length overflow".into()))?;
-        if end > src.len {
-            return Err(CudaError(format!(
-                "copy_to_host_async: offset {src_offset} + size {} exceeds allocation size {}",
-                dst.len(),
-                src.len
-            )));
-        }
-        // SAFETY: bounds checked above; `dst` is a valid mutable Rust slice;
-        // the context and stream are kept alive by their owning `Rc`s.
-        unsafe {
-            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
-            cuda_check(
-                cuMemcpyDtoHAsync_v2(
-                    dst.as_ptr() as *mut libc::c_void,
-                    src.ptr + src_offset as u64,
-                    dst.len() as u64,
-                    stream.raw(),
-                ),
-                "cuMemcpyDtoHAsync_v2",
-            )
-        }
-    }
 }
 
 impl DeviceEngine for CudaEngine {
@@ -807,6 +832,7 @@ impl DeviceEngine for CudaEngine {
         dst: &mut CudaAllocation,
         dst_offset: usize,
     ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(dst, "copy_to_device")?;
         if dst_offset
             .checked_add(src.len())
             .is_none_or(|end| end > dst.len)
@@ -843,6 +869,7 @@ impl DeviceEngine for CudaEngine {
         src_offset: usize,
         dst: &mut [u8],
     ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(src, "copy_to_host")?;
         if src_offset
             .checked_add(dst.len())
             .is_none_or(|end| end > src.len)
@@ -919,18 +946,6 @@ extern "C" {
     fn cuStreamCreate(stream: *mut CUstream, flags: u32) -> CUresult;
     fn cuStreamDestroy(stream: CUstream) -> CUresult;
     fn cuStreamSynchronize(stream: CUstream) -> CUresult;
-    fn cuMemcpyHtoDAsync_v2(
-        dst: CUdeviceptr,
-        src: *const libc::c_void,
-        count: u64,
-        stream: CUstream,
-    ) -> CUresult;
-    fn cuMemcpyDtoHAsync_v2(
-        dst: *mut libc::c_void,
-        src: CUdeviceptr,
-        count: u64,
-        stream: CUstream,
-    ) -> CUresult;
     fn cuLaunchKernel(
         f: CUfunction,
         grid_dim_x: u32,

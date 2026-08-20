@@ -36,9 +36,7 @@ impl<T: Copy + PartialOrd> AdaptiveValue<T> {
     pub fn current(&self) -> Option<T> {
         match self.contract {
             ElasticValue::Fixed(value) | ElasticValue::Pinned(value) => Some(value),
-            ElasticValue::Adaptive { min, max } if min <= max => {
-                self.assigned.or(Some(max))
-            }
+            ElasticValue::Adaptive { min, max } if min <= max => self.assigned.or(Some(max)),
             ElasticValue::Adaptive { .. } => None,
             ElasticValue::Auto => self.assigned,
         }

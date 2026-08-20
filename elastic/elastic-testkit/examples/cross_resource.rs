@@ -4,9 +4,7 @@
 //! The controllers retain independent local pressure models, while the
 //! coordinator is the single authority for shared byte commitments.
 
-use elastic_core::controller::{
-    ControllerConfig, ElasticBackend, ElasticController, Observation,
-};
+use elastic_core::controller::{ControllerConfig, ElasticBackend, ElasticController, Observation};
 use elastic_core::ElasticResource;
 use elastic_runtime::coordinator::ElasticCoordinator;
 
@@ -139,12 +137,7 @@ fn main() {
 
         // Deterministic admission order for the example. A production policy
         // can schedule requests by priority before calling commit().
-        queue_committed = set_commitment(
-            &mut coordinator,
-            "queue",
-            queue_committed,
-            queue_desired,
-        );
+        queue_committed = set_commitment(&mut coordinator, "queue", queue_committed, queue_desired);
         workers_committed = set_commitment(
             &mut coordinator,
             "workers",

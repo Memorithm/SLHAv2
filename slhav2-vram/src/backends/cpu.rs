@@ -66,9 +66,9 @@ impl DeviceEngine for CpuEngine {
         dst: &mut CpuAllocation,
         dst_offset: usize,
     ) -> Result<(), CpuError> {
-        let end = dst_offset.checked_add(src.len()).ok_or_else(|| {
-            CpuError("copy_to_device: offset + length overflow".to_string())
-        })?;
+        let end = dst_offset
+            .checked_add(src.len())
+            .ok_or_else(|| CpuError("copy_to_device: offset + length overflow".to_string()))?;
         if end > dst.data.len() {
             return Err(CpuError(format!(
                 "copy_to_device: offset {} + size {} exceeds allocation size {}",
@@ -87,9 +87,9 @@ impl DeviceEngine for CpuEngine {
         src_offset: usize,
         dst: &mut [u8],
     ) -> Result<(), CpuError> {
-        let end = src_offset.checked_add(dst.len()).ok_or_else(|| {
-            CpuError("copy_to_host: offset + length overflow".to_string())
-        })?;
+        let end = src_offset
+            .checked_add(dst.len())
+            .ok_or_else(|| CpuError("copy_to_host: offset + length overflow".to_string()))?;
         if end > src.data.len() {
             return Err(CpuError(format!(
                 "copy_to_host: offset {} + size {} exceeds allocation size {}",

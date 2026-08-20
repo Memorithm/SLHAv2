@@ -188,7 +188,8 @@ impl ElasticKvCache {
 
     /// Remaining resident-budget headroom.
     pub fn free_bytes(&self) -> usize {
-        self.config_budget_bytes().saturating_sub(self.resident_bytes)
+        self.config_budget_bytes()
+            .saturating_sub(self.resident_bytes)
     }
 
     fn config_budget_bytes(&self) -> usize {
@@ -621,17 +622,14 @@ impl ElasticKvCache {
     }
 
     fn set_warm_flag(tile: &mut [u8; codec::TILE_BYTES], warm: bool) {
-        let mut flags = u16::from_le_bytes([
-            tile[codec::FLAGS_OFFSET],
-            tile[codec::FLAGS_OFFSET + 1],
-        ]);
+        let mut flags =
+            u16::from_le_bytes([tile[codec::FLAGS_OFFSET], tile[codec::FLAGS_OFFSET + 1]]);
         if warm {
             flags |= codec::FLAG_WARM;
         } else {
             flags &= !codec::FLAG_WARM;
         }
-        tile[codec::FLAGS_OFFSET..codec::FLAGS_OFFSET + 2]
-            .copy_from_slice(&flags.to_le_bytes());
+        tile[codec::FLAGS_OFFSET..codec::FLAGS_OFFSET + 2].copy_from_slice(&flags.to_le_bytes());
     }
 
     /// Accumulate deterministic softmax-normalized attention importance.
@@ -690,8 +688,7 @@ mod tests {
         let mut tile = [0u8; codec::TILE_BYTES];
         tile[..codec::LATENT_BYTES].fill(seed);
         tile[codec::RESIDUAL_OFFSET..codec::RESIDUAL_OFFSET + RESIDUAL_BYTES].fill(seed);
-        tile[codec::SCALE_OFFSET..codec::SCALE_OFFSET + 4]
-            .copy_from_slice(&1.0f32.to_le_bytes());
+        tile[codec::SCALE_OFFSET..codec::SCALE_OFFSET + 4].copy_from_slice(&1.0f32.to_le_bytes());
         tile[codec::DYNAMIC_LAMBDA_OFFSET..codec::DYNAMIC_LAMBDA_OFFSET + 4]
             .copy_from_slice(&0.25f32.to_le_bytes());
         tile[codec::GROUP_SCALES_OFFSET..codec::GROUP_SCALES_OFFSET + codec::N_GROUP_SCALES]

@@ -70,10 +70,7 @@ pub enum TransitionOutcome {
 }
 
 /// Run one deterministic prepare/validate/commit transition.
-pub fn run_transaction<T: Transaction>(
-    tx: &mut T,
-    state: &mut T::State,
-) -> TransitionOutcome {
+pub fn run_transaction<T: Transaction>(tx: &mut T, state: &mut T::State) -> TransitionOutcome {
     if tx.prepare(state) == PhaseOutcome::Failed {
         return rollback_or(tx, state, TransitionOutcome::PrepareFailed);
     }

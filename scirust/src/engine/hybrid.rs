@@ -200,9 +200,12 @@ impl CpuSimdEngine {
         if dim.is_multiple_of(16) {
             #[cfg(target_arch = "x86_64")]
             {
-                if std::is_x86_feature_detected!("avx512f") {
-                    // SAFETY: feature detection and exact packed-key validation
-                    // above satisfy the implementation preconditions.
+                if std::is_x86_feature_detected!("avx512f")
+                    && std::is_x86_feature_detected!("avx512dq")
+                {
+                    // SAFETY: AVX512F + AVX512DQ were both detected at runtime
+                    // and exact packed-key validation above satisfies the
+                    // implementation's memory-layout preconditions.
                     return Ok(unsafe { Self::vector_dot_product_avx512(query, quant_key, scale) });
                 }
             }
@@ -219,7 +222,7 @@ impl CpuSimdEngine {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx512f")]
+    #[target_feature(enable = "avx512f,avx512dq")]
     unsafe fn vector_dot_product_avx512(query: &[f32], quant_key: &[u8], scale: f32) -> f32 {
         use std::arch::x86_64::*;
 
@@ -304,7 +307,10 @@ pub struct GpuEngine {
 #[cfg(feature = "cuda")]
 impl GpuEngine {
     /// Load an explicitly supplied non-empty PTX module and kernel.
-    pub fn new_with_ptx(ptx_src: &'static str, kernel_name: &'static str) -> Result<Self, EngineError> {
+    pub fn new_with_ptx(
+        ptx_src: &'static str,
+        kernel_name: &'static str,
+    ) -> Result<Self, EngineError> {
         use cudarc::nvrtc::Ptx;
         if ptx_src.trim().is_empty() || kernel_name.trim().is_empty() {
             return Err(EngineError::GpuError(
@@ -322,8 +328,7 @@ impl GpuEngine {
     /// Legacy constructor: fails closed because the bundled stub was removed.
     pub fn new() -> Result<Self, EngineError> {
         Err(EngineError::GpuError(
-            "GpuEngine::new has no production kernel; use new_with_ptx or slhav2-vram"
-                .to_string(),
+            "GpuEngine::new has no production kernel; use new_with_ptx or slhav2-vram".to_string(),
         ))
     }
 
@@ -337,6 +342,10 @@ impl GpuEngine {
                 "cannot pin an empty host region".to_string(),
             ));
         }
+        // SAFETY: `buffer` is a live, non-empty mutable slice for the
+        // entire lifetime of the returned `PinnedHostRegion`. Its pointer and
+        // length therefore describe valid host storage, and the guard keeps an
+        // exclusive borrow until the matching unregister in Drop.
         let result = unsafe {
             cudaHostRegister(
                 buffer.as_mut_ptr().cast(),
@@ -357,7 +366,13 @@ impl GpuEngine {
     }
 
     /// Launch the explicitly loaded kernel.
-    pub fn launch_kernel(&self, kernel_name: &str, param: u64) -> Result<(), EngineError> {
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `kernel_name` resolves to a CUDA kernel
+    /// whose parameter ABI is exactly one by-value `u64`, matching `(param,)`.
+    /// Rust and cudarc cannot validate a PTX kernel's parameter ABI.
+    pub unsafe fn launch_kernel(&self, kernel_name: &str, param: u64) -> Result<(), EngineError> {
         use cudarc::driver::LaunchAsync;
         if kernel_name.trim().is_empty() {
             return Err(EngineError::InvalidLayout(
@@ -373,6 +388,8 @@ impl GpuEngine {
             block_dim: (1, 1, 1),
             shared_mem_bytes: 0,
         };
+        // SAFETY: this function's caller contract requires the selected
+        // PTX kernel to accept exactly the single `u64` argument supplied here.
         unsafe {
             func.launch(cfg, (param,))
                 .map_err(|e| EngineError::GpuError(format!("{e:?}")))?;
@@ -392,6 +409,9 @@ pub struct PinnedHostRegion<'a> {
 #[cfg(feature = "cuda")]
 impl Drop for PinnedHostRegion<'_> {
     fn drop(&mut self) {
+        // SAFETY: `base` came from the same live mutable slice successfully
+        // registered by `register_pinned_memory`; this RAII guard owns that
+        // registration and Drop executes at most once for the guard.
         let _ = unsafe { cudaHostUnregister(self.base.cast()) };
     }
 }
@@ -418,28 +438,46 @@ pub struct GpuEngine;
 #[cfg(not(feature = "cuda"))]
 impl GpuEngine {
     pub fn new() -> Result<Self, EngineError> {
-        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
+        Err(EngineError::GpuError(
+            "CUDA support is disabled".to_string(),
+        ))
     }
 
     pub fn new_with_ptx(
         _ptx_src: &'static str,
         _kernel_name: &'static str,
     ) -> Result<Self, EngineError> {
-        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
+        Err(EngineError::GpuError(
+            "CUDA support is disabled".to_string(),
+        ))
     }
 
     pub fn register_pinned_memory(&self, _buffer: &mut [u8]) -> Result<(), EngineError> {
-        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
+        Err(EngineError::GpuError(
+            "CUDA support is disabled".to_string(),
+        ))
     }
 
-    pub fn launch_kernel(&self, _kernel_name: &str, _param: u64) -> Result<(), EngineError> {
-        Err(EngineError::GpuError("CUDA support is disabled".to_string()))
+    /// Fail-closed stub matching the CUDA launch contract.
+    ///
+    /// # Safety
+    ///
+    /// With CUDA enabled, the selected kernel must accept exactly one
+    /// by-value `u64` parameter.
+    pub unsafe fn launch_kernel(&self, _kernel_name: &str, _param: u64) -> Result<(), EngineError> {
+        Err(EngineError::GpuError(
+            "CUDA support is disabled".to_string(),
+        ))
     }
 }
 
 /// Experimental pipeline step. The GPU launch is validated first; CPU scoring
 /// then runs through the fail-closed compatibility wrapper.
-pub fn pipeline_execution_step(
+/// # Safety
+///
+/// `kernel_name` must resolve to a CUDA kernel whose parameter ABI is exactly
+/// one by-value `u64`, matching `layer_n_gpu_param`.
+pub unsafe fn pipeline_execution_step(
     gpu_engine: &GpuEngine,
     kernel_name: &str,
     layer_n_gpu_param: u64,
@@ -448,7 +486,10 @@ pub fn pipeline_execution_step(
     layer_n_plus_1_scale: f32,
     layer_n_plus_1_scores: &mut [f32],
 ) -> Result<(), EngineError> {
-    gpu_engine.launch_kernel(kernel_name, layer_n_gpu_param)?;
+    // SAFETY: required by this function's caller contract.
+    unsafe {
+        gpu_engine.launch_kernel(kernel_name, layer_n_gpu_param)?;
+    }
     CpuSimdEngine::try_dequant_and_fma(
         layer_n_plus_1_query,
         layer_n_plus_1_keys,

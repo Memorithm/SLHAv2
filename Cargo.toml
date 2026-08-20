@@ -16,7 +16,7 @@ members = [
     "slha-python",
     "slhav2-vram",
 ]
-exclude = ["elastic/*"]
+exclude = ["elastic"]
 
 # Unqualified Cargo commands intentionally target the dependency-free `scirust`
 # core, preserving lightweight builds and unambiguous example/benchmark commands.
@@ -27,3 +27,6 @@ default-members = ["scirust"]
 opt-level = 3
 lto = true
 codegen-units = 1
+
+[profile.bench.package.slhav2-vram]
+debug = 1

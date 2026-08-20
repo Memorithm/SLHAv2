@@ -1,4 +1,5 @@
 [package]
+workspace = ".."
 name = "elastic-core"
 version.workspace = true
 edition.workspace = true

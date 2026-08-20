@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
-elastic-core = { path = "../elastic/elastic-core" }
+elastic-core = { version = "0.1.0", path = "../elastic/elastic-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
@@ -27,6 +27,3 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 [[bench]]
 name = "score"
 harness = false
-
-[profile.bench]
-debug = 1

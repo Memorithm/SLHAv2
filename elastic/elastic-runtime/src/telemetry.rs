@@ -1,7 +1,7 @@
 //! Structured elastic telemetry.
 //!
 //! Backends fill measured fields and leave unknown values as `None`. Derived
-//! values are recomputed from their current inputs on every [`refresh`] call;
+//! values are recomputed from their current inputs on every [`ElasticTelemetry::refresh`] call;
 //! stale ratios/pressures are never retained when an input disappears or is
 //! invalid.
 
@@ -92,10 +92,7 @@ impl ElasticTelemetry {
         };
         self.vram_pressure = pressure(self.vram_total, self.vram_available);
         self.ram_pressure = pressure(self.ram_total, self.ram_available);
-        self.fragmentation = match (
-            self.allocator_free,
-            self.allocator_largest_free_block,
-        ) {
+        self.fragmentation = match (self.allocator_free, self.allocator_largest_free_block) {
             (Some(0), Some(0)) => Some(0.0),
             (Some(free), Some(largest)) if free > 0 && largest <= free => {
                 Some(1.0 - largest as f64 / free as f64)

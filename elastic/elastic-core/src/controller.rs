@@ -288,7 +288,13 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
         } else if let Some(steps) = exhaustion {
             if steps <= self.config.forecast_horizon && !self.gate.state().is_active() {
                 trace.consider(
-                    Candidate::new("demote", self.release_target(obs.used_bytes, capacity) as f64, 0.0, 0.0, 0.0),
+                    Candidate::new(
+                        "demote",
+                        self.release_target(obs.used_bytes, capacity) as f64,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ),
                     None,
                 );
                 trace.choose(
@@ -398,19 +404,27 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
     ) -> Result<(&'static str, bool), B::Error> {
         let (outcome, expected_used) = match action {
             ActionRequest::Demote => {
-                let released = self.backend.demote(self.release_target(obs.used_bytes, capacity))?;
+                let released = self
+                    .backend
+                    .demote(self.release_target(obs.used_bytes, capacity))?;
                 ("demoted", obs.used_bytes.saturating_sub(released))
             }
             ActionRequest::Promote => {
-                let restored = self.backend.promote(self.restore_target(obs.used_bytes, capacity))?;
+                let restored = self
+                    .backend
+                    .promote(self.restore_target(obs.used_bytes, capacity))?;
                 ("promoted", obs.used_bytes.saturating_add(restored))
             }
             ActionRequest::Offload => {
-                let released = self.backend.offload(self.release_target(obs.used_bytes, capacity))?;
+                let released = self
+                    .backend
+                    .offload(self.release_target(obs.used_bytes, capacity))?;
                 ("offloaded", obs.used_bytes.saturating_sub(released))
             }
             ActionRequest::Restore => {
-                let restored = self.backend.restore(self.restore_target(obs.used_bytes, capacity))?;
+                let restored = self
+                    .backend
+                    .restore(self.restore_target(obs.used_bytes, capacity))?;
                 ("restored", obs.used_bytes.saturating_add(restored))
             }
             ActionRequest::Prefetch => {
@@ -442,7 +456,7 @@ impl<R: ElasticResource, B: ElasticBackend> ElasticController<R, B> {
 mod tests {
     use super::*;
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     struct Resource(&'static str);
     impl ElasticResource for Resource {
         fn resource_id(&self) -> &str {
@@ -501,7 +515,9 @@ mod tests {
     #[test]
     fn low_pressure_promotion_requests_nonzero_bytes() {
         let mut controller = controller(1000, 750);
-        let decision = controller.step(Observation::new(10, 100, 1000, 1.0)).unwrap();
+        let decision = controller
+            .step(Observation::new(10, 100, 1000, 1.0))
+            .unwrap();
         assert_eq!(decision.action, ActionRequest::Promote);
         assert_eq!(controller.backend().promoted, 650);
         assert_eq!(controller.backend().last_verified, 750);
@@ -510,7 +526,9 @@ mod tests {
     #[test]
     fn high_pressure_demotes_toward_soft_target() {
         let mut controller = controller(1000, 750);
-        let decision = controller.step(Observation::new(1, 1100, 2000, 1.0)).unwrap();
+        let decision = controller
+            .step(Observation::new(1, 1100, 2000, 1.0))
+            .unwrap();
         assert_eq!(decision.action, ActionRequest::Demote);
         assert_eq!(controller.backend().demoted, 350);
         assert_eq!(controller.backend().last_verified, 750);
@@ -519,7 +537,9 @@ mod tests {
     #[test]
     fn budget_hard_limit_tightens_runtime_capacity() {
         let mut controller = controller(1000, 750);
-        let decision = controller.step(Observation::new(1, 1100, 10_000, 1.0)).unwrap();
+        let decision = controller
+            .step(Observation::new(1, 1100, 10_000, 1.0))
+            .unwrap();
         assert_eq!(decision.action, ActionRequest::Demote);
     }
 
@@ -534,7 +554,9 @@ mod tests {
             budget,
             Some(node),
         );
-        let decision = controller.step(Observation::new(1, 1100, 1000, 1.0)).unwrap();
+        let decision = controller
+            .step(Observation::new(1, 1100, 1000, 1.0))
+            .unwrap();
         assert_eq!(decision.action, ActionRequest::Demote);
         assert_eq!(controller.backend().demoted, 0);
     }

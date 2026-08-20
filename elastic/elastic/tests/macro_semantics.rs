@@ -5,7 +5,6 @@ use elastic::elastic_budget;
 use elastic::elastic_policy;
 use elastic::elastic_state;
 use elastic::elastic_target;
-use elastic::prelude::*;
 
 elastic_state! {
     ContextTier {

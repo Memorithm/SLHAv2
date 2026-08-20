@@ -58,10 +58,10 @@ impl KvTopology {
         let heads = u64::try_from(self.kv_heads).map_err(|_| "KV head count exceeds u64")?;
         let head_dim =
             u64::try_from(self.head_dim_k).map_err(|_| "KV head dimension exceeds u64")?;
-        let k_width = u64::try_from(self.k_bytes_per_elem)
-            .map_err(|_| "KV K element width exceeds u64")?;
-        let v_width = u64::try_from(self.v_bytes_per_elem)
-            .map_err(|_| "KV V element width exceeds u64")?;
+        let k_width =
+            u64::try_from(self.k_bytes_per_elem).map_err(|_| "KV K element width exceeds u64")?;
+        let v_width =
+            u64::try_from(self.v_bytes_per_elem).map_err(|_| "KV V element width exceeds u64")?;
 
         let vectors = layers
             .checked_mul(heads)
@@ -292,10 +292,9 @@ impl ElasticContext {
     /// Observe workload/resources, choose one ECA action and apply that exact
     /// action to the physical cache.
     pub fn step(&mut self, obs: &ContextObservation) -> Result<ActionRequest, &'static str> {
-        obs.validate().map_err(|error| {
+        obs.validate().inspect_err(|_| {
             self.telemetry.hard_constraint_violations =
                 self.telemetry.hard_constraint_violations.saturating_add(1);
-            error
         })?;
 
         let logical_forecast = obs
@@ -348,11 +347,8 @@ impl ElasticContext {
         let budget = self.controller_budget_bytes();
         let resident = self.cache.resident_bytes() as u64;
         let resident_and_growth = resident.saturating_add(growth_shortfall);
-        let system_pressure_used = scaled_system_pressure(
-            obs.vram_total,
-            obs.vram_available,
-            budget,
-        );
+        let system_pressure_used =
+            scaled_system_pressure(obs.vram_total, obs.vram_available, budget);
         // Both local cache demand and global VRAM pressure are first-class
         // controller inputs. The stronger one wins; logical raw history is
         // deliberately not confused with physical residency.
@@ -576,15 +572,7 @@ mod tests {
             logical_tokens: 2048,
             predicted_growth: 2048,
             vram_available: 0,
-            ..ContextObservation::new(
-                1,
-                2048,
-                small_topology(),
-                0,
-                1 << 30,
-                1 << 30,
-                1 << 30,
-            )
+            ..ContextObservation::new(1, 2048, small_topology(), 0, 1 << 30, 1 << 30, 1 << 30)
         };
         let action = ctx.step(&obs).unwrap();
         assert_eq!(action, ActionRequest::Demote);
@@ -599,15 +587,7 @@ mod tests {
             ctx.cache_mut().insert(tile());
         }
         let before = ctx.cache().resident_bytes();
-        let obs = ContextObservation::new(
-            1,
-            4,
-            small_topology(),
-            100,
-            1000,
-            1000,
-            2000,
-        );
+        let obs = ContextObservation::new(1, 4, small_topology(), 100, 1000, 1000, 2000);
         let action = ctx.step(&obs).unwrap();
         assert_eq!(action, ActionRequest::Demote);
         assert!(ctx.cache().resident_bytes() < before);
@@ -617,15 +597,7 @@ mod tests {
     #[test]
     fn vram_pressure_uses_system_availability_not_cache_fraction() {
         let mut ctx = ElasticContext::new("ctx", 1 << 20, small_topology());
-        let obs = ContextObservation::new(
-            1,
-            0,
-            small_topology(),
-            256,
-            1024,
-            512,
-            1024,
-        );
+        let obs = ContextObservation::new(1, 0, small_topology(), 256, 1024, 512, 1024);
         let _ = ctx.step(&obs);
         assert!((ctx.telemetry.vram_pressure - 0.75).abs() < 1e-12);
     }
