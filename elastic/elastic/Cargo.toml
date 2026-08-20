@@ -11,6 +11,6 @@ keywords = ["elastic", "resource", "language"]
 categories = ["algorithms"]
 
 [dependencies]
-elastic-core = { path = "../elastic-core" }
-elastic-runtime = { path = "../elastic-runtime" }
-elastic-macros = { path = "../elastic-macros" }
+elastic-core = { version = "0.1.0", path = "../elastic-core" }
+elastic-runtime = { version = "0.1.0", path = "../elastic-runtime" }
+elastic-macros = { version = "0.1.0", path = "../elastic-macros" }
