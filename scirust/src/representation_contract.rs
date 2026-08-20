@@ -11,7 +11,7 @@ use std::fmt;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RepresentationCapability {
     /// Stable representation identifier, e.g. `epg.so2`.
-    pub id: String,
+    id: String,
     /// Contract/schema version understood by the model.
     pub schema_version: u32,
 }
@@ -24,6 +24,11 @@ impl RepresentationCapability {
             return Err(ContractError::EmptyRepresentationId);
         }
         Ok(Self { id, schema_version })
+    }
+
+    /// Validated stable representation identifier.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 }
 
@@ -198,6 +203,16 @@ impl std::error::Error for ContractError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_identifier_is_validated_and_read_only() {
+        assert!(matches!(
+            RepresentationCapability::new("   ", 1),
+            Err(ContractError::EmptyRepresentationId)
+        ));
+        let capability = RepresentationCapability::new("epg.so2", 1).unwrap();
+        assert_eq!(capability.id(), "epg.so2");
+    }
 
     #[test]
     fn epg_like_contract_builds_a_typed_transition_graph() {
