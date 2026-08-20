@@ -123,9 +123,11 @@ impl ModelRepresentationContract {
         if transition.allowed_mechanisms.is_empty() {
             return Err(ContractError::NoAllowedMechanism);
         }
-        if self.transitions.iter().any(|existing| {
-            existing.from == transition.from && existing.to == transition.to
-        }) {
+        if self
+            .transitions
+            .iter()
+            .any(|existing| existing.from == transition.from && existing.to == transition.to)
+        {
             return Err(ContractError::DuplicateTransition {
                 from: transition.from,
                 to: transition.to,
@@ -178,7 +180,10 @@ impl fmt::Display for ContractError {
                 "transition endpoint {} v{} was not declared as a model capability",
                 cap.id, cap.schema_version
             ),
-            Self::NoAllowedMechanism => write!(f, "representation transition must allow at least one mechanism"),
+            Self::NoAllowedMechanism => write!(
+                f,
+                "representation transition must allow at least one mechanism"
+            ),
             Self::DuplicateTransition { from, to } => write!(
                 f,
                 "duplicate representation transition {} v{} -> {} v{}",
