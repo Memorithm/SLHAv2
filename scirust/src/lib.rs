@@ -39,6 +39,7 @@ pub mod metrics;
 pub mod norm_manifest;
 pub mod numa;
 pub mod ranking;
+pub mod representation_contract;
 pub mod residual;
 pub mod rng;
 pub mod rope;
