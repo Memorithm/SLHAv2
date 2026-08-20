@@ -271,13 +271,7 @@ impl GpuScoringPipeline {
         self.engine
             .copy_to_host(&self.scores_dev, 0, &mut self.score_buf)?;
 
-        for (index, chunk) in self
-            .score_buf
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .enumerate()
-        {
+        for (index, chunk) in self.score_buf.as_chunks::<4>().0.iter().enumerate() {
             scores[index] = f32::from_le_bytes(*chunk);
         }
         Ok(())
