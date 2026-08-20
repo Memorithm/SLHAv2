@@ -63,31 +63,27 @@ pub fn u64_slice_to_le_bytes(values: &[u64]) -> Vec<u8> {
 }
 
 pub fn le_bytes_to_f32_vec(bytes: &[u8]) -> Result<Vec<f32>, &'static str> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("byte length not divisible by 4 for f32 conversion");
     }
-    bytes
-        .chunks_exact(4)
-        .map(|c| {
-            <[u8; 4]>::try_from(c)
-                .map(f32::from_le_bytes)
-                .map_err(|_| "invalid f32 byte chunk")
-        })
-        .collect()
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect())
 }
 
 pub fn le_bytes_to_u64_vec(bytes: &[u8]) -> Result<Vec<u64>, &'static str> {
-    if bytes.len() % 8 != 0 {
+    if !bytes.len().is_multiple_of(8) {
         return Err("byte length not divisible by 8 for u64 conversion");
     }
-    bytes
-        .chunks_exact(8)
-        .map(|c| {
-            <[u8; 8]>::try_from(c)
-                .map(u64::from_le_bytes)
-                .map_err(|_| "invalid u64 byte chunk")
-        })
-        .collect()
+    Ok(bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| u64::from_le_bytes(*chunk))
+        .collect())
 }
 
 pub fn read_f32_le(bytes: &[u8], offset: usize) -> Result<f32, &'static str> {
