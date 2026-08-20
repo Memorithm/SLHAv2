@@ -154,6 +154,16 @@ int main() {
         CHECK(ok.load() > 0);
     }
 
+    // 7. First-run initialization uses the model-derived layer count directly;
+    //    it must not require a prior graph callback to "observe" a layer.
+    {
+        CHECK(slha_global_init("unused-test-weights", SLHA_KV_TILESTORE, 3) == 0);
+        CHECK(slha_get_num_layers() == 3);
+        CHECK(g_slha_tile_store.n_layers == 3);
+        CHECK(g_slha_tile_store.capacity == 0);
+        slha_global_shutdown();
+    }
+
     if (failures == 0) {
         std::printf("=== tile-store tests complete: ALL PASS ===\n");
         return 0;
