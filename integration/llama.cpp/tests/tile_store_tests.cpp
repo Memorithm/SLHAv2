@@ -55,9 +55,53 @@ int main() {
         CHECK(!store.write(0, 0, nullptr));
         CHECK(store.read(2, 0) == nullptr);
         CHECK(store.read(0, 8) == nullptr);
+        CHECK(store.read_range(0, 0, 0) == nullptr);
+        CHECK(store.read_range(0, 7, 2) == nullptr);
     }
 
-    // 3. Reset invalidates previously returned pointers' validity flags
+    // 3. read_range returns one aligned contiguous immutable snapshot.
+    {
+        slha_tile_store store;
+        CHECK(store.init(1, 8, 128));
+        alignas(128) unsigned char a[128];
+        alignas(128) unsigned char b[128];
+        alignas(128) unsigned char c[128];
+        alignas(128) unsigned char replacement[128];
+        std::memset(a, 0x11, sizeof(a));
+        std::memset(b, 0x22, sizeof(b));
+        std::memset(c, 0x33, sizeof(c));
+        std::memset(replacement, 0x44, sizeof(replacement));
+        CHECK(store.write(0, 2, a));
+        CHECK(store.write(0, 3, b));
+        CHECK(store.write(0, 4, c));
+
+        const auto * range = static_cast<const unsigned char *>(store.read_range(0, 2, 3));
+        CHECK(range != nullptr);
+        if (range != nullptr) {
+            CHECK(reinterpret_cast<uintptr_t>(range) % 128 == 0);
+            CHECK(range[0] == 0x11);
+            CHECK(range[128] == 0x22);
+            CHECK(range[256] == 0x33);
+
+            // The returned bytes are a snapshot, not an unlocked pointer into
+            // mutable store storage. A later write must not mutate this range.
+            CHECK(store.write(0, 3, replacement));
+            CHECK(range[128] == 0x22);
+        }
+
+        const auto * refreshed = static_cast<const unsigned char *>(store.read_range(0, 2, 3));
+        CHECK(refreshed != nullptr);
+        if (refreshed != nullptr) {
+            CHECK(refreshed[0] == 0x11);
+            CHECK(refreshed[128] == 0x44);
+            CHECK(refreshed[256] == 0x33);
+        }
+
+        // A range containing any invalid slot fails closed as a whole.
+        CHECK(store.read_range(0, 1, 4) == nullptr);
+    }
+
+    // 4. Reset invalidates previously returned pointers' validity flags
     //    (the pointer itself remains allocated; reads return nullptr).
     {
         slha_tile_store store;
@@ -70,7 +114,7 @@ int main() {
         CHECK(store.read(0, 1) == nullptr);
     }
 
-    // 4. clear_layer invalidates only that layer.
+    // 5. clear_layer invalidates only that layer.
     {
         slha_tile_store store;
         CHECK(store.init(2, 4, 128));
@@ -82,7 +126,7 @@ int main() {
         CHECK(store.read(1, 0) != nullptr);
     }
 
-    // 5. Concurrent writers on different slots never corrupt other slots.
+    // 6. Concurrent writers on different slots never corrupt other slots.
     {
         slha_tile_store store;
         CHECK(store.init(1, 256, 128));
