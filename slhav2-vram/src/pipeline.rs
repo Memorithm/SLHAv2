@@ -86,8 +86,10 @@ pub fn copy_scores_from_gpu<E: DeviceEngine>(
     let mut buffer = vec![0u8; total];
     engine.copy_to_host(src_alloc, offset, &mut buffer)?;
     Ok(buffer
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect())
 }
 
@@ -269,8 +271,14 @@ impl GpuScoringPipeline {
         self.engine
             .copy_to_host(&self.scores_dev, 0, &mut self.score_buf)?;
 
-        for (index, chunk) in self.score_buf.chunks_exact(4).enumerate() {
-            scores[index] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for (index, chunk) in self
+            .score_buf
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            scores[index] = f32::from_le_bytes(*chunk);
         }
         Ok(())
     }
