@@ -5,11 +5,13 @@ on:
     paths:
       - "elastic/**"
       - "Cargo.toml"
+      - "deny.toml"
       - ".github/workflows/elastic-ci.yml"
   pull_request:
     paths:
       - "elastic/**"
       - "Cargo.toml"
+      - "deny.toml"
       - ".github/workflows/elastic-ci.yml"
 
 permissions:
@@ -60,8 +62,8 @@ jobs:
       - name: Check workspace on declared MSRV
         run: cargo --locked check --workspace --all-targets --all-features
 
-  rustsec:
-    name: Elastic RustSec
+  supply-chain:
+    name: Elastic supply chain
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -71,7 +73,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - name: Install cargo-audit and cargo-deny
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
       - name: Audit standalone Elastic lockfile
         run: cargo audit
+      - name: License / bans / advisories / sources policy
+        run: cargo deny --config ../deny.toml check
