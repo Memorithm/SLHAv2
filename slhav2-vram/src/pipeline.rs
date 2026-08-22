@@ -53,8 +53,8 @@ pub fn score_tiles_cpu<E: DeviceEngine>(input: ScoringInput<'_, E>) {
 
 /// Copy trusted serialized tiles to a generic device allocation.
 ///
-/// CUDA production paths should prefer [`GpuScoringPipeline`], which validates
-/// codec flags before device mutation.
+/// CUDA production paths should prefer `GpuScoringPipeline`, which validates
+/// codec flags before device mutation when the CUDA PTX path is available.
 pub fn copy_tiles_to_gpu<E: DeviceEngine>(
     engine: &E,
     tiles: &[SerializedTile],
