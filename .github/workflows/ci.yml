@@ -2,6 +2,11 @@ name: CI
 
 on:
   push:
+    # Push-triggered runs share the concurrency group with the pull_request
+    # run of the same branch (head_ref == ref_name), so one cancels the
+    # other and GitHub keeps the cancelled run's red jobs on the PR checks.
+    # Feature branches are covered by `pull_request`; `push` covers master.
+    branches: [master]
   pull_request:
 
 permissions:

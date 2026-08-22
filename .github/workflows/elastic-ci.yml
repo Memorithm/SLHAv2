@@ -2,6 +2,11 @@ name: Elastic CI
 
 on:
   push:
+    # Same branch → same concurrency group as the pull_request run (head_ref
+    # == ref_name); scope `push` to master so the two never cancel each other
+    # and leave red cancelled jobs on PR checks. Feature branches are covered
+    # by `pull_request`.
+    branches: [master]
     paths:
       - "elastic/**"
       - "Cargo.toml"
