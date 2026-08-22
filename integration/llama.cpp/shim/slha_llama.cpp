@@ -329,17 +329,52 @@ slha_score_mode slha_score_mode_from_env() {
     return SLHA_SCORE_OFF;
 }
 
-int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
+int slha_global_init(const char * weights_dir, slha_kv_mode mode, size_t model_num_layers) {
+    if (model_num_layers == 0 ||
+        model_num_layers > static_cast<size_t>(INT32_MAX)) {
+        std::cerr << "[SLHA] invalid model layer count: "
+                  << model_num_layers << "\n";
+        return -1;
+    }
+
+    const int32_t model_layers = static_cast<int32_t>(model_num_layers);
+    g_observed_num_layers.store(model_layers, std::memory_order_release);
+
     auto & state = get_global_state();
     std::lock_guard<std::mutex> lock(state.mutex);
 
     if (state.initialized) {
-        // Re-initializing with a new context: reset tile store and counters
+        // Re-initializing for another llama context must adopt that context's
+        // exact model-derived layer count as well.  Keeping the old vector or
+        // tile-store geometry would make later valid layer ids fail closed.
+        if (state.num_layers != model_layers) {
+            state.num_layers = model_layers;
+            state.layers.clear();
+            state.layers.resize(state.num_layers);
+            for (int32_t i = 0; i < state.num_layers; ++i) {
+                state.layers[i].layer_id = i;
+                state.layers[i].n_embd_gqa = 0;
+                state.layers[i].kv_mode = state.kv_mode;
+                state.layers[i].score_mode = state.score_mode;
+                state.layers[i].model_handle = nullptr;
+                state.layers[i].scratch = nullptr;
+            }
+
+            if (state.kv_mode == SLHA_KV_TILESTORE ||
+                state.score_mode != SLHA_SCORE_OFF) {
+                if (!g_slha_tile_store.init(
+                        model_num_layers, 0, slha_tile_size())) {
+                    std::cerr << "[SLHA] failed to resize tile-store metadata "
+                                 "for reinitialized context\n";
+                    return -1;
+                }
+            }
+        } else if (g_slha_tile_store.n_layers > 0) {
+            g_slha_tile_store.reset();
+        }
+
         for (size_t i = 0; i < SLHA_MAX_LAYERS; ++i) {
             g_slha_tiles_written[i].store(0, std::memory_order_relaxed);
-        }
-        if (g_slha_tile_store.n_layers > 0) {
-            g_slha_tile_store.reset();
         }
         if (state.score_mode == SLHA_SCORE_REPLACE) {
             g_slha_replace_counters.reset();
@@ -482,16 +517,11 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
             return -1;
         }
 
-        // Create layer states sized from the model's OBSERVED layer count
-        // (graph builds call slha_get_layer_state before execution). The
-        // old fixed 128-layer array silently truncated larger models.
-        int32_t observed = g_observed_num_layers.load(std::memory_order_acquire);
-        if (observed <= 0) {
-            std::cerr << "[SLHA] layer-state init before any layer was "
-                         "observed; refusing to guess a layer count\n";
-            return -1;
-        }
-        state.num_layers = observed;
+        // Create layer states directly from llama.cpp's model-derived layer
+        // count.  Global initialization runs at the KV-cache construction seam,
+        // before any graph callback or K allocation, so first-run correctness
+        // must never depend on observing layer ids later.
+        state.num_layers = model_layers;
         state.layers.resize(state.num_layers);
         for (int32_t i = 0; i < state.num_layers; ++i) {
             state.layers[i].layer_id = i;
@@ -522,21 +552,11 @@ int slha_global_init(const char * weights_dir, slha_kv_mode mode) {
             g_slha_tiles_written[i].store(0, std::memory_order_relaxed);
         }
 
-        // Initialize the compressed K side store.
-        //
-        // The store is sized from the model's OBSERVED layer count (graph
-        // builds call slha_get_layer_state before execution), not from an
-        // arbitrary 128-layer cap: a model with more layers must not be
-        // silently truncated. Layers beyond the observed count are rejected
-        // by the bounds checks.
+        // Initialize the compressed K side store from the exact model-derived
+        // layer count supplied by llama.cpp before the first K allocation.
+        // There is deliberately no fixed SLHA layer cap here.
         if (mode == SLHA_KV_TILESTORE || state.score_mode != SLHA_SCORE_OFF) {
-            int32_t observed = g_observed_num_layers.load(std::memory_order_acquire);
-            if (observed <= 0) {
-                std::cerr << "[SLHA] tile store init before any layer was "
-                             "observed; refusing to guess a layer count\n";
-                return -1;
-            }
-            const size_t n_layers = static_cast<size_t>(observed);
+            const size_t n_layers = model_num_layers;
             // Runtime context capacity is not known at global init. Keep only
             // model-derived layer count and tile geometry here; the K-cache
             // allocation hook sizes the store from llama.cpp's actual
@@ -688,28 +708,64 @@ bool slha_tile_store::write(int32_t layer_id, size_t position, const void * tile
 }
 
 const void * slha_tile_store::read(int32_t layer_id, size_t position) const {
-    if (layer_id < 0) {
+    return read_range(layer_id, position, 1);
+}
+
+const void * slha_tile_store::read_range(
+    int32_t layer_id,
+    size_t position,
+    size_t count
+) const {
+    if (layer_id < 0 || count == 0) {
         return nullptr;
     }
+
     const size_t layer = static_cast<size_t>(layer_id);
-    // Never expose mutable store storage after releasing `mutex`: a concurrent
-    // writer could otherwise race with a caller dereferencing the returned
-    // pointer. The public ABI is a 128-byte SLHA tile, so copy one immutable
-    // snapshot into thread-local, 128-aligned storage while still locked.
-    alignas(TILE_ALIGN) static thread_local unsigned char snapshot[128];
+
+    // One thread-local copy-out arena backs both read() and read_range().
+    // Over-allocation lets us select a TILE_ALIGN-aligned address without
+    // exposing the mutable store after releasing `mutex`.
+    static thread_local std::vector<unsigned char> snapshot_storage;
+
     std::lock_guard<std::mutex> lock(mutex);
-    if (tile_bytes != sizeof(snapshot) || layer >= n_layers || position >= capacity) {
+
+    if (tile_bytes != 128 || layer >= n_layers || position >= capacity ||
+        count > capacity - position) {
         return nullptr;
     }
-    const size_t index = layer * capacity + position;
-    if (index >= valid.size() || valid[index] == 0) {
+    if (count > SIZE_MAX / tile_bytes) {
         return nullptr;
     }
-    const size_t offset = tile_base_offset + index * tile_bytes;
-    if (offset > tiles.size() || tile_bytes > tiles.size() - offset) {
+
+    const size_t byte_count = count * tile_bytes;
+    if (byte_count > SIZE_MAX - (TILE_ALIGN - 1)) {
         return nullptr;
     }
-    std::memcpy(snapshot, tiles.data() + offset, tile_bytes);
+
+    const size_t valid_base = layer * capacity + position;
+    if (valid_base > valid.size() || count > valid.size() - valid_base) {
+        return nullptr;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (valid[valid_base + i] == 0) {
+            return nullptr;
+        }
+    }
+
+    const size_t offset =
+        tile_base_offset + (layer * capacity + position) * tile_bytes;
+    if (offset > tiles.size() || byte_count > tiles.size() - offset) {
+        return nullptr;
+    }
+
+    snapshot_storage.resize(byte_count + TILE_ALIGN - 1);
+    const uintptr_t raw =
+        reinterpret_cast<uintptr_t>(snapshot_storage.data());
+    const uintptr_t aligned =
+        (raw + TILE_ALIGN - 1) & ~(static_cast<uintptr_t>(TILE_ALIGN) - 1);
+    auto * snapshot = reinterpret_cast<unsigned char *>(aligned);
+
+    std::memcpy(snapshot, tiles.data() + offset, byte_count);
     return snapshot;
 }
 
@@ -1357,26 +1413,16 @@ void slha_shadow_score(
             }
 
             const size_t pos_offset = static_cast<size_t>(s * n_kv);
+            const size_t tile_count = static_cast<size_t>(n_kv);
             const SciRustSlhaTile * tiles =
-                static_cast<const SciRustSlhaTile *>(g_slha_tile_store.read(layer->layer_id, pos_offset));
+                static_cast<const SciRustSlhaTile *>(
+                    g_slha_tile_store.read_range(
+                        layer->layer_id, pos_offset, tile_count));
             if (!tiles) {
                 continue;
             }
 
-            // Verify contiguous range is fully populated.
-            bool contiguous = true;
-            for (int64_t k = 0; k < n_kv; ++k) {
-                if (!g_slha_tile_store.check_capacity(layer->layer_id, pos_offset + static_cast<size_t>(k)) ||
-                    !g_slha_tile_store.read(layer->layer_id, pos_offset + static_cast<size_t>(k))) {
-                    contiguous = false;
-                    break;
-                }
-            }
-            if (!contiguous) {
-                continue;
-            }
-
-            scores.resize(static_cast<size_t>(n_kv));
+            scores.resize(tile_count);
             rc = slha_score_tiles(model, tiles, static_cast<size_t>(n_kv), q_coarse.data(), q_sign.data(), scores.data());
             if (rc != SLHA_OK) {
                 std::cerr << "[SLHA] shadow score score_tiles failed: "
@@ -1615,21 +1661,15 @@ void slha_shadow_score(
                 static_cast<size_t>(n_kv) - n_written, std::memory_order_relaxed);
         }
 
-        // Read tile pointer base (position 0) and verify all needed positions
+        // Materialize exactly one immutable contiguous snapshot.  Do not call
+        // read()/read_range() again before slha_score_tiles(): another copy-out
+        // call on this thread invalidates the snapshot lifetime contract.
         const SciRustSlhaTile * tiles = n_check > 0
-            ? static_cast<const SciRustSlhaTile *>(g_slha_tile_store.read(layer->layer_id, 0))
+            ? static_cast<const SciRustSlhaTile *>(
+                g_slha_tile_store.read_range(layer->layer_id, 0, n_check))
             : nullptr;
-        size_t first_missing = SIZE_MAX;
-        if (n_check > 0 && !tiles) {
-            first_missing = 0;
-        } else {
-            for (size_t k = 1; k < n_check; ++k) {
-                if (!g_slha_tile_store.read(layer->layer_id, k)) {
-                    first_missing = k;
-                    break;
-                }
-            }
-        }
+        const size_t first_missing =
+            (n_check > 0 && !tiles) ? 0 : SIZE_MAX;
         if (first_missing != SIZE_MAX) {
             g_slha_replace_counters.n_missing_tile.fetch_add(1, std::memory_order_relaxed);
             g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);

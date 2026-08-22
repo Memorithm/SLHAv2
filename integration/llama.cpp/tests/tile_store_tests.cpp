@@ -161,6 +161,15 @@ int main() {
         CHECK(slha_get_num_layers() == 3);
         CHECK(g_slha_tile_store.n_layers == 3);
         CHECK(g_slha_tile_store.capacity == 0);
+
+        // A second llama context in the same process may have a different
+        // architecture. Re-initialization must replace, not retain, the first
+        // context's model-derived layer geometry.
+        CHECK(slha_global_init("unused-test-weights", SLHA_KV_TILESTORE, 5) == 0);
+        CHECK(slha_get_num_layers() == 5);
+        CHECK(g_slha_tile_store.n_layers == 5);
+        CHECK(g_slha_tile_store.capacity == 0);
+
         slha_global_shutdown();
     }
 
