@@ -1,0 +1,15 @@
+[package]
+workspace = ".."
+name = "elastic-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Elastic resource language testkit: deterministic simulator, scripted pressure, fault injection, state-machine helpers."
+keywords = ["elastic", "testing", "simulation"]
+categories = ["development-tools"]
+
+[dependencies]
+elastic-core = { version = "0.1.0", path = "../elastic-core" }
+elastic-runtime = { version = "0.1.0", path = "../elastic-runtime" }

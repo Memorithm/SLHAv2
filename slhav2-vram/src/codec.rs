@@ -63,31 +63,27 @@ pub fn u64_slice_to_le_bytes(values: &[u64]) -> Vec<u8> {
 }
 
 pub fn le_bytes_to_f32_vec(bytes: &[u8]) -> Result<Vec<f32>, &'static str> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("byte length not divisible by 4 for f32 conversion");
     }
-    bytes
-        .chunks_exact(4)
-        .map(|c| {
-            <[u8; 4]>::try_from(c)
-                .map(f32::from_le_bytes)
-                .map_err(|_| "invalid f32 byte chunk")
-        })
-        .collect()
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect())
 }
 
 pub fn le_bytes_to_u64_vec(bytes: &[u8]) -> Result<Vec<u64>, &'static str> {
-    if bytes.len() % 8 != 0 {
+    if !bytes.len().is_multiple_of(8) {
         return Err("byte length not divisible by 8 for u64 conversion");
     }
-    bytes
-        .chunks_exact(8)
-        .map(|c| {
-            <[u8; 8]>::try_from(c)
-                .map(u64::from_le_bytes)
-                .map_err(|_| "invalid u64 byte chunk")
-        })
-        .collect()
+    Ok(bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| u64::from_le_bytes(*chunk))
+        .collect())
 }
 
 pub fn read_f32_le(bytes: &[u8], offset: usize) -> Result<f32, &'static str> {
@@ -113,6 +109,32 @@ pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
         .zip(b.iter())
         .map(|(x, y)| (x ^ y).count_ones())
         .sum()
+}
+
+/// Bytes of a physically packed WARM tile: the full tile minus the
+/// 32-byte residual plane (which is zeroed and flagged `FLAG_WARM`).
+pub const WARM_PACKED_BYTES: usize = TILE_BYTES - RESIDUAL_WORDS * 8; // 96
+
+/// Pack a WARM tile into its physically smaller 96-byte form.
+///
+/// The residual bytes are semantically absent (the tile must carry
+/// `FLAG_WARM`); packing copies everything except the 32 residual bytes.
+/// The result is NOT a valid `SerializedTile` byte-for-byte; it is the
+/// WARM residency representation.
+pub fn pack_warm(tile: &[u8; TILE_BYTES]) -> [u8; WARM_PACKED_BYTES] {
+    let mut out = [0u8; WARM_PACKED_BYTES];
+    out[..RESIDUAL_OFFSET].copy_from_slice(&tile[..RESIDUAL_OFFSET]);
+    out[RESIDUAL_OFFSET..].copy_from_slice(&tile[RESIDUAL_OFFSET + RESIDUAL_WORDS * 8..]);
+    out
+}
+
+/// Unpack a 96-byte WARM form back into a full 128-byte tile (residual
+/// zeroed). The result carries the same flags (including `FLAG_WARM`).
+pub fn unpack_warm(packed: &[u8; WARM_PACKED_BYTES]) -> [u8; TILE_BYTES] {
+    let mut out = [0u8; TILE_BYTES];
+    out[..RESIDUAL_OFFSET].copy_from_slice(&packed[..RESIDUAL_OFFSET]);
+    out[RESIDUAL_OFFSET + RESIDUAL_WORDS * 8..].copy_from_slice(&packed[RESIDUAL_OFFSET..]);
+    out
 }
 
 pub fn score_hot(

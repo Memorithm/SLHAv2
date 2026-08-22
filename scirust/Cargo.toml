@@ -21,14 +21,18 @@ categories = ["algorithms", "science", "compression"]
 # (non-Linux) or feature off → graceful stubs returning `NumaError::Unavailable`.
 numa = ["libc"]
 cuda = ["dep:cudarc"]
+# JSON manifest parsing for the ranking trainer (norm manifests, execution
+# bindings). Off by default so the library default build stays zero-dependency;
+# the trainer enables it explicitly.
+serde = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
 # Optional, only with `numa`. Kept off the default build so the crate remains
 # zero-dependency offline.
 libc = { version = "0.2", optional = true, default-features = false }
 cudarc = { version = "0.11", optional = true, default-features = false, features = ["driver", "cuda-12000"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1.0.151", optional = true }
 
 [lib]
 name = "scirust"
@@ -39,6 +43,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "slha-train-rank"
 path = "src/bin/slha_train_rank.rs"
+required-features = ["serde"]
 
 [[bin]]
 name = "slha-audit"

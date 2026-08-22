@@ -2,7 +2,7 @@
 name = "slhav2-vram"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Hardware-agnostic VRAM management and SLHAv2 tile scoring on GPU."
 license = "PolyForm-Noncommercial-1.0.0"
 
@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
+elastic-core = { version = "0.1.0", path = "../elastic/elastic-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
@@ -26,6 +27,3 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 [[bench]]
 name = "score"
 harness = false
-
-[profile.bench]
-debug = 1

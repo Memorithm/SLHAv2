@@ -5,6 +5,68 @@ Format basé sur [Keep a Changelog](https://keepachangelog.com/) ; versioning
 
 ## [Unreleased]
 ### Added
+- **Incubateur Elastic** (`elastic/`, 5 crates v0.1.0) : langage de
+  ressources adaptatives générique — `elastic-core` (ECA, pression,
+  hystérésis, tiers validés, budgets hiérarchiques, transactions,
+  prévision, traces de décision ; `no_std` + alloc, zéro dépendance, sans
+  unsafe), `elastic-runtime` (télémétrie, journal déterministe,
+  `ElasticCoordinator`), `elastic-macros` (`elastic_state!`,
+  `elastic_budget!`, `elastic_policy!`, `elastic_target!` à sémantique
+  réelle), `elastic-testkit` (simulateur + injection de fautes),
+  `elastic` (façade). Aucune dépendance SLHAv2 (extraction prouvée :
+  46 tests standalone, 0 référence scirust/slha/ccos/llama). Exemples
+  indépendants : ElasticQueue et ElasticQueue+ElasticWorkers.
+- **`ElasticKvCache` physique** (`slhav2-vram::elastic_cache`) : résidence
+  HOT 128 o / WARM 96 o packé (`codec::pack_warm`) / COLD 0 o réels,
+  PINNED protégé, piloté par l'ECA générique (l'ancien `ccos::ElasticKvCache`
+  ne faisait que de la comptabilité logique).
+- **`ElasticContext`** (`slhav2-vram::elastic_context`) : contrôleur de
+  contexte runtime — coût KV dérivé de la topologie du modèle, démotion
+  prédictive avant épuisement, limite positionnelle réelle comme contrainte
+  dure, télémétrie, exemple déterministe complet
+  (`examples/elastic_context.rs`).
+- **Validation CUDA sur matériel réel** : les 12 tests `--ignored` passent
+  sur NVIDIA Thor (driver 580.00, CUDA 13.0) — première exécution réelle du
+  backend.
+
+### Fixed
+- **Arène (`DeviceArena`)** : le padding d'alignement n'est plus perdu — il
+  est compté comme overhead défini, récupéré à la libération, et
+  l'invariant de conservation `used + free + overhead == capacity` est
+  testé sur 5000 opérations aléatoires, fragmentation, épuisement et 50
+  cycles grow/shrink.
+- **Erreurs CUDA** : la table CUresult manuscrite (mappings erronés, e.g.
+  205 = INVALID_CONTEXT et non OOM) est remplacée par
+  `cuGetErrorName`/`cuGetErrorString`.
+- **Requête GPU périmée** : `GpuScoringPipeline::score_into` valide les
+  longueurs exactes `D_C`/`RESIDUAL_WORDS` avant tout upload.
+- **Kernel stub** : `fused_gemm.ptx` (`.entry stub` no-op) supprimé ;
+  `GpuEngine::new` échoue en mode fermé, `new_with_ptx` exige un vrai PTX ;
+  `cudaHostRegister` est désormais RAII (`PinnedHostRegion` +
+  `cudaHostUnregister`).
+- **Shim llama.cpp** : le store de tuiles est aligné 128 et documenté
+  (contrat de durée de vie) ; `slha_intercept_k_cache_allocation` ne réécrit
+  plus `ne[]/nb[]` (le tenseur GGML garde son type/forme réels) ; le nombre
+  de couches est dimensionné depuis le modèle observé (plus de cap
+  arbitraire à 128) ; `SLHA_CODEC` inconnu échoue en mode fermé.
+- **scirust zéro dépendance** : `serde`/`serde_json` passent derrière la
+  feature optionnelle `serde` (le binaire `slha-train-rank` et ses tests
+  l'exigent) ; le build par défaut est vérifié sans dépendance externe.
+- **MSRV cohérent** : `slhav2-vram` passe de 1.85 à 1.89 (ne peut pas être
+  inférieur à celui de scirust).
+- **Documentation** : README corrigé (5 crates + incubateur, versions
+  réelles) ; nouveaux docs Elastic (doctrine, ECA, langage, invariants de
+  sûreté, plan d'extraction, matrice d'adoption) ; audit de mission
+  (`docs/ELASTIC_MISSION_AUDIT.md`) ; résultats (`docs/ELASTIC_MISSION_RESULTS.md`
+  + `results/elastic_mission.json`).
+
+### Notes
+- La porte qualité enregistrée reste **NO-GO** : ΔPPL relatif +42,36 %
+  (cible ≤ 1 %), Qwen2.5-1.5B, 12 chunks. Aucune nouvelle mesure de
+  perplexité n'a pu être exécutée (pas d'actifs modèle/dataset sur la
+  machine) ; le remplacement de score fusionné n'est pas
+  production-complete.
+
 - **Kernels SIMD pour NF4, mixte et MIX3** (AVX2/AVX-512/NEON) : les cinq
   codecs latents décodent désormais en SIMD avec repli scalaire portable.
   NF4 : lookup du codebook 16 entrées (`permutevar8x32`×2 / `permutexvar`

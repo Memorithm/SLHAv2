@@ -536,8 +536,10 @@ fn test_pipeline_copy_glue_cpu_engine() {
     {
         let mut dev_tiles: Vec<SerializedTile> = tiles_dev
             .data()
-            .chunks_exact(codec::TILE_BYTES)
-            .map(SerializedTile::from_bytes)
+            .as_chunks::<{ codec::TILE_BYTES }>()
+            .0
+            .iter()
+            .map(|bytes| SerializedTile::from_bytes(bytes))
             .collect();
         dev_tiles.truncate(tiles.len());
         score_tiles_cpu(ScoringInput {

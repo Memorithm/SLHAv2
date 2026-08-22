@@ -963,6 +963,8 @@ fn neon_path_matches_scalar() {
         // Alternate HOT / WARM to cover both branches.
         let tile = build_tile(&proj, t, i as u32, i % 2 == 0);
         let s = tile.compute_score_scalar(&q, &q_sign);
+        // SAFETY: NEON is statically guaranteed on aarch64; the query slices
+        // are the same length used by the scalar path above.
         let a = unsafe { tile.compute_score_neon(&q, &q_sign) };
         assert!(
             (s - a).abs() <= 1e-3 * (1.0 + s.abs()),

@@ -11,6 +11,12 @@
 //! a substring loader silently accepted a nested same-name field, trailing data
 //! and a duplicated key. Every rejection carries a stable machine-readable code
 //! and must happen before any staging directory exists.
+//!
+//! This module is only compiled with the `serde` feature (the ranking-trainer
+//! toolchain); the library default build stays zero-dependency. The public
+//! error types and `parse_and_verify` signature are stable regardless.
+
+#![cfg(feature = "serde")]
 
 use serde::Deserialize;
 

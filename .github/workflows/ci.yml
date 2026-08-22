@@ -2,10 +2,22 @@ name: CI
 
 on:
   push:
+    # Push-triggered runs share the concurrency group with the pull_request
+    # run of the same branch (head_ref == ref_name), so one cancels the
+    # other and GitHub keeps the cancelled run's red jobs on the PR checks.
+    # Feature branches are covered by `pull_request`; `push` covers master.
+    branches: [master]
   pull_request:
 
 permissions:
   contents: read
+
+# Keep exactly one CI run alive per source branch. The feature branch is
+# updated frequently during audit/fix cycles; without this, obsolete 5-job
+# runs can remain queued ahead of the only HEAD that matters.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   build-test:
@@ -135,19 +147,36 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Build and run the shim test suite (-Wall -Wextra -Werror)
-        # Six binaries covering replace counters, calibration, layer mask,
-        # score scale, scale fit and the rank-transplant oracles, plus the
-        # trainer atomicity tests (bash + python3, no cargo — the fail-first
-        # gate rejects the crafted NaN calibration before any training).
-        run: make -C integration/llama.cpp/tests -j"$(nproc)" all test
-      - name: Strict compile of the shim sources the tests do not link
-        # slha_llama.cpp is the only shim file needing external headers; it is
-        # syntax-checked against the REAL ggml.h of the pinned llama.cpp tag
-        # (same tag as build_and_roundtrip.sh), never against stubs.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Build SLHA C ABI static library
+        run: cargo --locked build --release -p slha-c
+
+      - name: Build pinned llama.cpp for shim integration tests
+        # tile_store_tests links against the real llama/ggml libraries.
+        # Provision exactly the same pinned tag as build_and_roundtrip.sh.
         run: |
           git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$RUNNER_TEMP/llama.cpp"
-          make -C integration/llama.cpp/tests compile-check LLAMA_CPP_DIR="$RUNNER_TEMP/llama.cpp"
+          cmake -S "$RUNNER_TEMP/llama.cpp" -B "$RUNNER_TEMP/llama.cpp/build" \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CUDA=OFF \
+            -DLLAMA_CURL=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/llama.cpp/build" -j"$(nproc)" --target llama
+
+      - name: Build and run the shim test suite (-Wall -Wextra -Werror)
+        # Seven binaries: six self-contained logic suites plus tile_store_tests
+        # linked against real llama.cpp/ggml, followed by trainer atomicity.
+        run: |
+          make -C integration/llama.cpp/tests -j"$(nproc)" all test \
+            LLAMA_CPP_DIR="$RUNNER_TEMP/llama.cpp" \
+            SLHA_LIB="$GITHUB_WORKSPACE/target/release/libslha.a"
+
+      - name: Strict compile of remaining shim sources
+        # slha_llama.cpp is syntax-checked against the REAL pinned ggml.h,
+        # never against a local stub that could drift from upstream.
+        run: |
+          make -C integration/llama.cpp/tests compile-check \
+            LLAMA_CPP_DIR="$RUNNER_TEMP/llama.cpp"
 
   # Supply-chain gates: RustSec advisories (cargo audit) and license/ban/source
   # policy (cargo deny, config in deny.toml). Neither ran anywhere before.

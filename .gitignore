@@ -1,34 +1,9 @@
-# Rust build artifacts
-target/
+# Cargo build outputs, including standalone nested workspaces such as elastic/
+**/target/
+**/*.rs.bk
 
-# Cargo lock file (generated)
-# Uncomment if you want to ignore Cargo.lock
-# Cargo.lock
+# CommandCode local state must never enter source control
+.commandcode/
 
-# IDE files
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Benchmark reports
-*.svg
-*.html
-
-# Python artifacts (scripts/dump_activations.py)
-__pycache__/
-*.pyc
-
-# Trained projection weights (scirust::weights / train_on_real_activations)
-*.slhw
-
-# Rapport slha-audit genere (host-specific, ex. aarch64 NEON/cache)
-/audit.json
-
-# Generated CUDA PTX artifacts
-/slhav2-vram/kernels/*.ptx
+# Local C/C++ test binaries
+integration/llama.cpp/tests/tile_store_tests

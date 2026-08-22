@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// A live sub-allocation in a [`DeviceArena`].
 pub struct ArenaSlice {
     pub offset: u64,
     pub size: u64,
@@ -13,45 +14,39 @@ impl ArenaSlice {
     }
 }
 
-/// Align a byte offset up to the tile's natural alignment (checked). The
-/// arena backing (e.g. a `cuMemAlloc` region) is already 256-aligned, so the
-/// base offset 0 is always aligned. Aligning each allocation's **offset** to
-/// 128 (the 128-byte tile's natural alignment — enough for the u64 residual
-/// reads) lets 128-byte tiles pack back-to-back at a 128-byte stride, instead
-/// of the old scheme that rounded the *size* to 256 and wasted half the arena.
-/// The recorded block size stays the real allocation size.
+/// Natural alignment of a serialized SLHAv2 tile.
 const ALIGN: u64 = 128;
 
 fn align_up(offset: u64) -> Option<u64> {
     offset.checked_add(ALIGN - 1).map(|v| v & !(ALIGN - 1))
 }
 
-/// Free list keyed by offset in a [`BTreeMap`]: best-fit allocation is a
-/// `range(..=size)` lookup and adjacent coalescing is two neighbour lookups —
-/// O(log n) per operation, with **no full-list sort** on free (the old
-/// `coalesce` sorted the entire free list on every free, O(n log n) per
-/// step). 128-byte tiles pack at a 128-byte stride (offsets aligned to the
-/// tile's natural alignment, sizes kept real).
-pub struct DeviceArena<A> {
-    backing: A,
-    capacity: u64,
-    /// Offset → free block, ordered by offset. The first block whose size
-    /// fits the request (found via `range`) is used.
-    free: BTreeMap<u64, FreeBlock>,
-    alloc_map: std::collections::HashMap<u64, AllocBlock>,
-    used: u64,
-    next_cookie: AtomicU64,
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct FreeBlock {
-    offset: u64,
     size: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
 struct AllocBlock {
     offset: u64,
     size: u64,
+}
+
+/// Deterministic sub-allocator over one device backing allocation.
+///
+/// Every allocation starts at a 128-byte-aligned offset. Alignment prefixes
+/// and suffixes are kept in the free map instead of being silently lost, so
+/// the exact invariant is always:
+///
+/// `used_bytes + free_bytes == capacity`.
+pub struct DeviceArena<A> {
+    backing: A,
+    capacity: u64,
+    /// Offset -> free block.
+    free: BTreeMap<u64, FreeBlock>,
+    alloc_map: HashMap<u64, AllocBlock>,
+    used: u64,
+    next_cookie: AtomicU64,
 }
 
 impl<A> DeviceArena<A> {
@@ -60,11 +55,13 @@ impl<A> DeviceArena<A> {
             backing,
             capacity,
             free: BTreeMap::new(),
-            alloc_map: std::collections::HashMap::new(),
+            alloc_map: HashMap::new(),
             used: 0,
             next_cookie: AtomicU64::new(1),
         };
-        arena.insert_free(0, capacity);
+        if capacity != 0 {
+            arena.free.insert(0, FreeBlock { size: capacity });
+        }
         arena
     }
 
@@ -84,62 +81,85 @@ impl<A> DeviceArena<A> {
         self.used
     }
 
+    /// Bytes represented by actual free-list blocks.
     pub fn free_bytes(&self) -> u64 {
-        self.capacity - self.used
+        self.free.values().map(|b| b.size).sum()
+    }
+
+    /// Alignment no longer consumes bytes permanently. Kept for API
+    /// compatibility; a correct arena always reports zero overhead.
+    pub fn overhead_bytes(&self) -> u64 {
+        0
+    }
+
+    /// Conservation invariant for the backing allocation.
+    pub fn accounting_is_conserved(&self) -> bool {
+        self.used
+            .checked_add(self.free_bytes())
+            .is_some_and(|v| v == self.capacity)
     }
 
     pub fn live_allocations(&self) -> usize {
         self.alloc_map.len()
     }
 
+    /// Allocate `size` bytes at a 128-byte-aligned offset.
+    ///
+    /// The search tests the *post-alignment* usable extent of each free block;
+    /// a misaligned block that cannot fit the request is skipped rather than
+    /// causing a false allocation failure.
     pub fn allocate(&mut self, size: u64) -> Option<ArenaSlice> {
-        if size == 0 {
-            return None;
-        }
-        if size > self.capacity {
+        if size == 0 || size > self.capacity {
             return None;
         }
 
-        // First-fit by offset among blocks large enough — O(log n + k).
-        let fit: Option<(u64, FreeBlock)> = self
-            .free
-            .iter()
-            .find(|(_, b)| b.size >= size)
-            .map(|(&off, &b)| (off, b));
-        let (_, FreeBlock { offset, size: real }) = fit?;
+        let fit = self.free.iter().find_map(|(&offset, block)| {
+            let aligned = align_up(offset)?;
+            let end = offset.checked_add(block.size)?;
+            let alloc_end = aligned.checked_add(size)?;
+            (alloc_end <= end).then_some((offset, block.size, aligned, alloc_end, end))
+        });
+        let (offset, block_size, aligned, alloc_end, block_end) = fit?;
         self.free.remove(&offset);
 
-        // Align only the offset.
-        let aligned_off = align_up(offset)?;
-        let pad = aligned_off - offset;
-        let avail = real.checked_sub(pad)?;
-        if avail < size {
-            self.insert_free(offset, real);
-            return None;
+        // Preserve the alignment prefix as free memory. It may be too small
+        // for the current request but can coalesce with neighbours later.
+        if aligned > offset {
+            self.insert_free(offset, aligned - offset);
+        }
+        if alloc_end < block_end {
+            self.insert_free(alloc_end, block_end - alloc_end);
         }
 
-        let leftover = avail - size;
-        if leftover > 0 {
-            self.insert_free(aligned_off + size, leftover);
+        debug_assert_eq!(block_size, block_end - offset);
+
+        let mut cookie = self.next_cookie.fetch_add(1, Ordering::Relaxed);
+        // Cookie zero is reserved for invalid slices; handle wrap defensively.
+        if cookie == 0 {
+            cookie = self.next_cookie.fetch_add(1, Ordering::Relaxed);
+            if cookie == 0 {
+                return None;
+            }
         }
 
-        let cookie = self.next_cookie.fetch_add(1, Ordering::Relaxed);
         self.alloc_map.insert(
             cookie,
             AllocBlock {
-                offset: aligned_off,
+                offset: aligned,
                 size,
             },
         );
-        self.used += size;
+        self.used = self.used.checked_add(size)?;
+        debug_assert!(self.accounting_is_conserved());
 
         Some(ArenaSlice {
-            offset: aligned_off,
+            offset: aligned,
             size,
             cookie,
         })
     }
 
+    /// Free a live slice. Invalid/stale cookies are ignored.
     pub fn free(&mut self, slice: &ArenaSlice) {
         if slice.cookie == 0 {
             return;
@@ -147,52 +167,51 @@ impl<A> DeviceArena<A> {
         let Some(block) = self.alloc_map.remove(&slice.cookie) else {
             return;
         };
-        self.used -= block.size;
+        self.used = self.used.saturating_sub(block.size);
         self.insert_free(block.offset, block.size);
-        self.coalesce();
+        debug_assert!(self.accounting_is_conserved());
     }
 
-    /// Insert a free block, merging it with any adjacent free blocks (the
-    /// two neighbours by offset). O(log n).
+    /// Insert and coalesce with immediately adjacent free blocks.
     fn insert_free(&mut self, offset: u64, size: u64) {
+        if size == 0 {
+            return;
+        }
         let mut off = offset;
         let mut sz = size;
 
-        // Merge with the block immediately before.
-        if let Some((&poff, &p)) = self.free.range(..off).next_back() {
-            if poff + p.size == off {
-                self.free.remove(&poff);
-                off = poff;
-                sz += p.size;
-            }
-        }
-        // Merge with the block immediately after.
-        if let Some((&noff, &n)) = self.free.range(off + 1..).next() {
-            if off + sz == noff {
-                self.free.remove(&noff);
-                sz += n.size;
+        if let Some((&prev_off, prev)) = self.free.range(..off).next_back() {
+            if prev_off.checked_add(prev.size) == Some(off) {
+                let prev_size = prev.size;
+                self.free.remove(&prev_off);
+                off = prev_off;
+                sz = sz.saturating_add(prev_size);
             }
         }
 
-        self.free.insert(
-            off,
-            FreeBlock {
-                offset: off,
-                size: sz,
-            },
-        );
+        if let Some((&next_off, next)) = self.free.range(off.saturating_add(1)..).next() {
+            if off.checked_add(sz) == Some(next_off) {
+                let next_size = next.size;
+                self.free.remove(&next_off);
+                sz = sz.saturating_add(next_size);
+            }
+        }
+
+        self.free.insert(off, FreeBlock { size: sz });
     }
-
-    /// Coalesce after a free: the freed block is already merged with its
-    /// neighbours by [`Self::insert_free`], so this is a no-op retained for
-    /// API clarity — adjacency is handled inline.
-    fn coalesce(&self) {}
 
     pub fn reset(&mut self) {
         self.free.clear();
         self.alloc_map.clear();
         self.used = 0;
-        self.insert_free(0, self.capacity);
+        if self.capacity != 0 {
+            self.free.insert(
+                0,
+                FreeBlock {
+                    size: self.capacity,
+                },
+            );
+        }
     }
 }
 
@@ -201,106 +220,119 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_arena_allocation_basic() {
-        let backing = 0u64; // dummy, not used in tests
-        let mut arena = DeviceArena::new(backing, 1024);
-
+    fn basic_aligned_allocation() {
+        let mut arena = DeviceArena::new(0u64, 1024);
         let a = arena.allocate(128).unwrap();
-        assert_eq!(a.offset, 0);
-        assert_eq!(a.size, 128); // real size, not aligned
-
         let b = arena.allocate(128).unwrap();
+        assert_eq!(a.offset, 0);
         assert_eq!(b.offset, 128);
-        assert_eq!(b.size, 128);
-
-        assert_eq!(arena.live_allocations(), 2);
         assert_eq!(arena.used_bytes(), 256);
+        assert_eq!(arena.free_bytes(), 768);
+        assert!(arena.accounting_is_conserved());
     }
 
     #[test]
-    fn test_arena_zero_size_rejected() {
-        let mut arena = DeviceArena::new(0u64, 1024);
-        assert!(arena.allocate(0).is_none());
-    }
-
-    #[test]
-    fn test_arena_overflow_rejected() {
+    fn zero_and_oversized_requests_are_rejected() {
         let mut arena = DeviceArena::new(0u64, 256);
-        assert!(arena.allocate(512).is_none());
+        assert!(arena.allocate(0).is_none());
+        assert!(arena.allocate(257).is_none());
+        assert!(arena.accounting_is_conserved());
     }
 
     #[test]
-    fn test_arena_free_and_coalesce() {
+    fn alignment_prefix_is_not_lost() {
         let mut arena = DeviceArena::new(0u64, 1024);
+        let a = arena.allocate(100).unwrap();
+        let b = arena.allocate(100).unwrap();
+        assert_eq!(a.offset, 0);
+        assert_eq!(b.offset, 128);
+        // [100,128) remains represented in the free map.
+        assert_eq!(arena.used_bytes(), 200);
+        assert_eq!(arena.free_bytes(), 824);
+        assert_eq!(arena.overhead_bytes(), 0);
+        assert!(arena.accounting_is_conserved());
 
-        let a = arena.allocate(128).unwrap();
+        arena.free(&a);
+        arena.free(&b);
+        assert_eq!(arena.free_bytes(), 1024);
+        assert!(arena.accounting_is_conserved());
+    }
+
+    #[test]
+    fn search_skips_block_that_fails_after_alignment() {
+        let mut arena = DeviceArena::new(0u64, 1024);
+        let a = arena.allocate(100).unwrap();
         let b = arena.allocate(128).unwrap();
         let c = arena.allocate(128).unwrap();
-
-        assert_eq!(arena.live_allocations(), 3);
-
         arena.free(&b);
-        assert_eq!(arena.live_allocations(), 2);
-
+        // The small prefix [100,128) appears before b's free block and cannot
+        // satisfy 128 after alignment; allocation must continue searching.
+        let d = arena.allocate(128).unwrap();
+        assert_eq!(d.offset, 128);
+        arena.free(&a);
         arena.free(&c);
-        // Coalesce: offsets 128 + 256 → continuous block {128, 384}.
-        assert_eq!(arena.live_allocations(), 1);
-        assert_eq!(arena.free_bytes(), 1024 - 128);
-
-        arena.free(&a);
-        assert_eq!(arena.live_allocations(), 0);
+        arena.free(&d);
         assert_eq!(arena.free_bytes(), arena.capacity());
     }
 
     #[test]
-    fn test_arena_reuse_freed_slot() {
-        let mut arena = DeviceArena::new(0u64, 1024);
-
-        let a = arena.allocate(128).unwrap();
-        arena.free(&a);
-
-        let b = arena.allocate(128).unwrap();
-        assert_eq!(b.offset, 0); // reuses the first slot
-    }
-
-    #[test]
-    fn test_arena_reset() {
-        let mut arena = DeviceArena::new(0u64, 1024);
-        arena.allocate(128).unwrap();
-        arena.allocate(128).unwrap();
-        assert_eq!(arena.live_allocations(), 2);
-
-        arena.reset();
-        assert_eq!(arena.live_allocations(), 0);
-        assert_eq!(arena.free_bytes(), arena.capacity());
-    }
-
-    #[test]
-    fn test_arena_stale_cookie_rejected() {
+    fn stale_cookie_is_a_noop() {
         let mut arena = DeviceArena::new(0u64, 1024);
         let a = arena.allocate(128).unwrap();
         arena.free(&a);
-        // Freeing again with the same (now stale) cookie is a no-op.
-        let live_before = arena.live_allocations();
+        let before = arena.free_bytes();
         arena.free(&a);
-        assert_eq!(arena.live_allocations(), live_before);
+        assert_eq!(arena.free_bytes(), before);
+        assert!(arena.accounting_is_conserved());
     }
 
     #[test]
-    fn test_arena_one_thousand_suballocations() {
-        let mut arena = DeviceArena::new(0u64, 1024 * 1024); // 1 MiB
+    fn repeated_grow_shrink_conserves_every_byte() {
+        let mut arena = DeviceArena::new(0u64, 1 << 20);
+        for round in 0..100 {
+            let mut live = Vec::new();
+            for i in 0..200 {
+                let size = 1 + ((round * 17 + i * 31) % 300) as u64;
+                if let Some(s) = arena.allocate(size) {
+                    assert_eq!(s.offset % ALIGN, 0);
+                    live.push(s);
+                }
+                assert!(arena.accounting_is_conserved());
+            }
+            for s in live.iter().rev() {
+                arena.free(s);
+                assert!(arena.accounting_is_conserved());
+            }
+            assert_eq!(arena.used_bytes(), 0);
+            assert_eq!(arena.free_bytes(), arena.capacity());
+        }
+    }
 
+    #[test]
+    fn fragmentation_is_reported_not_hidden_as_overhead() {
+        let mut arena = DeviceArena::new(0u64, 4096);
         let mut slices = Vec::new();
-        for _ in 0..1000 {
-            let s = arena.allocate(128).unwrap();
-            slices.push(s);
+        for _ in 0..20 {
+            slices.push(arena.allocate(128).unwrap());
         }
-        assert_eq!(arena.live_allocations(), 1000);
+        for (i, s) in slices.iter().enumerate() {
+            if i % 2 == 0 {
+                arena.free(s);
+            }
+        }
+        assert!(arena.free_bytes() > 0);
+        assert_eq!(arena.overhead_bytes(), 0);
+        assert!(arena.accounting_is_conserved());
+    }
 
-        for s in &slices {
-            arena.free(s);
-        }
-        assert_eq!(arena.live_allocations(), 0);
-        assert_eq!(arena.free_bytes(), arena.capacity());
+    #[test]
+    fn reset_restores_full_capacity() {
+        let mut arena = DeviceArena::new(0u64, 1024);
+        arena.allocate(100).unwrap();
+        arena.allocate(100).unwrap();
+        arena.reset();
+        assert_eq!(arena.used_bytes(), 0);
+        assert_eq!(arena.free_bytes(), 1024);
+        assert!(arena.accounting_is_conserved());
     }
 }

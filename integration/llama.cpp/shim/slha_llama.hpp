@@ -33,13 +33,29 @@ struct slha_layer_state;
 /** Experimental CPU-side compressed K tile store.
  *
  * One tile per (layer, cache position). Capacity is fixed per layer and
- * position indices are bounds-checked. No unbounded growth. */
+ * position indices are bounds-checked. No unbounded growth.
+ *
+ * The backing byte storage is over-allocated and `tile_base_offset` selects a
+ * 128-aligned tile region. Tile stride is the runtime SLHA tile size.
+ *
+ * Lifetime contract: `read()` and `read_range()` return immutable, thread-local
+ * snapshots copied while `mutex` is held; no pointer into mutable store storage
+ * escapes the lock. A returned snapshot remains valid until the next
+ * `read()`/`read_range()` call on the SAME thread. `read_range()` is the API for
+ * callers that need a stable contiguous `SciRustSlhaTile[count]` range.
+ */
 struct slha_tile_store {
+    static constexpr size_t TILE_ALIGN = 128;
     size_t n_layers = 0;
     size_t capacity = 0;
     size_t tile_bytes = 0;
-    std::vector<std::byte> tiles;
+    // `std::vector<unsigned char>` does not guarantee 128-byte alignment, so
+    // the allocation includes TILE_ALIGN-1 bytes of slack and
+    // `tile_base_offset` selects a 128-aligned start inside it.
+    std::vector<unsigned char> tiles;
     std::vector<uint8_t> valid;
+    /// Base of the 128-aligned tile region (owned by `tiles` after init).
+    size_t tile_base_offset = 0;
     mutable std::mutex mutex;
 
     bool init(size_t n_layers, size_t capacity, size_t tile_bytes);
@@ -47,6 +63,7 @@ struct slha_tile_store {
     void clear_layer(int32_t layer_id);
     bool write(int32_t layer_id, size_t position, const void * tile);
     const void * read(int32_t layer_id, size_t position) const;
+    const void * read_range(int32_t layer_id, size_t position, size_t count) const;
     bool check_capacity(int32_t layer_id, size_t position) const;
 };
 
@@ -111,7 +128,10 @@ extern slha_tile_store g_slha_tile_store;
 slha_kv_mode slha_kv_mode_from_env();
 slha_score_mode slha_score_mode_from_env();
 
-int slha_global_init(const char * weights_dir, slha_kv_mode mode);
+/** Initialize SLHA integration with the model-derived layer count available at
+ * the llama KV-cache construction seam. `model_num_layers` must be non-zero and
+ * fit in the shim's int32 layer-id domain. */
+int slha_global_init(const char * weights_dir, slha_kv_mode mode, size_t model_num_layers);
 
 void slha_global_shutdown();
 
@@ -119,10 +139,13 @@ int slha_get_num_layers();
 
 slha_layer_state * slha_get_layer_state(int32_t il);
 
-/** Intercept the default KV-cache allocation of llama.cpp for the K-cache tensor,
- *  substituting the large FP16/FP32 buffer with a compact 128-byte SLHAv2 tile buffer.
- *  Reduces memory physical size from (head_dim * n_kv_heads * n_tokens * sizeof(float))
- *  down to exactly (n_tokens * 128) bytes. */
+/** Hook at the K-cache allocation seam.
+ *
+ * The GGML K tensor keeps its real type and shape (this hook never mutates
+ * tensor metadata — the old ne[]/nb[] rewriting was an unsound physical-KV
+ * trick and is gone). SLHA tiles live in the external `g_slha_tile_store`,
+ * filled by the K-transform callbacks; the hook only validates runtime
+ * expectations and reports the projected reduction accounting. */
 void slha_intercept_k_cache_allocation(
     ggml_tensor * k_tensor,
     int64_t n_tokens,

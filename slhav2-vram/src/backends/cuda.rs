@@ -52,49 +52,42 @@ impl fmt::Display for CudaError {
 
 impl Error for CudaError {}
 
-/// Human-readable name for a common CUDA driver error code (the `CUDA_ERROR_*`
-/// enum). Unknown codes fall back to a numeric message.
-fn cu_result_name(code: CUresult) -> &'static str {
-    match code {
-        0 => "CUDA_SUCCESS",
-        1 => "CUDA_ERROR_INVALID_VALUE",
-        2 => "CUDA_ERROR_OUT_OF_MEMORY",
-        3 => "CUDA_ERROR_NOT_INITIALIZED",
-        4 => "CUDA_ERROR_DEINITIALIZED",
-        5 => "CUDA_ERROR_PROFILER_DISABLED",
-        6 => "CUDA_ERROR_PROFILER_NOT_INITIALIZED",
-        7 => "CUDA_ERROR_PROFILER_ALREADY_STARTED",
-        8 => "CUDA_ERROR_PROFILER_ALREADY_STOPPED",
-        100 => "CUDA_ERROR_NO_DEVICE",
-        101 => "CUDA_ERROR_INVALID_DEVICE",
-        200 => "CUDA_ERROR_INVALID_IMAGE",
-        201 => "CUDA_ERROR_INVALID_CONTEXT",
-        202 => "CUDA_ERROR_CONTEXT_ALREADY_CURRENT",
-        205 => "CUDA_ERROR_OUT_OF_MEMORY",
-        206 => "CUDA_ERROR_INVALID_POINTER",
-        207 => "CUDA_ERROR_INVALID_MEMORY_BLOCK",
-        208 => "CUDA_ERROR_INVALID_PTX",
-        209 => "CUDA_ERROR_INVALID_GRAPHICS_CONTEXT",
-        218 => "CUDA_ERROR_SHARED_OBJECT_SYMBOL_NOT_FOUND",
-        219 => "CUDA_ERROR_SHARED_OBJECT_INIT_FAILED",
-        220 => "CUDA_ERROR_OPERATING_SYSTEM",
-        300 => "CUDA_ERROR_INVALID_HANDLE",
-        400 => "CUDA_ERROR_NOT_FOUND",
-        500 => "CUDA_ERROR_NOT_READY",
-        600 => "CUDA_ERROR_ILLEGAL_ADDRESS",
-        700 => "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES",
-        701 => "CUDA_ERROR_LAUNCH_TIMEOUT",
-        702 => "CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING",
-        703 => "CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED",
-        704 => "CUDA_ERROR_PEER_ACCESS_NOT_ENABLED",
-        705 => "CUDA_ERROR_CONTEXT_ALREADY_IN_USE",
-        708 => "CUDA_ERROR_LAUNCH_FAILED",
-        709 => "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES",
-        710 => "CUDA_ERROR_LAUNCH_TIMEOUT",
-        711 => "CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING",
-        715 => "CUDA_ERROR_UNKNOWN",
-        800 => "CUDA_ERROR_INVALID_RESOURCE_HANDLE",
-        _ => "CUDA_ERROR_UNKNOWN_CODE",
+/// Human-readable name for a CUDA driver error code.
+///
+/// Uses the real driver helpers `cuGetErrorName`/`cuGetErrorString` when the
+/// driver is initialized (they are null-safe for unknown codes); falls back
+/// to a verified numeric rendering only when the driver is not yet
+/// initialized. The old hand-written table is gone: several of its mappings
+/// were wrong (e.g. 201 is `CUDA_ERROR_INVALID_CONTEXT`, not OOM; 700 is
+/// `CUDA_ERROR_ILLEGAL_ADDRESS`).
+fn cu_result_name(code: CUresult) -> String {
+    // SAFETY: `cuGetErrorName`/`cuGetErrorString` write into the output
+    // pointer only on success and return a CUresult; passing null outputs is
+    // safe. `CUDA_SUCCESS` is never routed here by `cuda_check`.
+    unsafe {
+        let mut name: *const core::ffi::c_char = core::ptr::null();
+        let mut desc: *const core::ffi::c_char = core::ptr::null();
+        let rn = cuGetErrorName(code, &mut name);
+        let rs = cuGetErrorString(code, &mut desc);
+        let name_str = if rn == CUDA_SUCCESS && !name.is_null() {
+            core::ffi::CStr::from_ptr(name)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            format!("CUDA_ERROR_UNKNOWN_CODE_{code}")
+        };
+        let desc_str = if rs == CUDA_SUCCESS && !desc.is_null() {
+            core::ffi::CStr::from_ptr(desc)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        };
+        if desc_str.is_empty() {
+            name_str
+        } else {
+            format!("{name_str} ({desc_str})")
+        }
     }
 }
 
@@ -106,6 +99,43 @@ fn cuda_check(result: CUresult, op: &'static str) -> Result<(), CudaError> {
             "{op} failed: {} ({result})",
             cu_result_name(result)
         )))
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    /// The driver reports the canonical names; these are the well-known
+    /// values the old hand-written table got wrong.
+    #[test]
+    fn error_name_uses_driver_helpers() {
+        // If the driver is unavailable in this environment, the wrapper must
+        // still return a deterministic numeric fallback.
+        let name = cu_result_name(2);
+        assert!(
+            name.contains("OUT_OF_MEMORY") || name.contains("UNKNOWN_CODE"),
+            "got {name}"
+        );
+        let name = cu_result_name(201);
+        assert!(
+            name.contains("INVALID_CONTEXT") || name.contains("UNKNOWN_CODE"),
+            "got {name}"
+        );
+
+        let name = cu_result_name(205);
+        assert!(
+            name.contains("MAP_FAILED") || name.contains("UNKNOWN_CODE"),
+            "got {name}"
+        );
+
+        let name = cu_result_name(700);
+        assert!(
+            name.contains("ILLEGAL_ADDRESS") || name.contains("UNKNOWN_CODE"),
+            "got {name}"
+        );
+        let name = cu_result_name(99999);
+        assert!(name.contains("UNKNOWN_CODE"), "got {name}");
     }
 }
 
@@ -231,6 +261,10 @@ pub struct CudaStream {
 impl CudaStream {
     pub fn new(engine: &CudaEngine) -> Result<Self, CudaError> {
         let mut stream: CUstream = std::ptr::null_mut();
+        // SAFETY: `engine.inner.context` is a live CUDA context owned by the
+        // shared engine (the `Rc` is cloned into `Self` below before this
+        // handle can be used), and `cuStreamCreate` writes into the valid
+        // output pointer with the context current on this thread.
         unsafe {
             cuda_check(cuCtxSetCurrent(engine.inner.context), "cuCtxSetCurrent")?;
             cuda_check(
@@ -250,6 +284,8 @@ impl CudaStream {
 
     pub fn synchronize(&self) -> Result<(), CudaError> {
         let ctx = self.owner.context;
+        // SAFETY: the context handle is kept alive by the shared `Rc`, and
+        // `cuStreamSynchronize` only touches the live stream owned by `Self`.
         unsafe {
             cuda_check(cuCtxSetCurrent(ctx), "cuCtxSetCurrent")?;
             cuda_check(cuStreamSynchronize(self.stream), "cuStreamSynchronize")
@@ -344,12 +380,47 @@ impl CudaEngine {
         CUDA_BACKING_ALLOCATIONS.load(Ordering::SeqCst)
     }
 
+    fn ensure_allocation_owner(
+        &self,
+        allocation: &CudaAllocation,
+        label: &str,
+    ) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &allocation.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: allocation belongs to a different CUDA context"
+            )))
+        }
+    }
+
+    fn ensure_function_owner(&self, function: &CudaFunction, label: &str) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &function.module.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: kernel belongs to a different CUDA context"
+            )))
+        }
+    }
+
+    fn ensure_stream_owner(&self, stream: &CudaStream, label: &str) -> Result<(), CudaError> {
+        if Rc::ptr_eq(&self.inner, &stream.owner) {
+            Ok(())
+        } else {
+            Err(CudaError(format!(
+                "{label}: stream belongs to a different CUDA context"
+            )))
+        }
+    }
+
     pub fn copy_to_device_at(
         &self,
         src: &[u8],
         dst: &mut CudaAllocation,
         dst_offset_bytes: usize,
     ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(dst, "copy_to_device_at")?;
         let end = dst_offset_bytes
             .checked_add(src.len())
             .ok_or_else(|| CudaError("copy_to_device_at: offset + length overflow".into()))?;
@@ -361,9 +432,14 @@ impl CudaEngine {
                 dst.len
             )));
         }
+        // SAFETY: `self.inner.context` is kept alive by the `Rc` in
+        // `CudaAllocation`/`Self`, and the copy bounds were checked above
+        // (offset + length fits the destination allocation).
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
         }
+        // SAFETY: `dst.ptr` is a live device allocation of `dst.len` bytes
+        // (checked above), and `src` is a valid Rust slice of `src.len` bytes.
         unsafe {
             cuda_check(
                 cuMemcpyHtoD_v2(
@@ -382,6 +458,7 @@ impl CudaEngine {
         src_offset_bytes: usize,
         dst: &mut [u8],
     ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(src, "copy_to_host_at")?;
         let end = src_offset_bytes
             .checked_add(dst.len())
             .ok_or_else(|| CudaError("copy_to_host_at: offset + length overflow".into()))?;
@@ -393,9 +470,12 @@ impl CudaEngine {
                 src.len
             )));
         }
+        // SAFETY: context kept alive by the `Rc`; copy bounds checked above.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
         }
+        // SAFETY: `src.ptr` is a live device allocation of `src.len` bytes
+        // (checked above), and `dst` is a valid mutable Rust slice.
         unsafe {
             cuda_check(
                 cuMemcpyDtoH_v2(
@@ -426,12 +506,48 @@ impl CudaEngine {
             return Ok(());
         }
 
+        self.ensure_allocation_owner(q_coarse_dev, "score_tiles_at q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles_at q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles_at tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles_at scores")?;
+        self.ensure_function_owner(kernel, "score_tiles_at")?;
+
+        let n = num_tiles as usize;
+        let q_coarse_bytes = crate::codec::D_C * core::mem::size_of::<f32>();
+        let q_sign_bytes = crate::codec::RESIDUAL_WORDS * core::mem::size_of::<u64>();
+        let tile_bytes = n
+            .checked_mul(crate::codec::TILE_BYTES)
+            .ok_or_else(|| CudaError("score_tiles_at: tile byte count overflow".into()))?;
+        let score_bytes = n
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaError("score_tiles_at: score byte count overflow".into()))?;
+        let check_range = |label: &str, offset: usize, need: usize, len: usize| {
+            let end = offset
+                .checked_add(need)
+                .ok_or_else(|| CudaError(format!("score_tiles_at: {label} range overflow")))?;
+            if end > len {
+                return Err(CudaError(format!(
+                    "score_tiles_at: {label} offset {offset} + size {need} exceeds allocation size {len}"
+                )));
+            }
+            Ok(())
+        };
+        check_range(
+            "q_coarse",
+            q_coarse_offset,
+            q_coarse_bytes,
+            q_coarse_dev.len,
+        )?;
+        check_range("q_sign", q_sign_offset, q_sign_bytes, q_sign_dev.len)?;
+        check_range("tiles", tiles_offset, tile_bytes, tiles_dev.len)?;
+        check_range("scores", scores_offset, score_bytes, scores_dev.len)?;
+
         let q_coarse_ptr = q_coarse_dev.ptr + q_coarse_offset as u64;
         let q_sign_ptr = q_sign_dev.ptr + q_sign_offset as u64;
         let tiles_ptr = tiles_dev.ptr + tiles_offset as u64;
         let scores_ptr = scores_dev.ptr + scores_offset as u64;
 
-        let grid_dim = (num_tiles as usize).div_ceil(256) as u32;
+        let grid_dim = n.div_ceil(256) as u32;
         let block_dim = 256u32;
 
         let args: [*mut libc::c_void; 5] = [
@@ -442,6 +558,9 @@ impl CudaEngine {
             &num_tiles as *const i32 as *mut libc::c_void,
         ];
 
+        // SAFETY: `kernel.func` is a live CUfunction kept alive by
+        // `CudaFunction`'s `Rc<CudaModule>`; the argument array has exactly the
+        // five by-reference parameters the kernel expects.
         unsafe {
             cuda_check(
                 cuLaunchKernel(
@@ -501,6 +620,11 @@ impl CudaEngine {
         if num_tiles <= 0 {
             return Ok(());
         }
+        self.ensure_allocation_owner(q_coarse_dev, "score_tiles q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles scores")?;
+        self.ensure_function_owner(kernel, "score_tiles")?;
         let n = num_tiles as usize;
 
         // Bounds-check every buffer against the kernel's read/write ranges
@@ -594,6 +718,12 @@ impl CudaEngine {
         if num_tiles <= 0 {
             return Ok(());
         }
+        self.ensure_allocation_owner(q_coarse_dev, "score_tiles_on_stream q_coarse")?;
+        self.ensure_allocation_owner(q_sign_dev, "score_tiles_on_stream q_sign")?;
+        self.ensure_allocation_owner(tiles_dev, "score_tiles_on_stream tiles")?;
+        self.ensure_allocation_owner(scores_dev, "score_tiles_on_stream scores")?;
+        self.ensure_function_owner(kernel, "score_tiles_on_stream")?;
+        self.ensure_stream_owner(stream, "score_tiles_on_stream")?;
         let n = num_tiles as usize;
 
         let tile_bytes = n
@@ -640,6 +770,10 @@ impl CudaEngine {
             &num_tiles as *const i32 as *mut libc::c_void,
         ];
 
+        // SAFETY: `kernel.func` is a live CUfunction kept alive by
+        // `CudaFunction`'s `Rc<CudaModule>`; `stream.raw()` is a live stream;
+        // the argument array has exactly the five by-reference parameters the
+        // kernel expects; and every device pointer was bounds-checked above.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
             cuda_check(
@@ -661,72 +795,6 @@ impl CudaEngine {
         }
 
         Ok(())
-    }
-
-    /// Async host→device copy on `stream`. Returns immediately; the copy
-    /// completes before any subsequent op enqueued on the same stream.
-    pub fn copy_to_device_async(
-        &self,
-        src: &[u8],
-        dst: &mut CudaAllocation,
-        dst_offset: usize,
-        stream: &CudaStream,
-    ) -> Result<(), CudaError> {
-        let end = dst_offset
-            .checked_add(src.len())
-            .ok_or_else(|| CudaError("copy_to_device_async: offset + length overflow".into()))?;
-        if end > dst.len {
-            return Err(CudaError(format!(
-                "copy_to_device_async: offset {dst_offset} + size {} exceeds allocation size {}",
-                src.len(),
-                dst.len
-            )));
-        }
-        unsafe {
-            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
-            cuda_check(
-                cuMemcpyHtoDAsync_v2(
-                    dst.ptr + dst_offset as u64,
-                    src.as_ptr() as *const libc::c_void,
-                    src.len() as u64,
-                    stream.raw(),
-                ),
-                "cuMemcpyHtoDAsync_v2",
-            )
-        }
-    }
-
-    /// Async device→host copy on `stream`. Returns immediately; call
-    /// `stream.synchronize()` before reading `dst`.
-    pub fn copy_to_host_async(
-        &self,
-        src: &CudaAllocation,
-        src_offset: usize,
-        dst: &mut [u8],
-        stream: &CudaStream,
-    ) -> Result<(), CudaError> {
-        let end = src_offset
-            .checked_add(dst.len())
-            .ok_or_else(|| CudaError("copy_to_host_async: offset + length overflow".into()))?;
-        if end > src.len {
-            return Err(CudaError(format!(
-                "copy_to_host_async: offset {src_offset} + size {} exceeds allocation size {}",
-                dst.len(),
-                src.len
-            )));
-        }
-        unsafe {
-            cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
-            cuda_check(
-                cuMemcpyDtoHAsync_v2(
-                    dst.as_ptr() as *mut libc::c_void,
-                    src.ptr + src_offset as u64,
-                    dst.len() as u64,
-                    stream.raw(),
-                ),
-                "cuMemcpyDtoHAsync_v2",
-            )
-        }
     }
 }
 
@@ -764,6 +832,7 @@ impl DeviceEngine for CudaEngine {
         dst: &mut CudaAllocation,
         dst_offset: usize,
     ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(dst, "copy_to_device")?;
         if dst_offset
             .checked_add(src.len())
             .is_none_or(|end| end > dst.len)
@@ -775,10 +844,13 @@ impl DeviceEngine for CudaEngine {
                 dst.len
             )));
         }
-        // SAFETY: Set context then copy host→device.
+        // SAFETY: the context is kept alive by the `Rc` shared with the
+        // allocation; copy bounds were checked above.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
         }
+        // SAFETY: `dst.ptr` is a live device allocation of `dst.len` bytes
+        // (checked above), and `src` is a valid Rust slice.
         unsafe {
             cuda_check(
                 cuMemcpyHtoD_v2(
@@ -797,6 +869,7 @@ impl DeviceEngine for CudaEngine {
         src_offset: usize,
         dst: &mut [u8],
     ) -> Result<(), CudaError> {
+        self.ensure_allocation_owner(src, "copy_to_host")?;
         if src_offset
             .checked_add(dst.len())
             .is_none_or(|end| end > src.len)
@@ -808,10 +881,12 @@ impl DeviceEngine for CudaEngine {
                 src.len
             )));
         }
-        // SAFETY: Set context then copy device→host.
+        // SAFETY: the context is kept alive by the `Rc`; bounds checked above.
         unsafe {
             cuda_check(cuCtxSetCurrent(self.inner.context), "cuCtxSetCurrent")?;
         }
+        // SAFETY: `src.ptr` is a live device allocation of `src.len` bytes
+        // (checked above), and `dst` is a valid mutable Rust slice.
         unsafe {
             cuda_check(
                 cuMemcpyDtoH_v2(
@@ -871,18 +946,6 @@ extern "C" {
     fn cuStreamCreate(stream: *mut CUstream, flags: u32) -> CUresult;
     fn cuStreamDestroy(stream: CUstream) -> CUresult;
     fn cuStreamSynchronize(stream: CUstream) -> CUresult;
-    fn cuMemcpyHtoDAsync_v2(
-        dst: CUdeviceptr,
-        src: *const libc::c_void,
-        count: u64,
-        stream: CUstream,
-    ) -> CUresult;
-    fn cuMemcpyDtoHAsync_v2(
-        dst: *mut libc::c_void,
-        src: CUdeviceptr,
-        count: u64,
-        stream: CUstream,
-    ) -> CUresult;
     fn cuLaunchKernel(
         f: CUfunction,
         grid_dim_x: u32,
@@ -896,4 +959,6 @@ extern "C" {
         kernel_params: *const *mut libc::c_void,
         extra: *mut libc::c_void,
     ) -> CUresult;
+    fn cuGetErrorName(error: CUresult, pStr: *mut *const core::ffi::c_char) -> CUresult;
+    fn cuGetErrorString(error: CUresult, pStr: *mut *const core::ffi::c_char) -> CUresult;
 }

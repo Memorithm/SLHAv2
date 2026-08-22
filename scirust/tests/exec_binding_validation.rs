@@ -3,6 +3,10 @@
 //! These drive `scirust::exec_binding::parse_and_verify`, the exact entry point
 //! the trainer calls before any staging directory exists. Assertions check the
 //! stable machine-readable code, not merely that validation failed.
+//!
+//! Requires the `serde` feature (the ranking-trainer toolchain).
+
+#![cfg(feature = "serde")]
 
 use scirust::exec_binding::{parse_and_verify, BindingError, ExecutionBinding, Expected};
 

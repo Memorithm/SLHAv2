@@ -2,6 +2,7 @@ use scirust::SciRustSlhaTile;
 
 use crate::codec;
 
+/// Canonical 128-byte serialized SLHAv2 tile.
 pub struct SerializedTile(pub [u8; codec::TILE_BYTES]);
 
 impl SerializedTile {
@@ -13,11 +14,23 @@ impl SerializedTile {
         Self([0u8; codec::TILE_BYTES])
     }
 
+    /// Copy up to 128 bytes and zero-pad the remainder.
+    ///
+    /// Use [`Self::try_from_exact_bytes`] for untrusted/external serialized
+    /// data where accepting a truncated tile would hide an input error.
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut inner = [0u8; codec::TILE_BYTES];
         let len = bytes.len().min(codec::TILE_BYTES);
         inner[..len].copy_from_slice(&bytes[..len]);
         Self(inner)
+    }
+
+    /// Parse exactly one serialized tile.
+    pub fn try_from_exact_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        let inner: [u8; codec::TILE_BYTES] = bytes
+            .try_into()
+            .map_err(|_| "serialized tile must be exactly 128 bytes")?;
+        Ok(Self(inner))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -42,10 +55,8 @@ impl SerializedTile {
 
     pub fn residual(&self) -> [u64; codec::RESIDUAL_WORDS] {
         let mut out = [0u64; codec::RESIDUAL_WORDS];
-        let raw = self.raw_residual();
-        for (i, chunk) in raw.chunks_exact(8).enumerate() {
-            let arr: [u8; 8] = chunk.try_into().expect("residual chunk is 8 bytes");
-            out[i] = u64::from_le_bytes(arr);
+        for (i, chunk) in self.raw_residual().as_chunks::<8>().0.iter().enumerate() {
+            out[i] = u64::from_le_bytes(*chunk);
         }
         out
     }
@@ -58,20 +69,55 @@ impl SerializedTile {
     }
 
     pub fn scale(&self) -> f32 {
-        codec::read_f32_le(&self.0, codec::SCALE_OFFSET).expect("scale field in bounds")
+        self.read_f32(codec::SCALE_OFFSET)
     }
 
     pub fn set_scale(&mut self, val: f32) {
-        self.0[codec::SCALE_OFFSET..codec::SCALE_OFFSET + 4].copy_from_slice(&val.to_le_bytes());
+        self.write_f32(codec::SCALE_OFFSET, val);
     }
 
     pub fn dynamic_lambda(&self) -> f32 {
-        codec::read_f32_le(&self.0, codec::DYNAMIC_LAMBDA_OFFSET)
-            .expect("dynamic_lambda field in bounds")
+        self.read_f32(codec::DYNAMIC_LAMBDA_OFFSET)
     }
 
     pub fn set_dynamic_lambda(&mut self, val: f32) {
-        self.0[codec::DYNAMIC_LAMBDA_OFFSET..codec::DYNAMIC_LAMBDA_OFFSET + 4]
+        self.write_f32(codec::DYNAMIC_LAMBDA_OFFSET, val);
+    }
+
+    pub fn residual_sigma(&self) -> f32 {
+        self.read_f32(codec::RESIDUAL_SIGMA_OFFSET)
+    }
+
+    pub fn set_residual_sigma(&mut self, val: f32) {
+        self.write_f32(codec::RESIDUAL_SIGMA_OFFSET, val);
+    }
+
+    pub fn token_id(&self) -> u32 {
+        self.read_u32(codec::TOKEN_ID_OFFSET)
+    }
+
+    pub fn set_token_id(&mut self, val: u32) {
+        self.write_u32(codec::TOKEN_ID_OFFSET, val);
+    }
+
+    pub fn position(&self) -> u32 {
+        self.read_u32(codec::POSITION_OFFSET)
+    }
+
+    pub fn set_position(&mut self, val: u32) {
+        self.write_u32(codec::POSITION_OFFSET, val);
+    }
+
+    pub fn head_id(&self) -> u16 {
+        u16::from_le_bytes(
+            self.0[codec::HEAD_ID_OFFSET..codec::HEAD_ID_OFFSET + 2]
+                .try_into()
+                .expect("head_id field in bounds"),
+        )
+    }
+
+    pub fn set_head_id(&mut self, val: u16) {
+        self.0[codec::HEAD_ID_OFFSET..codec::HEAD_ID_OFFSET + 2]
             .copy_from_slice(&val.to_le_bytes());
     }
 
@@ -101,10 +147,7 @@ impl SerializedTile {
             .copy_from_slice(&scales[..len]);
     }
 
-    /// Score this tile against a query, validating the codec flags first.
-    ///
-    /// Returns `Err(CodecError)` for an unsupported flag combination (see
-    /// [`codec::validate_codec`]) instead of silently decoding as INT4.
+    /// Score this tile against a query, validating codec flags first.
     pub fn try_score(&self, q_coarse: &[f32], q_sign: &[u64]) -> Result<f32, codec::CodecError> {
         codec::validate_codec(self.flags())?;
         Ok(self.score_unchecked(q_coarse, q_sign))
@@ -113,10 +156,7 @@ impl SerializedTile {
     /// Score this tile against a query.
     ///
     /// # Panics
-    ///
-    /// Panics with a descriptive message if the tile's flags select an
-    /// unsupported codec combination. Prefer [`Self::try_score`] when handling
-    /// untrusted tiles.
+    /// Panics on invalid codec flags or query dimensions.
     pub fn score(&self, q_coarse: &[f32], q_sign: &[u64]) -> f32 {
         codec::validate_codec(self.flags()).unwrap_or_else(|e| panic!("cannot score tile: {e}"));
         self.score_unchecked(q_coarse, q_sign)
@@ -132,28 +172,44 @@ impl SerializedTile {
         self.to_slha_tile().compute_score(q_coarse, q_sign)
     }
 
+    /// Convert without losing any field present in the 128-byte wire layout.
     pub fn to_slha_tile(&self) -> SciRustSlhaTile {
-        let residual = self.residual();
+        let mut latent_kv = [0u8; codec::LATENT_BYTES];
+        latent_kv.copy_from_slice(self.latent());
+        let mut group_scales = [0u8; codec::N_GROUP_SCALES];
+        group_scales.copy_from_slice(self.group_scales());
         SciRustSlhaTile {
-            latent_kv: {
-                let mut lk = [0u8; codec::LATENT_BYTES];
-                lk.copy_from_slice(self.latent());
-                lk
-            },
-            residual_bitmap: residual,
+            latent_kv,
+            residual_bitmap: self.residual(),
             scale: self.scale(),
             dynamic_lambda: self.dynamic_lambda(),
-            residual_sigma: 0.0,
-            token_id: 0,
-            position: 0,
-            head_id: 0,
+            residual_sigma: self.residual_sigma(),
+            token_id: self.token_id(),
+            position: self.position(),
+            head_id: self.head_id(),
             flags: self.flags(),
-            group_scales: {
-                let mut gs = [0u8; codec::N_GROUP_SCALES];
-                gs.copy_from_slice(self.group_scales());
-                gs
-            },
+            group_scales,
         }
+    }
+
+    fn read_f32(&self, offset: usize) -> f32 {
+        codec::read_f32_le(&self.0, offset).expect("f32 field in bounds")
+    }
+
+    fn write_f32(&mut self, offset: usize, val: f32) {
+        self.0[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
+    }
+
+    fn read_u32(&self, offset: usize) -> u32 {
+        u32::from_le_bytes(
+            self.0[offset..offset + 4]
+                .try_into()
+                .expect("u32 field in bounds"),
+        )
+    }
+
+    fn write_u32(&mut self, offset: usize, val: u32) {
+        self.0[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
     }
 }
 
@@ -174,63 +230,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tile_roundtrip() {
-        let mut tile = SerializedTile::new();
-        tile.set_scale(1.5);
-        tile.set_dynamic_lambda(0.1);
-        tile.set_flags(0);
-
-        assert!((tile.scale() - 1.5).abs() < 1e-6);
-        assert!((tile.dynamic_lambda() - 0.1).abs() < 1e-6);
-        assert_eq!(tile.flags(), 0);
-        assert!(!tile.is_warm());
-
-        tile.set_flags(codec::FLAG_WARM);
-        assert!(tile.is_warm());
+    fn exact_parser_rejects_truncation() {
+        assert!(SerializedTile::try_from_exact_bytes(&[0u8; 127]).is_err());
+        assert!(SerializedTile::try_from_exact_bytes(&[0u8; 129]).is_err());
+        assert!(SerializedTile::try_from_exact_bytes(&[0u8; 128]).is_ok());
     }
 
     #[test]
-    fn test_tile_size() {
-        assert_eq!(std::mem::size_of::<SerializedTile>(), codec::TILE_BYTES);
-    }
-
-    #[test]
-    fn test_residual_roundtrip() {
-        let mut tile = SerializedTile::new();
-        let res = [0xDEAD_BEEF_CAFE_FACEu64, 1, 2, 3];
-        tile.set_residual(&res);
-        let got = tile.residual();
-        assert_eq!(res, got);
-    }
-
-    #[test]
-    fn test_latent_access() {
-        let mut tile = SerializedTile::new();
-        tile.latent_mut()[0] = 0xAB;
-        tile.latent_mut()[codec::LATENT_BYTES - 1] = 0xCD;
-        assert_eq!(tile.latent()[0], 0xAB);
-        assert_eq!(tile.latent()[codec::LATENT_BYTES - 1], 0xCD);
-    }
-
-    #[test]
-    fn test_to_slha_tile_roundtrip() {
+    fn scalar_fields_roundtrip() {
         let mut tile = SerializedTile::new();
         tile.set_scale(2.5);
         tile.set_dynamic_lambda(0.05);
+        tile.set_residual_sigma(0.75);
+        tile.set_token_id(1234);
+        tile.set_position(5678);
+        tile.set_head_id(42);
         tile.set_flags(codec::FLAG_NF4);
         tile.set_group_scales(&[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        assert_eq!(tile.scale(), 2.5);
+        assert!((tile.dynamic_lambda() - 0.05).abs() < 1e-6);
+        assert_eq!(tile.residual_sigma(), 0.75);
+        assert_eq!(tile.token_id(), 1234);
+        assert_eq!(tile.position(), 5678);
+        assert_eq!(tile.head_id(), 42);
+        assert!(tile.is_nf4());
+        assert_eq!(tile.group_scales(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn residual_roundtrip() {
+        let mut tile = SerializedTile::new();
+        let res = [0xDEAD_BEEF_CAFE_FACEu64, 1, 2, 3];
+        tile.set_residual(&res);
+        assert_eq!(tile.residual(), res);
+    }
+
+    #[test]
+    fn to_slha_tile_preserves_all_metadata() {
+        let mut tile = SerializedTile::new();
+        tile.set_scale(2.5);
+        tile.set_dynamic_lambda(0.05);
+        tile.set_residual_sigma(0.75);
+        tile.set_token_id(1234);
+        tile.set_position(5678);
+        tile.set_head_id(42);
+        tile.set_flags(codec::FLAG_NF4);
+        tile.set_group_scales(&[10, 20, 30, 40, 50, 60, 70, 80]);
         tile.latent_mut()[0] = 0x12;
-        tile.latent_mut()[31] = 0x34;
-        tile.set_residual(&[0xAAAA_BBBB_CCCC_DDDDu64, 0, 0, 0]);
+        tile.set_residual(&[0xAAAA_BBBB_CCCC_DDDDu64, 1, 2, 3]);
 
         let st = tile.to_slha_tile();
         assert_eq!(st.scale, 2.5);
         assert!((st.dynamic_lambda - 0.05).abs() < 1e-6);
+        assert_eq!(st.residual_sigma, 0.75);
+        assert_eq!(st.token_id, 1234);
+        assert_eq!(st.position, 5678);
+        assert_eq!(st.head_id, 42);
         assert!(st.is_nf4());
         assert_eq!(st.latent_kv[0], 0x12);
-        assert_eq!(st.latent_kv[31], 0x34);
         assert_eq!(st.residual_bitmap[0], 0xAAAA_BBBB_CCCC_DDDDu64);
-        assert_eq!(st.group_scales[0], 1);
-        assert_eq!(st.group_scales[7], 8);
+        assert_eq!(st.group_scales[7], 80);
+    }
+
+    #[test]
+    fn serialized_size_is_stable() {
+        assert_eq!(core::mem::size_of::<SerializedTile>(), codec::TILE_BYTES);
     }
 }

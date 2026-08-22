@@ -106,12 +106,33 @@ index 12bf5c3..49df394 100644
  #include <algorithm>
  #include <cassert>
  #include <cmath>
-@@ -244,6 +248,13 @@
+@@ -121,6 +125,18 @@ llama_kv_cache::llama_kv_cache(
+ 
+     const uint32_t n_layer = hparams.n_layer_all;
+ 
++#if defined(SLHA_INTEGRATION)
++    // Initialize before allocating any K tensor so the allocation hook sees
++    // the exact model-derived layer count and can size the external tile store
++    // on the first layer. Never infer the count later from graph callbacks.
++    {
++        const slha_kv_mode mode = slha_kv_mode_from_env();
++        const char * weights_dir = getenv("SLHA_WEIGHTS_DIR");
++        if (slha_global_init(weights_dir, mode, static_cast<size_t>(n_layer)) != 0) {
++            throw std::runtime_error("failed to initialize SLHA integration");
++        }
++    }
++#endif
++
+     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
+     struct ggml_backend_buft_comparator {
+         bool operator()(const ggml_backend_buffer_type_t & lhs, const ggml_backend_buffer_type_t & rhs) const {
+@@ -244,6 +260,13 @@
          const bool has_v = !is_mla;
 
          ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
 +#if defined(SLHA_INTEGRATION)
-+        // Intercept K-cache allocation and physically reduce it to 128-byte compact tiles
++        // Keep GGML K storage unchanged; size the external SLHA tile store from
++        // the runtime cache geometry at this allocation seam.
 +        if (has_k) {
 +            slha_intercept_k_cache_allocation(k, kv_size, n_embd_k_gqa, n_stream);
 +        }
@@ -119,26 +140,8 @@ index 12bf5c3..49df394 100644
          ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
 
          has_k && ggml_format_name(k, "cache_k_l%d", il);
-@@ -375,6 +386,18 @@ llama_kv_cache::llama_kv_cache(
-         }
-     }
-
-
-+#if defined(SLHA_INTEGRATION)
-+    // Initialize SLHA K-cache integration if enabled via environment variable.
-+    {
-+        slha_kv_mode mode = slha_kv_mode_from_env();
-+        if (mode != SLHA_KV_OFF) {
-+            const char * weights_dir = getenv("SLHA_WEIGHTS_DIR");
-+            slha_global_init(weights_dir, mode);
-+        }
-+    }
-+#endif
-+
-     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
-     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
- }
-@@ -1327,6 +1343,33 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
+         has_v && ggml_format_name(v, "cache_v_l%d", il);
+@@ -1327,6 +1350,33 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
 
      k_cur = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
 

@@ -6,6 +6,10 @@
 //! shell audit while silently accepting a nested same-name field, trailing data
 //! after the closing brace, and a duplicated top-level key. A shell harness is
 //! not a substitute for committed tests.
+//!
+//! Requires the `serde` feature (the ranking-trainer toolchain).
+
+#![cfg(feature = "serde")]
 
 use scirust::norm_manifest::{parse_and_verify, ManifestError, N_LAYERS};
 
