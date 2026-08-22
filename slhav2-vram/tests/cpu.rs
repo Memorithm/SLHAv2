@@ -539,7 +539,7 @@ fn test_pipeline_copy_glue_cpu_engine() {
             .as_chunks::<{ codec::TILE_BYTES }>()
             .0
             .iter()
-            .map(SerializedTile::from_bytes)
+            .map(|bytes| SerializedTile::from_bytes(bytes))
             .collect();
         dev_tiles.truncate(tiles.len());
         score_tiles_cpu(ScoringInput {
