@@ -12,9 +12,15 @@ MODEL_REPO="${MODEL_REPO:-Qwen/Qwen2.5-1.5B-Instruct-GGUF}"
 MODEL_FILE="${MODEL_FILE:-qwen2.5-1.5b-instruct-q8_0.gguf}"
 CHUNKS="${CHUNKS:-12}"
 THREADS="${THREADS:-4}"
+BUILD_JOBS="${BUILD_JOBS:-2}"
 MODE="${1:-passthrough}"
 DATA_FILE="${DATA_FILE:-$WORK/wiki.test.raw}"
 CALIB_DIR="${CALIB_DIR:-$WORK/calibration}"
+
+if ! [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: BUILD_JOBS must be a positive integer, got '$BUILD_JOBS'" >&2
+    exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$SCRIPT_DIR/../../..")"
@@ -26,12 +32,13 @@ echo "== SLHA K-cache integration build =="
 echo "  mode: $MODE"
 echo "  work: $WORK"
 echo "  llama.cpp tag: $LLAMA_TAG"
+echo "  build jobs: $BUILD_JOBS"
 
 # 1. Build slha-c (libslha) if needed.
 if [ "$MODE" != "baseline" ]; then
     echo "== building slha-c (libslha) =="
-    ( cd "$REPO_ROOT" && cargo build --release -p slha-c ) || \
-        echo "  (build slha-c from the SLHAv2 repo root: cargo build --release -p slha-c)"
+    ( cd "$REPO_ROOT" && cargo --locked build --release -p slha-c ) || \
+        echo "  (build slha-c from the SLHAv2 repo root: cargo --locked build --release -p slha-c)"
 fi
 
 # 2. Clone + build llama.cpp.
@@ -82,7 +89,10 @@ if [ "$MODE" != "baseline" ]; then
     cp "$REPO_ROOT/integration/llama.cpp/shim/slha_rank_dataset.cpp" llama.cpp/src/
 fi
 
-# 4. Build llama.cpp.
+# 4. Build llama.cpp. Keep parallelism explicit and bounded: hosted CI runners
+# expose many CPUs but can have much less RAM than an unconstrained `-j` build
+# requires. BUILD_JOBS is recorded above and can be increased deliberately on
+# larger developer machines.
 echo "== building llama.cpp ==="
 CMAKE_FLAGS="-DGGML_NATIVE=ON -DLLAMA_CURL=OFF"
 if [ "$MODE" != "baseline" ]; then
@@ -92,7 +102,7 @@ if [ "$MODE" != "baseline" ]; then
 fi
 
 cmake -S llama.cpp -B llama.cpp/build $CMAKE_FLAGS >/dev/null
-cmake --build llama.cpp/build -j --target llama-perplexity llama-cli
+cmake --build llama.cpp/build -j"$BUILD_JOBS" --target llama-perplexity llama-cli
 
 # 5. Fetch the model if needed.
 if [ ! -f "$MODEL_FILE" ]; then

@@ -26,11 +26,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
-      - name: Validate real-inference runner and report parser
+      - name: Validate real-inference and paired benchmark scripts
         run: |
           bash -n integration/llama.cpp/run_real_inference.sh
+          bash -n integration/llama.cpp/run_real_pair.sh
           python3 -m py_compile integration/llama.cpp/scripts/report_real_inference.py
+          python3 -m py_compile integration/llama.cpp/scripts/compare_real_eval.py
           python3 integration/llama.cpp/tests/test_real_inference_report.py
+          python3 integration/llama.cpp/tests/test_compare_real_eval.py
 
       - name: Build SLHA C ABI
         run: cargo --locked build --release -p slha-c
@@ -91,6 +94,18 @@ jobs:
 
       - name: Build patched llama and CLI
         run: cmake --build "$RUNNER_TEMP/llama.cpp/build" -j"$(nproc)" --target llama llama-cli
+
+      - name: Compile exact-logits evaluation probe
+        run: |
+          g++ -O2 -std=c++17 -Wall -Wextra -Werror \
+            -I"$RUNNER_TEMP/llama.cpp/include" \
+            -I"$RUNNER_TEMP/llama.cpp/ggml/include" \
+            integration/llama.cpp/tools/slha_real_eval.cpp \
+            -L"$RUNNER_TEMP/llama.cpp/build/bin" \
+            -lllama -lggml -lggml-base -lggml-cpu \
+            -Wl,-rpath,"$RUNNER_TEMP/llama.cpp/build/bin" \
+            -o "$RUNNER_TEMP/slha-real-eval"
+          test -x "$RUNNER_TEMP/slha-real-eval"
 
       - name: Record pinned engine revision
         run: |
