@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import array
 import importlib.util
-import json
 import tempfile
 from pathlib import Path
 
@@ -59,7 +58,7 @@ def main() -> None:
         assert mod.percentile([], 0.95) is None
 
         kv = mod.parse_kv_components(
-            "cache: K (f16): 2.00 MiB, V (f16): 3.00 MiB\n"
+            "K (f16): 2.00 MiB, V (f16): 3.00 MiB\n"
         )
         assert kv["k_bytes"] == 2 * 1024 * 1024
         assert kv["v_bytes"] == 3 * 1024 * 1024
