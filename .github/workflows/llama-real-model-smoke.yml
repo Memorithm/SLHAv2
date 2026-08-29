@@ -1,0 +1,125 @@
+name: llama.cpp real-model SLHA smoke
+
+on:
+  pull_request:
+    paths:
+      - "integration/llama.cpp/**"
+      - "scirust/**"
+      - "slha-c/**"
+      - ".github/workflows/llama-real-model-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llama-real-model-smoke-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  real-model-smoke:
+    name: TinyStories 15M real autoregressive external-K
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Download pinned real GGUF and verify SHA-256
+        env:
+          MODEL_URL: https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q8_0.gguf?download=true
+          MODEL_SHA256: 2eda49203f2f044f3dddf29a7dd7cc861ef5a0340f518a19613d73ba6d9c06b6
+        run: |
+          mkdir -p "$RUNNER_TEMP/slha-real-smoke"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$MODEL_URL" \
+            -o "$RUNNER_TEMP/slha-real-smoke/stories15M-q8_0.gguf"
+          echo "$MODEL_SHA256  $RUNNER_TEMP/slha-real-smoke/stories15M-q8_0.gguf" | sha256sum --check -
+
+      - name: Prepare calibration-only text
+        run: |
+          python3 - "$RUNNER_TEMP/slha-real-smoke/calibration.txt" <<'PY'
+          import sys
+          text = (
+              "Once upon a time, a small fox lived near a quiet river. "
+              "Every morning the fox watched birds cross the bright sky. "
+              "One day the fox found a wooden boat and carefully repaired it. "
+              "The story continued with simple events, ordinary objects, and short conversations.\n"
+          )
+          with open(sys.argv[1], "w", encoding="utf-8") as f:
+              f.write(text * 120)
+          PY
+          test -s "$RUNNER_TEMP/slha-real-smoke/calibration.txt"
+
+      - name: Collect real K activations
+        env:
+          WORK: ${{ runner.temp }}/slha-real-smoke/collect-work
+          CALIB_DIR: ${{ runner.temp }}/slha-real-smoke/calibration
+          DATA_FILE: ${{ runner.temp }}/slha-real-smoke/calibration.txt
+          MODEL_REPO: ggml-org/tiny-llamas
+          MODEL_FILE: ${{ runner.temp }}/slha-real-smoke/stories15M-q8_0.gguf
+          CHUNKS: "1"
+          THREADS: "2"
+          SLHA_CALIBRATION_MIN_ROWS: "16"
+        run: |
+          bash integration/llama.cpp/build_and_roundtrip.sh collect
+          test -f "$CALIB_DIR/calibration_manifest.json"
+          python3 - "$CALIB_DIR/calibration_manifest.json" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          assert data.get("valid") is True, data
+          assert int(data.get("num_layers", 0)) == 6, data
+          assert int(data.get("observed_dim", 0)) == 288, data
+          print(json.dumps({
+              "valid": data.get("valid"),
+              "num_layers": data.get("num_layers"),
+              "observed_dim": data.get("observed_dim"),
+              "accepted_rows": data.get("accepted_rows"),
+          }, sort_keys=True))
+          PY
+
+      - name: Train six layer projection artifacts
+        env:
+          WORK: ${{ runner.temp }}/slha-real-smoke/collect-work
+          CALIB_DIR: ${{ runner.temp }}/slha-real-smoke/calibration
+          WEIGHTS_DIR: ${{ runner.temp }}/slha-real-smoke/weights
+          MODEL_REPO: ggml-org/tiny-llamas
+          MODEL_FILE: stories15M-q8_0.gguf
+          EXPECT_LAYERS: "6"
+          SLHA_CALIBRATION_MIN_ROWS: "16"
+        run: |
+          bash integration/llama.cpp/scripts/train_layer_weights.sh mixed
+          test "$(find "$WEIGHTS_DIR" -maxdepth 1 -name 'layer-*.slhw' -type f | wc -l)" -eq 6
+          python3 -m json.tool "$WEIGHTS_DIR/manifest.json" >/dev/null
+
+      - name: Run paired baseline and physical SLHA decode
+        env:
+          WORK: ${{ runner.temp }}/slha-real-smoke/pair-work
+        run: |
+          bash integration/llama.cpp/run_real_pair.sh \
+            --model "$RUNNER_TEMP/slha-real-smoke/stories15M-q8_0.gguf" \
+            --weights-dir "$RUNNER_TEMP/slha-real-smoke/weights" \
+            --prompt "Once upon a time," \
+            --max-tokens 8 \
+            --context-size 128 \
+            --threads 2 \
+            --gpu-layers 0 \
+            --codec mixed \
+            --output-dir "$RUNNER_TEMP/slha-real-smoke/evidence"
+
+      - name: Validate and print real-model evidence
+        run: |
+          REPORT="$RUNNER_TEMP/slha-real-smoke/evidence/comparison.json"
+          python3 -m json.tool "$REPORT" >/dev/null
+          python3 - "$REPORT" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          assert r["validity"]["external_replace_valid"] is True, r["validity"]
+          assert r["quality"]["baseline_generated_tokens"] > 0, r["quality"]
+          assert r["quality"]["external_generated_tokens"] > 0, r["quality"]
+          assert r["quality"]["next_token_logits"] is not None, r["quality"]
+          assert r["memory"]["external_slha_store"] is not None, r["memory"]
+          print(json.dumps(r, sort_keys=True))
+          PY
