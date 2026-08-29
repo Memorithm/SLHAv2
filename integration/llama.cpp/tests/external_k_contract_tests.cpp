@@ -37,6 +37,10 @@ void unset_contract_env() {
 }
 
 void set_valid_external_env() {
+    // Every case starts from a clean process environment. Otherwise a
+    // deliberately-invalid variable from the previous case can become the
+    // first fail-closed diagnostic and make the next assertion ambiguous.
+    unset_contract_env();
     setenv("SLHA_EXTERNAL_K", "1", 1);
     setenv("SLHA_KV_MODE", "tilestore", 1);
     setenv("SLHA_SCORE_MODE", "replace", 1);
