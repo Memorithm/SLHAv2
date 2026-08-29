@@ -340,7 +340,7 @@ int main(int argc, char ** argv) {
         report << "    \"format\": \"raw-f32-native-endian\",\n";
         report << "    \"rows\": " << generated_tokens.size() << ",\n";
         report << "    \"columns\": " << n_vocab << ",\n";
-        report << "    \"path\": \"" << json_escape(opts.logits_bin) << \"\"\n";
+        report << "    \"path\": \"" << json_escape(opts.logits_bin) << "\"\n";
         report << "  },\n";
         report << "  \"timing\": {\n";
         report << std::setprecision(17);
