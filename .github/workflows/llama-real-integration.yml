@@ -1,0 +1,78 @@
+name: llama.cpp real integration
+
+on:
+  pull_request:
+    paths:
+      - "integration/llama.cpp/**"
+      - "slha-c/**"
+      - "scirust/**"
+      - ".github/workflows/llama-real-integration.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llama-real-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  patched-engine:
+    name: patched llama.cpp b9860 builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Build SLHA C ABI
+        run: cargo --locked build --release -p slha-c
+
+      - name: Clone pinned reference engine
+        run: git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$RUNNER_TEMP/llama.cpp"
+
+      - name: Apply SLHA integration patches
+        run: |
+          patch -d "$RUNNER_TEMP/llama.cpp" -p1 < integration/llama.cpp/patches/0001-slha-k-passthrough.patch
+          patch -d "$RUNNER_TEMP/llama.cpp" -p1 < integration/llama.cpp/patches/0002-slha-external-k.patch
+
+      - name: Install shim sources into pinned engine tree
+        run: |
+          cp integration/llama.cpp/shim/slha_llama.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_llama.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_external_k.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_external_k.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_replace_counters.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_replace_counters.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_layer_mask.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_layer_mask.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_score_scale.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_score_scale.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_scale_fit.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_scale_fit.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_score_oracle.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_score_oracle.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_oracle_metrics.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_oracle_metrics.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_rank_dataset.hpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_rank_dataset.cpp "$RUNNER_TEMP/llama.cpp/src/"
+
+      - name: Configure patched engine
+        run: |
+          cmake -S "$RUNNER_TEMP/llama.cpp" -B "$RUNNER_TEMP/llama.cpp/build" \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CUDA=OFF \
+            -DLLAMA_CURL=OFF \
+            -DSLHA_INTEGRATION=ON \
+            -DSLHA_INCLUDE_DIR="$GITHUB_WORKSPACE/slha-c/include" \
+            -DSLHA_LIB="$GITHUB_WORKSPACE/target/release/libslha.a" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build patched llama and CLI
+        run: cmake --build "$RUNNER_TEMP/llama.cpp/build" -j"$(nproc)" --target llama llama-cli
+
+      - name: Record pinned engine revision
+        run: |
+          test "$(git -C "$RUNNER_TEMP/llama.cpp" rev-parse HEAD)" = "fdb1db877c526ec90f668eca1b858da5dba85560"
+          git -C "$RUNNER_TEMP/llama.cpp" status --short
