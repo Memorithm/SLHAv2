@@ -20,6 +20,8 @@ bool slha_tile_store::init(size_t n_layers_, size_t capacity_, size_t tile_bytes
     n_layers = n_layers_;
     capacity = capacity_;
     tile_bytes = tile_bytes_;
+    tiles.assign(n_layers * capacity * tile_bytes + TILE_ALIGN - 1, 0u);
+    valid.assign(n_layers * capacity, 0u);
     return n_layers > 0 && capacity > 0 && tile_bytes == 128u;
 }
 
@@ -71,6 +73,16 @@ int main() {
     assert(g_slha_tile_store.n_layers == 3);
     assert(g_slha_tile_store.capacity == 4096);
     assert(g_slha_tile_store.tile_bytes == 128u);
+
+    slha_external_k_store_stats stats;
+    assert(!slha_external_k_store_stats_snapshot(nullptr));
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.n_layers == 3);
+    assert(stats.capacity == 4096);
+    assert(stats.tile_bytes == 128u);
+    assert(stats.logical_tile_bytes == 3u * 4096u * 128u);
+    assert(stats.tile_backing_capacity_bytes >= stats.logical_tile_bytes);
+    assert(stats.validity_backing_capacity_bytes >= 3u * 4096u);
 
     set_valid_external_env();
     setenv("SLHA_SCORE_MODE", "shadow", 1);
