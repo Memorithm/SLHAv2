@@ -1,0 +1,43 @@
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -149,6 +149,7 @@ llama_kv_cache::llama_kv_cache(
+         if (!slha_external_k_prepare_store(kv_size)) {
+             throw std::runtime_error("failed to size SLHA external-K tile store from llama.cpp KV capacity");
+         }
++        slha_external_k_print_store_summary();
+     }
+ #else
+     const bool slha_external_k = false;
+@@ -280,7 +281,7 @@ llama_kv_cache::llama_kv_cache(
+         ggml_tensor * k = has_k
+             ? (slha_external_k
+-                ? ggml_new_tensor_1d(ctx, type_k, 1)
++                ? ggml_new_tensor_1d(ctx, type_k, ggml_blck_size(type_k))
+                 : ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream))
+             : nullptr;
+ #if defined(SLHA_INTEGRATION)
+@@ -579,6 +580,13 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
+     if (shift == 0) {
+         return;
+     }
++
++#if defined(SLHA_INTEGRATION)
++    GGML_ASSERT(!slha_external_k_enabled() &&
++        "SLHA external-K does not support non-zero sequence position shifts yet");
++#endif
+ 
+     uint32_t new_head = cells.size();
+ 
+@@ -629,6 +637,13 @@ void llama_kv_cache::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
+     if (d == 1) {
+         return;
+     }
++
++#if defined(SLHA_INTEGRATION)
++    GGML_ASSERT(!slha_external_k_enabled() &&
++        "SLHA external-K does not support sequence position division yet");
++#endif
+ 
+     if (p0 < 0) {
+         p0 = 0;
