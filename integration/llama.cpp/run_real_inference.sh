@@ -69,6 +69,9 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+REPORTER="$SCRIPT_DIR/scripts/report_real_inference.py"
+[[ -f "$REPORTER" ]] || { echo "ERROR: missing report parser: $REPORTER" >&2; exit 2; }
+
 SLHA_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 LLAMA_TAG="b9860"
 LLAMA_EXPECTED="fdb1db877c526ec90f668eca1b858da5dba85560"
@@ -88,7 +91,6 @@ printf 'max tokens      : %s\n' "$MAX_TOKENS"
 printf 'threads         : %s\n' "$THREADS"
 printf 'GPU layers      : %s\n' "$GPU_LAYERS"
 
-# Build the engine-independent bridge first.
 ( cd "$REPO_ROOT" && cargo --locked build --release -p slha-c )
 
 # The checkout under WORK is disposable by design. Reset it to the exact pinned
@@ -196,204 +198,28 @@ MODEL_BYTES="$(stat -c '%s' "$MODEL")"
 PROMPT_SHA256="$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')"
 LOG_SHA256="$(sha256sum "$LOG_FILE" | awk '{print $1}')"
 
-python3 - "$MODE" "$OUTPUT_JSON" "$LOG_FILE" "$TIME_FILE" "$MODEL" \
-    "$MODEL_SHA256" "$MODEL_BYTES" "$PROMPT_SHA256" "$SLHA_COMMIT" \
-    "$LLAMA_EXPECTED" "$CTX_SIZE" "$MAX_TOKENS" "$THREADS" "$SEED" \
-    "$GPU_LAYERS" "$CACHE_TYPE_K" "$CACHE_TYPE_V" "$CODEC" "$RUN_RC" \
-    "$LOG_SHA256" "$WEIGHTS_DIR" <<'PY'
-import json
-import os
-import platform
-import re
-import subprocess
-import sys
-from pathlib import Path
-
-(
-    mode, output_json, log_path, time_path, model_path, model_sha256,
-    model_bytes, prompt_sha256, slha_commit, llama_commit, ctx_size,
-    max_tokens, threads, seed, gpu_layers, cache_type_k, cache_type_v,
-    codec, run_rc, log_sha256, weights_dir,
-) = sys.argv[1:]
-
-log = Path(log_path).read_text(errors="replace")
-time_text = Path(time_path).read_text(errors="replace") if Path(time_path).exists() else ""
-
-def timed(name):
-    m = re.search(rf"^{re.escape(name)}=([^\n]+)$", time_text, re.MULTILINE)
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except ValueError:
-        return None
-
-def first_float(pattern):
-    m = re.search(pattern, log, re.IGNORECASE | re.MULTILINE)
-    return float(m.group(1)) if m else None
-
-def first_text(pattern):
-    m = re.search(pattern, log, re.IGNORECASE | re.MULTILINE)
-    return m.group(1).strip() if m else None
-
-def parse_store():
-    m = re.search(r"^SLHA_EXTERNAL_K_STORE\s+(.+)$", log, re.MULTILINE)
-    if not m:
-        return None
-    result = {}
-    for item in m.group(1).split():
-        if "=" not in item:
-            continue
-        key, value = item.split("=", 1)
-        if value in ("true", "false"):
-            result[key] = value == "true"
-        else:
-            try:
-                result[key] = int(value)
-            except ValueError:
-                result[key] = value
-    return result
-
-def parse_replace_summary():
-    marker = "SLHA_REPLACE_SUMMARY\n"
-    pos = log.rfind(marker)
-    if pos < 0:
-        return None
-    result = {}
-    for line in log[pos + len(marker):].splitlines():
-        if not line or line.startswith("layer_") or "=" not in line:
-            if line.startswith("layer_"):
-                continue
-            if result:
-                break
-            continue
-        key, value = line.split("=", 1)
-        if " " in key or key.startswith("["):
-            break
-        if value in ("true", "false"):
-            result[key] = value == "true"
-        else:
-            try:
-                result[key] = int(value)
-            except ValueError:
-                try:
-                    result[key] = float(value)
-                except ValueError:
-                    result[key] = value
-    return result
-
-def cpu_model():
-    try:
-        text = subprocess.check_output(["lscpu"], text=True, stderr=subprocess.DEVNULL)
-        for line in text.splitlines():
-            if line.startswith("Model name:"):
-                return line.split(":", 1)[1].strip()
-    except Exception:
-        pass
-    return None
-
-def mem_total_kb():
-    try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            if line.startswith("MemTotal:"):
-                return int(line.split()[1])
-    except Exception:
-        pass
-    return None
-
-def gpu_inventory():
-    if int(gpu_layers) == 0:
-        return []
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"],
-            text=True, stderr=subprocess.DEVNULL,
-        )
-        return [line.strip() for line in out.splitlines() if line.strip()]
-    except Exception:
-        return None
-
-# llama.cpp b9860 emits these with --perf. Leave null if the exact line is not
-# present rather than substituting wall-clock throughput.
-prompt_tps = first_float(r"prompt eval time\s*=.*?([0-9]+(?:\.[0-9]+)?)\s+tokens per second")
-decode_tps = first_float(r"(?m)^.*?eval time\s*=.*?([0-9]+(?:\.[0-9]+)?)\s+tokens per second")
-
-kv_lines = [line.strip() for line in log.splitlines() if "KV buffer size" in line or "KV self size" in line]
-quantization = first_text(r"file type\s*=\s*([^\n]+)")
-
-report = {
-    "schema_version": 1,
-    "mode": mode,
-    "valid_process_exit": int(run_rc) == 0,
-    "process_exit_code": int(run_rc),
-    "provenance": {
-        "slhav2_commit": slha_commit,
-        "llama_cpp_commit": llama_commit,
-        "model_path": os.path.abspath(model_path),
-        "model_sha256": model_sha256,
-        "model_bytes": int(model_bytes),
-        "quantization_from_engine_log": quantization,
-        "prompt_sha256": prompt_sha256,
-        "context_size": int(ctx_size),
-        "max_tokens": int(max_tokens),
-        "threads": int(threads),
-        "seed": int(seed),
-        "gpu_layers": int(gpu_layers),
-        "cache_type_k": cache_type_k,
-        "cache_type_v": cache_type_v,
-        "codec": codec if mode == "external" else None,
-        "weights_dir": os.path.abspath(weights_dir) if weights_dir else None,
-    },
-    "host": {
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "cpu_model": cpu_model(),
-        "logical_cpus": os.cpu_count(),
-        "ram_total_kb": mem_total_kb(),
-        "gpu_inventory": gpu_inventory(),
-    },
-    "memory": {
-        "max_process_rss_kb": int(timed("max_rss_kb")) if timed("max_rss_kb") is not None else None,
-        "engine_kv_allocation_lines": kv_lines,
-        "external_k_store": parse_store(),
-        "weights_resident_bytes": None,
-        "runtime_overhead_bytes": None,
-        "baseline_kv_bytes": None,
-        "slha_kv_bytes": None,
-    },
-    "performance": {
-        "wall_elapsed_s": timed("elapsed_s"),
-        "user_cpu_s": timed("user_s"),
-        "system_cpu_s": timed("sys_s"),
-        "prefill_tokens_per_second_from_engine": prompt_tps,
-        "decode_tokens_per_second_from_engine": decode_tps,
-        "time_to_first_token_ms": None,
-        "p50_token_latency_ms": None,
-        "p95_token_latency_ms": None,
-        "slha_compression_cost_ms": None,
-        "slha_score_cost_ms": None,
-    },
-    "slha_replace_summary": parse_replace_summary(),
-    "quality": {
-        "next_token_logits": None,
-        "token_agreement": None,
-        "perplexity": None,
-        "note": "Generation is real; paired quality metrics are intentionally deferred to the comparison harness rather than inferred from this single run."
-    },
-    "artifacts": {
-        "log_path": os.path.abspath(log_path),
-        "log_sha256": log_sha256,
-        "time_path": os.path.abspath(time_path),
-    },
-    "limitations": [
-        "PR1 records real autoregressive execution and process RSS but does not infer model-weight residency from file size.",
-        "TTFT and p50/p95 token latency require per-token instrumentation and remain null here.",
-        "CCOS HOT/WARM/COLD is not connected to the llama.cpp external-K path in PR1.",
-    ],
-}
-
-Path(output_json).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-PY
+python3 "$REPORTER" \
+    --mode "$MODE" \
+    --output "$OUTPUT_JSON" \
+    --log "$LOG_FILE" \
+    --time "$TIME_FILE" \
+    --model "$MODEL" \
+    --model-sha256 "$MODEL_SHA256" \
+    --model-bytes "$MODEL_BYTES" \
+    --prompt-sha256 "$PROMPT_SHA256" \
+    --slhav2-commit "$SLHA_COMMIT" \
+    --llama-commit "$LLAMA_EXPECTED" \
+    --context-size "$CTX_SIZE" \
+    --max-tokens "$MAX_TOKENS" \
+    --threads "$THREADS" \
+    --seed "$SEED" \
+    --gpu-layers "$GPU_LAYERS" \
+    --cache-type-k "$CACHE_TYPE_K" \
+    --cache-type-v "$CACHE_TYPE_V" \
+    --codec "$CODEC" \
+    --exit-code "$RUN_RC" \
+    --log-sha256 "$LOG_SHA256" \
+    --weights-dir "$WEIGHTS_DIR"
 
 if [[ "$RUN_RC" -ne 0 ]]; then
     echo "ERROR: llama-cli exited with status $RUN_RC; report retained at $OUTPUT_JSON" >&2
