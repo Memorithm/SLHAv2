@@ -26,6 +26,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
+      - name: Validate real-inference runner and report parser
+        run: |
+          bash -n integration/llama.cpp/run_real_inference.sh
+          python3 -m py_compile integration/llama.cpp/scripts/report_real_inference.py
+          python3 integration/llama.cpp/tests/test_real_inference_report.py
+
       - name: Build SLHA C ABI
         run: cargo --locked build --release -p slha-c
 
