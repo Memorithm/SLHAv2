@@ -46,8 +46,10 @@ jobs:
 
           normalize_patch integration/llama.cpp/patches/0001-slha-k-passthrough.patch "$RUNNER_TEMP/0001.patch"
           normalize_patch integration/llama.cpp/patches/0002-slha-external-k.patch "$RUNNER_TEMP/0002.patch"
+          normalize_patch integration/llama.cpp/patches/0003-slha-external-k-hardening.patch "$RUNNER_TEMP/0003.patch"
           git -C "$RUNNER_TEMP/llama.cpp" apply --recount --verbose "$RUNNER_TEMP/0001.patch"
           git -C "$RUNNER_TEMP/llama.cpp" apply --recount --verbose "$RUNNER_TEMP/0002.patch"
+          git -C "$RUNNER_TEMP/llama.cpp" apply --recount --verbose "$RUNNER_TEMP/0003.patch"
 
       - name: Install shim sources into pinned engine tree
         run: |
