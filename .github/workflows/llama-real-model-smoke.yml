@@ -64,6 +64,20 @@ jobs:
           THREADS: "2"
           SLHA_CALIBRATION_MIN_ROWS: "16"
         run: |
+          # build_and_roundtrip.sh predates the normalized-patch helper used by
+          # the exact-head CI. Prepare its checkout with the same normalized
+          # patch first; the script then detects SLHA_INTEGRATION and does not
+          # invoke the legacy `patch` parser on the historical patch artifact.
+          mkdir -p "$WORK"
+          git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$WORK/llama.cpp"
+          awk '
+            /^diff --git / { in_hunk = 0 }
+            /^@@ / { in_hunk = 1 }
+            { if (in_hunk && length($0) == 0) print " "; else print $0 }
+          ' integration/llama.cpp/patches/0001-slha-k-passthrough.patch > "$WORK/0001.normalized.patch"
+          git -C "$WORK/llama.cpp" apply --recount --check "$WORK/0001.normalized.patch"
+          git -C "$WORK/llama.cpp" apply --recount "$WORK/0001.normalized.patch"
+
           bash integration/llama.cpp/build_and_roundtrip.sh collect
           test -f "$CALIB_DIR/calibration_manifest.json"
           python3 - "$CALIB_DIR/calibration_manifest.json" <<'PY'
