@@ -28,4 +28,25 @@ bool slha_external_k_validate_environment(std::string * error);
  */
 bool slha_external_k_prepare_store(size_t runtime_capacity);
 
+struct slha_external_k_store_stats {
+    size_t n_layers = 0;
+    size_t capacity = 0;
+    size_t tile_bytes = 0;
+    size_t logical_tile_bytes = 0;
+    size_t tile_backing_capacity_bytes = 0;
+    size_t validity_backing_capacity_bytes = 0;
+};
+
+/** Snapshot the owned external-K vector allocation while the store is locked.
+ *
+ * These fields describe the tile store's own vector backing capacities. They
+ * do not include allocator metadata, model weights, V-cache bytes, GGML graph
+ * temporaries or unrelated process RSS and must not be presented as total
+ * process memory.
+ */
+bool slha_external_k_store_stats_snapshot(slha_external_k_store_stats * out);
+
+/** Emit a machine-parseable one-line snapshot for real-model reports. */
+void slha_external_k_print_store_summary();
+
 #endif
