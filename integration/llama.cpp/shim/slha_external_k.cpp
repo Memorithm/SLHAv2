@@ -5,6 +5,8 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
+#include <limits>
 
 namespace {
 
@@ -21,6 +23,17 @@ bool env_is_unset_or(const char * name, const char * value) {
 bool env_has_value(const char * name) {
     const char * value = std::getenv(name);
     return value && value[0] != '\0';
+}
+
+bool checked_mul(size_t lhs, size_t rhs, size_t * out) {
+    if (!out) {
+        return false;
+    }
+    if (lhs != 0 && rhs > std::numeric_limits<size_t>::max() / lhs) {
+        return false;
+    }
+    *out = lhs * rhs;
+    return true;
 }
 
 } // namespace
@@ -97,4 +110,47 @@ bool slha_external_k_prepare_store(size_t runtime_capacity) {
 
     return g_slha_tile_store.init(
         static_cast<size_t>(n_layers), runtime_capacity, tile_bytes);
+}
+
+bool slha_external_k_store_stats_snapshot(slha_external_k_store_stats * out) {
+    if (!out) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_slha_tile_store.mutex);
+
+    slha_external_k_store_stats stats;
+    stats.n_layers = g_slha_tile_store.n_layers;
+    stats.capacity = g_slha_tile_store.capacity;
+    stats.tile_bytes = g_slha_tile_store.tile_bytes;
+
+    size_t slots = 0;
+    if (!checked_mul(stats.n_layers, stats.capacity, &slots) ||
+        !checked_mul(slots, stats.tile_bytes, &stats.logical_tile_bytes)) {
+        return false;
+    }
+
+    stats.tile_backing_capacity_bytes = g_slha_tile_store.tiles.capacity();
+    stats.validity_backing_capacity_bytes = g_slha_tile_store.valid.capacity();
+
+    *out = stats;
+    return true;
+}
+
+void slha_external_k_print_store_summary() {
+    slha_external_k_store_stats stats;
+    if (!slha_external_k_store_stats_snapshot(&stats)) {
+        std::cerr << "SLHA_EXTERNAL_K_STORE valid=false\n";
+        return;
+    }
+
+    std::cerr << "SLHA_EXTERNAL_K_STORE"
+              << " valid=true"
+              << " layers=" << stats.n_layers
+              << " capacity=" << stats.capacity
+              << " tile_bytes=" << stats.tile_bytes
+              << " logical_tile_bytes=" << stats.logical_tile_bytes
+              << " tile_backing_capacity_bytes=" << stats.tile_backing_capacity_bytes
+              << " validity_backing_capacity_bytes=" << stats.validity_backing_capacity_bytes
+              << "\n";
 }
