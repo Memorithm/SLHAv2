@@ -23,7 +23,7 @@ index 0465430..0d32f6f 100644
 @@ -12,6 +12,10 @@
  #include "llama-ext.h"
  #include "llama.h"
-
+ 
 +#if defined(SLHA_INTEGRATION)
 +#include "slha_llama.hpp"
 +#endif
@@ -33,13 +33,13 @@ index 0465430..0d32f6f 100644
  #include <cstring>
 @@ -3834,6 +3838,9 @@ void llama_memory_clear(llama_memory_t mem, bool data) {
      }
-
+ 
      mem->clear(data);
 +#if defined(SLHA_INTEGRATION)
 +    slha_k_clear_all();
 +#endif
  }
-
+ 
  bool llama_memory_seq_rm(
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
 index 4c86e43..b155dd3 100644
@@ -48,7 +48,7 @@ index 4c86e43..b155dd3 100644
 @@ -5,6 +5,10 @@
  #include "llama-batch.h"
  #include "llama-cparams.h"
-
+ 
 +#if defined(SLHA_INTEGRATION)
 +#include "slha_llama.hpp"
 +#endif
@@ -67,7 +67,7 @@ index 4c86e43..b155dd3 100644
 @@ -2445,6 +2450,26 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          //       while for some models F16 is enough, for others it is not, so we default to F32 here
          ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-
+ 
 +#if defined(SLHA_INTEGRATION)
 +        // Shadow/replace-mode: compare or substitute baseline logits with SLHA
 +        // direct scores.  In shadow mode the op copies kq through unchanged and
@@ -98,7 +98,7 @@ index 12bf5c3..49df394 100644
 @@ -5,6 +5,10 @@
  #include "llama-model.h"
  #include "llama-context.h"
-
+ 
 +#if defined(SLHA_INTEGRATION)
 +#include "slha_llama.hpp"
 +#endif
@@ -128,7 +128,7 @@ index 12bf5c3..49df394 100644
          bool operator()(const ggml_backend_buffer_type_t & lhs, const ggml_backend_buffer_type_t & rhs) const {
 @@ -244,6 +260,13 @@
          const bool has_v = !is_mla;
-
+ 
          ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
 +#if defined(SLHA_INTEGRATION)
 +        // Keep GGML K storage unchanged; size the external SLHA tile store from
@@ -138,13 +138,13 @@ index 12bf5c3..49df394 100644
 +        }
 +#endif
          ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
-
+ 
          has_k && ggml_format_name(k, "cache_k_l%d", il);
          has_v && ggml_format_name(v, "cache_v_l%d", il);
 @@ -1327,6 +1350,33 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
-
+ 
      k_cur = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
-
+ 
 +#if defined(SLHA_INTEGRATION)
 +    // Apply SLHA transformation to K if enabled.
 +    slha_layer_state * layer_state = slha_get_layer_state(il);
@@ -173,5 +173,5 @@ index 12bf5c3..49df394 100644
 +#endif
 +
      const int64_t n_stream = k->ne[2];
-
+ 
      if (n_stream > 1) {
