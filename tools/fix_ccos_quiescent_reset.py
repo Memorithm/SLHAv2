@@ -65,3 +65,42 @@ void slha_external_k_record_compression_ns(uint64_t elapsed_ns) {
 void slha_external_k_record_compression_ns(uint64_t elapsed_ns) {
 """,
 )
+
+path = "integration/llama.cpp/tests/external_k_contract_tests.cpp"
+replace_once(
+    path,
+    """    assert(stats.quiescent_offload_calls == 1u);
+    assert(stats.quiescent_restore_calls == 1u);
+    assert(stats.quiescent_restored_slots == 1u);
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_OK);
+
+    set_valid_external_env();
+    setenv(\"SLHA_SCORE_MODE\", \"shadow\", 1);
+""",
+    """    assert(stats.quiescent_offload_calls == 1u);
+    assert(stats.quiescent_restore_calls == 1u);
+    assert(stats.quiescent_restored_slots == 1u);
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_OK);
+
+    // Reset is a hard lifecycle boundary: an all-COLD snapshot from the old
+    // logical context must not remain restorable after the cache is cleared.
+    set_valid_ccos_env(\"128\");
+    assert(slha_external_k_prepare_store(8));
+    assert(slha_external_k_write_tile(0, 0, &tile));
+    assert(slha_external_k_ccos_offload_quiescent());
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.cold_slots == 1u);
+    slha_external_k_reset_store();
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 0u);
+    assert(stats.warm_slots == 0u);
+    assert(stats.cold_slots == 0u);
+    assert(stats.resident_bytes == 0u);
+    assert(!slha_external_k_ccos_restore_quiescent());
+    assert(slha_external_k_write_tile(0, 0, &tile));
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_OK);
+
+    set_valid_external_env();
+    setenv(\"SLHA_SCORE_MODE\", \"shadow\", 1);
+""",
+)
