@@ -146,6 +146,7 @@ g++ -O2 -std=c++17 -Wall -Wextra -Werror \
     -I"$LLAMA_DIR/include" \
     -I"$LLAMA_DIR/ggml/include" \
     -I"$LLAMA_DIR/src" \
+    -I"$REPO_ROOT/slha-c/include" \
     "$REPO_ROOT/integration/llama.cpp/tools/slha_real_eval.cpp" \
     -L"$LLAMA_DIR/build/bin" -lllama -lggml -lggml-base -lggml-cpu \
     -Wl,-rpath,"$LLAMA_DIR/build/bin" \
