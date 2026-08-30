@@ -195,6 +195,85 @@ int main() {
     assert(stats.cold_slots == 0u);
     assert(stats.budget_failures == 1u);
 
+    // COLD is legal only while the dense-attention context is quiescent.
+    // Offload all active keys, verify that they become unscoreable COLD state,
+    // then restore the exact HOT representation before scoring resumes.
+    set_valid_ccos_env("384");
+    assert(slha_external_k_prepare_store(8));
+    assert(slha_external_k_write_tile(0, 0, &tile));
+    assert(slha_external_k_write_tile(1, 0, &tile));
+    assert(slha_external_k_write_tile(2, 0, &tile));
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 3u);
+    assert(stats.resident_bytes == 384u);
+    assert(slha_external_k_ccos_offload_quiescent());
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 0u);
+    assert(stats.warm_slots == 0u);
+    assert(stats.cold_slots == 3u);
+    assert(stats.resident_bytes == 0u);
+    assert(stats.evictions == 3u);
+    assert(stats.quiescent_offload_calls == 1u);
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_ERR_NOT_RESIDENT);
+    assert(slha_external_k_ccos_restore_quiescent());
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 3u);
+    assert(stats.warm_slots == 0u);
+    assert(stats.cold_slots == 0u);
+    assert(stats.resident_bytes == 384u);
+    assert(stats.quiescent_restore_calls == 1u);
+    assert(stats.quiescent_restored_slots == 3u);
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_OK);
+
+    // The same lifecycle must preserve a WARM representation exactly. This is
+    // the state exercised by a dense-attention run at the minimum 96 B/key
+    // resident budget: WARM -> COLD while quiescent -> WARM before decode.
+    set_valid_ccos_env("96");
+    assert(slha_external_k_prepare_store(8));
+    assert(slha_external_k_write_tile(0, 0, &tile));
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 0u);
+    assert(stats.warm_slots == 1u);
+    assert(stats.cold_slots == 0u);
+    assert(stats.resident_bytes == 96u);
+    assert(stats.offloaded_bytes == 32u);
+    assert(slha_external_k_ccos_offload_quiescent());
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 0u);
+    assert(stats.warm_slots == 0u);
+    assert(stats.cold_slots == 1u);
+    assert(stats.resident_bytes == 0u);
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_ERR_NOT_RESIDENT);
+    assert(slha_external_k_ccos_restore_quiescent());
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 0u);
+    assert(stats.warm_slots == 1u);
+    assert(stats.cold_slots == 0u);
+    assert(stats.resident_bytes == 96u);
+    assert(stats.offloaded_bytes == 32u);
+    assert(stats.quiescent_offload_calls == 1u);
+    assert(stats.quiescent_restore_calls == 1u);
+    assert(stats.quiescent_restored_slots == 1u);
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_OK);
+
+    // Reset is a hard lifecycle boundary: an all-COLD snapshot from the old
+    // logical context must not remain restorable after the cache is cleared.
+    set_valid_ccos_env("128");
+    assert(slha_external_k_prepare_store(8));
+    assert(slha_external_k_write_tile(0, 0, &tile));
+    assert(slha_external_k_ccos_offload_quiescent());
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.cold_slots == 1u);
+    slha_external_k_reset_store();
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 0u);
+    assert(stats.warm_slots == 0u);
+    assert(stats.cold_slots == 0u);
+    assert(stats.resident_bytes == 0u);
+    assert(!slha_external_k_ccos_restore_quiescent());
+    assert(slha_external_k_write_tile(0, 0, &tile));
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_OK);
+
     set_valid_external_env();
     setenv("SLHA_SCORE_MODE", "shadow", 1);
     expect_invalid("replace");

@@ -367,6 +367,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "machine": platform.machine(),
             "logical_cpus": os.cpu_count(),
         },
+        "ccos_lifecycle": external.get("ccos_lifecycle"),
         "quality": {
             "baseline_generated_tokens": len(baseline_tokens),
             "external_generated_tokens": len(external_tokens),

@@ -1,4 +1,5 @@
 #include "llama.h"
+#include "slha_external_k.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -30,6 +31,7 @@ struct Options {
     int32_t gpu_layers = 0;
     ggml_type cache_type_k = GGML_TYPE_F16;
     ggml_type cache_type_v = GGML_TYPE_F16;
+    int32_t ccos_cold_cycle_step = -1;
 };
 
 [[noreturn]] void usage(const char * argv0, const std::string & error = {}) {
@@ -39,7 +41,8 @@ struct Options {
     std::cerr
         << "usage: " << argv0 << " --model MODEL.gguf --prompt TEXT --output-json REPORT.json "
         << "--logits-bin LOGITS.f32 [--max-tokens N] [--context-size N] [--threads N] "
-        << "[--gpu-layers N] [--cache-type-k f16|f32|bf16] [--cache-type-v f16|f32|bf16]\n";
+        << "[--gpu-layers N] [--cache-type-k f16|f32|bf16] [--cache-type-v f16|f32|bf16] "
+        << "[--ccos-cold-cycle-step N]\n";
     std::exit(2);
 }
 
@@ -77,6 +80,7 @@ Options parse_args(int argc, char ** argv) {
         else if (arg == "--gpu-layers") opts.gpu_layers = std::stoi(next());
         else if (arg == "--cache-type-k") opts.cache_type_k = parse_cache_type(next());
         else if (arg == "--cache-type-v") opts.cache_type_v = parse_cache_type(next());
+        else if (arg == "--ccos-cold-cycle-step") opts.ccos_cold_cycle_step = std::stoi(next());
         else usage(argv[0], "unknown option " + arg);
     }
 
@@ -87,6 +91,9 @@ Options parse_args(int argc, char ** argv) {
     if (opts.max_tokens <= 0) usage(argv[0], "--max-tokens must be positive");
     if (opts.context_size == 0) usage(argv[0], "--context-size must be positive");
     if (opts.threads <= 0) usage(argv[0], "--threads must be positive");
+    if (opts.ccos_cold_cycle_step < -1 || opts.ccos_cold_cycle_step >= opts.max_tokens - 1) {
+        usage(argv[0], "--ccos-cold-cycle-step must be -1 or leave at least one decode step after the cycle");
+    }
     return opts;
 }
 
@@ -173,6 +180,20 @@ void write_double_array(std::ostream & out, const std::vector<double> & values) 
     out << ']';
 }
 
+
+void write_store_snapshot(std::ostream & out, const slha_external_k_store_stats & stats) {
+    out << "{"
+        << "\"resident_bytes\":" << stats.resident_bytes << ','
+        << "\"offloaded_bytes\":" << stats.offloaded_bytes << ','
+        << "\"hot_slots\":" << stats.hot_slots << ','
+        << "\"warm_slots\":" << stats.warm_slots << ','
+        << "\"cold_slots\":" << stats.cold_slots << ','
+        << "\"pinned_slots\":" << stats.pinned_slots << ','
+        << "\"evictions\":" << stats.evictions
+        << "}";
+}
+
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -255,6 +276,10 @@ int main(int argc, char ** argv) {
         bool eos_reached = false;
         double prefill_ms = 0.0;
         double ttft_ms = 0.0;
+        bool ccos_lifecycle_executed = false;
+        slha_external_k_store_stats ccos_before{};
+        slha_external_k_store_stats ccos_cold{};
+        slha_external_k_store_stats ccos_restored{};
 
         llama_batch batch = llama_batch_get_one(prompt_tokens.data(), n_prompt);
         const auto inference_start = Clock::now();
@@ -298,6 +323,35 @@ int main(int argc, char ** argv) {
 
             generated_text += token_piece(vocab, token);
             batch = llama_batch_get_one(&generated_tokens.back(), 1);
+
+            if (opts.ccos_cold_cycle_step == step) {
+                if (!slha_external_k_store_stats_snapshot(&ccos_before)) {
+                    throw std::runtime_error("cannot snapshot CCOS state before quiescent COLD cycle");
+                }
+                const size_t active_before = ccos_before.hot_slots + ccos_before.warm_slots +
+                    ccos_before.cold_slots + ccos_before.pinned_slots;
+                if (active_before == 0 || ccos_before.cold_slots != 0) {
+                    throw std::runtime_error("invalid active CCOS state before quiescent COLD cycle");
+                }
+                if (!slha_external_k_ccos_offload_quiescent() ||
+                    !slha_external_k_store_stats_snapshot(&ccos_cold)) {
+                    throw std::runtime_error("CCOS quiescent offload failed");
+                }
+                if (ccos_cold.resident_bytes != 0 || ccos_cold.cold_slots != active_before) {
+                    throw std::runtime_error("CCOS quiescent offload did not produce complete COLD state");
+                }
+                if (!slha_external_k_ccos_restore_quiescent() ||
+                    !slha_external_k_store_stats_snapshot(&ccos_restored)) {
+                    throw std::runtime_error("CCOS quiescent restore failed");
+                }
+                if (ccos_restored.cold_slots != 0 ||
+                    ccos_restored.resident_bytes != ccos_before.resident_bytes ||
+                    ccos_restored.hot_slots != ccos_before.hot_slots ||
+                    ccos_restored.warm_slots != ccos_before.warm_slots) {
+                    throw std::runtime_error("CCOS restore did not recover pre-offload residency exactly");
+                }
+                ccos_lifecycle_executed = true;
+            }
         }
 
         logits_out.close();
@@ -351,6 +405,17 @@ int main(int argc, char ** argv) {
         report << "    \"decode_tokens_per_second\": " << decode_tps << ",\n";
         report << "    \"decode_step_ms\": ";
         write_double_array(report, decode_step_ms);
+        report << "\n  },\n";
+        report << "  \"ccos_lifecycle\": {\n";
+        report << "    \"requested\": " << (opts.ccos_cold_cycle_step >= 0 ? "true" : "false") << ",\n";
+        report << "    \"executed\": " << (ccos_lifecycle_executed ? "true" : "false") << ",\n";
+        report << "    \"step\": " << opts.ccos_cold_cycle_step << ",\n";
+        report << "    \"before\": ";
+        if (ccos_lifecycle_executed) write_store_snapshot(report, ccos_before); else report << "null";
+        report << ",\n    \"cold\": ";
+        if (ccos_lifecycle_executed) write_store_snapshot(report, ccos_cold); else report << "null";
+        report << ",\n    \"restored\": ";
+        if (ccos_lifecycle_executed) write_store_snapshot(report, ccos_restored); else report << "null";
         report << "\n  }\n";
         report << "}\n";
         report.close();

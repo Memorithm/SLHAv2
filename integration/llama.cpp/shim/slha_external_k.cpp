@@ -134,6 +134,14 @@ std::atomic<uint64_t> g_budget_enforcements{0};
 std::atomic<uint64_t> g_budget_failures{0};
 std::atomic<uint64_t> g_cache_hits{0};
 std::atomic<uint64_t> g_cache_misses{0};
+std::atomic<uint64_t> g_quiescent_offload_calls{0};
+std::atomic<uint64_t> g_quiescent_restore_calls{0};
+std::atomic<uint64_t> g_quiescent_restored_slots{0};
+std::atomic<uint64_t> g_quiescent_offload_ns{0};
+std::atomic<uint64_t> g_quiescent_restore_ns{0};
+size_t g_quiescent_pre_offload_resident = 0;
+size_t g_quiescent_pre_offload_hot = 0;
+size_t g_quiescent_pre_offload_warm = 0;
 std::atomic<uint64_t> g_compression_ns{0};
 std::atomic<uint64_t> g_score_ns{0};
 std::atomic<uint64_t> g_budget_ns{0};
@@ -160,6 +168,14 @@ void reset_runtime_counters() {
     g_budget_failures.store(0, std::memory_order_relaxed);
     g_cache_hits.store(0, std::memory_order_relaxed);
     g_cache_misses.store(0, std::memory_order_relaxed);
+    g_quiescent_offload_calls.store(0, std::memory_order_relaxed);
+    g_quiescent_restore_calls.store(0, std::memory_order_relaxed);
+    g_quiescent_restored_slots.store(0, std::memory_order_relaxed);
+    g_quiescent_offload_ns.store(0, std::memory_order_relaxed);
+    g_quiescent_restore_ns.store(0, std::memory_order_relaxed);
+    g_quiescent_pre_offload_resident = 0;
+    g_quiescent_pre_offload_hot = 0;
+    g_quiescent_pre_offload_warm = 0;
     g_compression_ns.store(0, std::memory_order_relaxed);
     g_score_ns.store(0, std::memory_order_relaxed);
     g_budget_ns.store(0, std::memory_order_relaxed);
@@ -547,6 +563,96 @@ int32_t slha_external_k_score_tiles(
     return rc;
 }
 
+bool slha_external_k_ccos_offload_quiescent() {
+    if (!slha_external_k_ccos_enabled()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_ccos_mutex);
+    if (!g_ccos_cache) {
+        return false;
+    }
+
+    SlhaElasticKvCacheStats before{};
+    if (!snapshot_ccos(&before)) {
+        return false;
+    }
+    const size_t active = before.hot_slots + before.warm_slots + before.cold_slots + before.pinned_slots;
+    if (active == 0 || before.cold_slots != 0 || before.pinned_slots != 0) {
+        return false;
+    }
+
+    const auto start = steady_clock::now();
+    const int32_t rc = slha_elastic_cache_offload_to(g_ccos_cache, 0);
+    const auto end = steady_clock::now();
+    if (rc != SLHA_OK) {
+        return false;
+    }
+
+    SlhaElasticKvCacheStats cold{};
+    if (!snapshot_ccos(&cold) || cold.resident_bytes != 0 || cold.cold_slots != active) {
+        return false;
+    }
+    record_cache_snapshot(cold);
+    g_quiescent_pre_offload_resident = before.resident_bytes;
+    g_quiescent_pre_offload_hot = before.hot_slots;
+    g_quiescent_pre_offload_warm = before.warm_slots;
+    g_quiescent_offload_calls.fetch_add(1, std::memory_order_relaxed);
+    g_quiescent_offload_ns.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()),
+        std::memory_order_relaxed);
+    return true;
+}
+
+bool slha_external_k_ccos_restore_quiescent() {
+    if (!slha_external_k_ccos_enabled()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_ccos_mutex);
+    if (!g_ccos_cache || g_quiescent_pre_offload_resident == 0) {
+        return false;
+    }
+
+    size_t logical_slots = 0;
+    if (!checked_mul(g_ccos_n_layers, g_ccos_capacity, &logical_slots)) {
+        return false;
+    }
+
+    const auto start = steady_clock::now();
+    size_t restored = 0;
+    for (size_t slot = 0; slot < logical_slots; ++slot) {
+        if (slha_elastic_cache_tier(g_ccos_cache, slot) != SLHA_ELASTIC_TIER_COLD) {
+            continue;
+        }
+        if (slha_elastic_cache_restore_slot(g_ccos_cache, slot) != SLHA_OK) {
+            // Return to a coherent all-COLD state rather than exposing a
+            // partially restored context to a future dense-attention decode.
+            (void) slha_elastic_cache_offload_to(g_ccos_cache, 0);
+            return false;
+        }
+        ++restored;
+    }
+    const auto end = steady_clock::now();
+
+    SlhaElasticKvCacheStats after{};
+    if (!snapshot_ccos(&after) || after.cold_slots != 0 ||
+        after.resident_bytes != g_quiescent_pre_offload_resident ||
+        after.hot_slots != g_quiescent_pre_offload_hot ||
+        after.warm_slots != g_quiescent_pre_offload_warm) {
+        (void) slha_elastic_cache_offload_to(g_ccos_cache, 0);
+        return false;
+    }
+    record_cache_snapshot(after);
+    g_quiescent_restore_calls.fetch_add(1, std::memory_order_relaxed);
+    g_quiescent_restored_slots.fetch_add(restored, std::memory_order_relaxed);
+    g_quiescent_restore_ns.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()),
+        std::memory_order_relaxed);
+    g_quiescent_pre_offload_resident = 0;
+    g_quiescent_pre_offload_hot = 0;
+    g_quiescent_pre_offload_warm = 0;
+    return true;
+}
+
 void slha_external_k_reset_store() {
     if (!slha_external_k_ccos_enabled()) {
         if (g_slha_tile_store.n_layers > 0) {
@@ -554,6 +660,13 @@ void slha_external_k_reset_store() {
         }
         return;
     }
+    std::lock_guard<std::mutex> lock(g_ccos_mutex);
+    // A context reset invalidates any pending quiescent restore intent. Keeping
+    // the pre-offload snapshot across reset would allow stale lifecycle state
+    // to be applied to a new logical context.
+    g_quiescent_pre_offload_resident = 0;
+    g_quiescent_pre_offload_hot = 0;
+    g_quiescent_pre_offload_warm = 0;
     if (g_ccos_cache) {
         (void) slha_elastic_cache_clear(g_ccos_cache);
     }
@@ -568,6 +681,9 @@ void slha_external_k_release_store() {
     g_ccos_n_layers = 0;
     g_ccos_capacity = 0;
     g_ccos_budget_bytes = 0;
+    g_quiescent_pre_offload_resident = 0;
+    g_quiescent_pre_offload_hot = 0;
+    g_quiescent_pre_offload_warm = 0;
 }
 
 void slha_external_k_record_compression_ns(uint64_t elapsed_ns) {
@@ -631,6 +747,11 @@ bool slha_external_k_store_stats_snapshot(slha_external_k_store_stats * out) {
     stats.budget_failures = g_budget_failures.load(std::memory_order_relaxed);
     stats.cache_hits = g_cache_hits.load(std::memory_order_relaxed);
     stats.cache_misses = g_cache_misses.load(std::memory_order_relaxed);
+    stats.quiescent_offload_calls = g_quiescent_offload_calls.load(std::memory_order_relaxed);
+    stats.quiescent_restore_calls = g_quiescent_restore_calls.load(std::memory_order_relaxed);
+    stats.quiescent_restored_slots = g_quiescent_restored_slots.load(std::memory_order_relaxed);
+    stats.quiescent_offload_ns = g_quiescent_offload_ns.load(std::memory_order_relaxed);
+    stats.quiescent_restore_ns = g_quiescent_restore_ns.load(std::memory_order_relaxed);
     stats.compression_ns = g_compression_ns.load(std::memory_order_relaxed);
     stats.score_ns = g_score_ns.load(std::memory_order_relaxed);
     stats.budget_ns = g_budget_ns.load(std::memory_order_relaxed);
@@ -676,6 +797,11 @@ void slha_external_k_print_store_summary() {
               << " budget_failures=" << stats.budget_failures
               << " cache_hits=" << stats.cache_hits
               << " cache_misses=" << stats.cache_misses
+              << " quiescent_offload_calls=" << stats.quiescent_offload_calls
+              << " quiescent_restore_calls=" << stats.quiescent_restore_calls
+              << " quiescent_restored_slots=" << stats.quiescent_restored_slots
+              << " quiescent_offload_ns=" << stats.quiescent_offload_ns
+              << " quiescent_restore_ns=" << stats.quiescent_restore_ns
               << " compression_ns=" << stats.compression_ns
               << " score_ns=" << stats.score_ns
               << " budget_ns=" << stats.budget_ns

@@ -19,7 +19,7 @@ jobs:
   real-model-smoke:
     name: TinyStories 15M real autoregressive CCOS external-K
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -113,7 +113,7 @@ jobs:
           test "$(find "$WEIGHTS_DIR" -maxdepth 1 -name 'layer-*.slhw' -type f | wc -l)" -eq 6
           python3 -m json.tool "$WEIGHTS_DIR/manifest.json" >/dev/null
 
-      - name: Run paired baseline and physical CCOS SLHA decode
+      - name: Run paired baseline and full-HOT physical CCOS decode
         env:
           WORK: ${{ runner.temp }}/slha-real-smoke/pair-work
         run: |
@@ -127,11 +127,11 @@ jobs:
             --gpu-layers 0 \
             --codec mixed \
             --ccos \
-            --output-dir "$RUNNER_TEMP/slha-real-smoke/evidence"
+            --output-dir "$RUNNER_TEMP/slha-real-smoke/evidence-hot"
 
-      - name: Validate and print real-model CCOS evidence
+      - name: Validate full-HOT real-model CCOS evidence
         run: |
-          REPORT="$RUNNER_TEMP/slha-real-smoke/evidence/comparison.json"
+          REPORT="$RUNNER_TEMP/slha-real-smoke/evidence-hot/comparison.json"
           python3 -m json.tool "$REPORT" >/dev/null
           python3 - "$REPORT" <<'PY'
           import json, sys
@@ -150,4 +150,161 @@ jobs:
           assert store.get("budget_failures") == 0, store
           assert r["validity"]["ccos_dense_no_cold"] is True, r["validity"]
           print(json.dumps(r, sort_keys=True))
+          PY
+
+      - name: Run WARM budget pressure with quiescent COLD cycle
+        env:
+          PAIR_WORK: ${{ runner.temp }}/slha-real-smoke/pair-work
+          WEIGHTS_DIR: ${{ runner.temp }}/slha-real-smoke/weights
+          MODEL: ${{ runner.temp }}/slha-real-smoke/stories15M-q8_0.gguf
+          HOT_EVIDENCE: ${{ runner.temp }}/slha-real-smoke/evidence-hot
+          PRESSURE_EVIDENCE: ${{ runner.temp }}/slha-real-smoke/evidence-pressure
+          PROMPT: "Once upon a time,"
+          MAX_TOKENS: "8"
+          COLD_CYCLE_STEP: "5"
+        run: |
+          mkdir -p "$PRESSURE_EVIDENCE"
+          WARM_BUDGET="$(python3 - "$HOT_EVIDENCE/baseline.eval.json" "$WEIGHTS_DIR/manifest.json" "$MAX_TOKENS" <<'PY'
+          import json, sys
+          baseline = json.load(open(sys.argv[1]))
+          manifest = json.load(open(sys.argv[2]))
+          max_tokens = int(sys.argv[3])
+          prompt_tokens = int(baseline["prompt_token_count"])
+          layers = int(manifest["num_layers"])
+          # Sequential decode can have at most prompt + (max_tokens - 1) K
+          # positions resident. 96 B is the exact WARM resident footprint/key.
+          max_positions = prompt_tokens + max_tokens - 1
+          budget = 96 * layers * max_positions
+          if prompt_tokens <= 1 or layers <= 0 or budget <= 0:
+              raise SystemExit("invalid dimensions for WARM budget")
+          print(budget)
+          PY
+          )"
+          echo "WARM_BUDGET_BYTES=$WARM_BUDGET"
+
+          unset SLHA_SCORE_ORACLE SLHA_ORACLE_METRICS_JSON SLHA_SCALE_FIT_JSON SLHA_RANK_DATASET_DIR
+          export SLHA_EXTERNAL_K=1
+          export SLHA_KV_MODE=tilestore
+          export SLHA_SCORE_MODE=replace
+          export SLHA_SCORE_LAYERS=all
+          export SLHA_WEIGHTS_DIR="$WEIGHTS_DIR"
+          export SLHA_CODEC=mixed
+          export SLHA_CCOS=1
+          export SLHA_CCOS_BUDGET_BYTES="$WARM_BUDGET"
+
+          set +e
+          LC_ALL=C /usr/bin/time \
+            -f 'max_rss_kb=%M\nelapsed_s=%e\nuser_s=%U\nsys_s=%S' \
+            -o "$PRESSURE_EVIDENCE/external.time" \
+            "$PAIR_WORK/slha-real-eval" \
+            --model "$MODEL" \
+            --prompt "$PROMPT" \
+            --output-json "$PRESSURE_EVIDENCE/external.eval.json" \
+            --logits-bin "$PRESSURE_EVIDENCE/external.logits.f32" \
+            --max-tokens "$MAX_TOKENS" \
+            --context-size 128 \
+            --threads 2 \
+            --gpu-layers 0 \
+            --cache-type-k f16 \
+            --cache-type-v f16 \
+            --ccos-cold-cycle-step "$COLD_CYCLE_STEP" \
+            2>&1 | tee "$PRESSURE_EVIDENCE/external.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          test "$rc" -eq 0
+          python3 -m json.tool "$PRESSURE_EVIDENCE/external.eval.json" >/dev/null
+
+          MODEL_SHA256="$(sha256sum "$MODEL" | awk '{print $1}')"
+          PROMPT_SHA256="$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')"
+          python3 integration/llama.cpp/scripts/compare_real_eval.py \
+            --baseline-json "$HOT_EVIDENCE/baseline.eval.json" \
+            --external-json "$PRESSURE_EVIDENCE/external.eval.json" \
+            --baseline-logits "$HOT_EVIDENCE/baseline.logits.f32" \
+            --external-logits "$PRESSURE_EVIDENCE/external.logits.f32" \
+            --baseline-time "$HOT_EVIDENCE/baseline.time" \
+            --external-time "$PRESSURE_EVIDENCE/external.time" \
+            --baseline-log "$HOT_EVIDENCE/baseline.log" \
+            --external-log "$PRESSURE_EVIDENCE/external.log" \
+            --model "$MODEL" \
+            --model-sha256 "$MODEL_SHA256" \
+            --prompt-sha256 "$PROMPT_SHA256" \
+            --slhav2-commit "$(git rev-parse HEAD)" \
+            --llama-commit fdb1db877c526ec90f668eca1b858da5dba85560 \
+            --output "$PRESSURE_EVIDENCE/comparison.json"
+          echo "$WARM_BUDGET" > "$PRESSURE_EVIDENCE/warm-budget-bytes.txt"
+
+      - name: Validate WARM and quiescent COLD evidence
+        env:
+          PRESSURE_EVIDENCE: ${{ runner.temp }}/slha-real-smoke/evidence-pressure
+        run: |
+          REPORT="$PRESSURE_EVIDENCE/comparison.json"
+          BUDGET="$(cat "$PRESSURE_EVIDENCE/warm-budget-bytes.txt")"
+          python3 -m json.tool "$REPORT" >/dev/null
+          python3 - "$REPORT" "$BUDGET" <<'PY'
+          import json, math, sys
+          r = json.load(open(sys.argv[1]))
+          budget = int(sys.argv[2])
+          q = r["quality"]
+          store = r["memory"]["external_slha_store"]
+          lifecycle = r.get("ccos_lifecycle") or {}
+          validity = r["validity"]
+
+          assert validity["external_replace_valid"] is True, validity
+          assert validity["external_backend"] == "ccos_elastic", validity
+          assert store is not None, r["memory"]
+          assert int(store.get("hard_budget_bytes", -1)) == budget, store
+          assert int(store.get("peak_resident_bytes", budget + 1)) <= budget, store
+          assert int(store.get("peak_warm_slots", 0)) > 0, store
+          assert int(store.get("peak_cold_slots", 0)) > 0, store
+          assert int(store.get("budget_enforcements", 0)) > 0, store
+          assert int(store.get("budget_failures", -1)) == 0, store
+          assert int(store.get("cold_slots", -1)) == 0, store
+          assert int(store.get("quiescent_offload_calls", 0)) == 1, store
+          assert int(store.get("quiescent_restore_calls", 0)) == 1, store
+          assert int(store.get("quiescent_restored_slots", 0)) > 0, store
+          assert int(store.get("quiescent_offload_ns", 0)) > 0, store
+          assert int(store.get("quiescent_restore_ns", 0)) > 0, store
+
+          assert lifecycle.get("requested") is True, lifecycle
+          assert lifecycle.get("executed") is True, lifecycle
+          assert int(lifecycle.get("step", -1)) == 5, lifecycle
+          before = lifecycle["before"]
+          cold = lifecycle["cold"]
+          restored = lifecycle["restored"]
+          active = int(before["hot_slots"]) + int(before["warm_slots"]) + int(before["pinned_slots"])
+          assert active > 0, lifecycle
+          assert int(before["warm_slots"]) > 0, lifecycle
+          assert int(before["cold_slots"]) == 0, lifecycle
+          assert int(cold["resident_bytes"]) == 0, lifecycle
+          assert int(cold["cold_slots"]) == active, lifecycle
+          assert int(restored["cold_slots"]) == 0, lifecycle
+          for key in ("resident_bytes", "offloaded_bytes", "hot_slots", "warm_slots", "pinned_slots"):
+              assert restored[key] == before[key], (key, before, restored)
+
+          assert q["external_generated_tokens"] > 6, q
+          logits = q["next_token_logits"]
+          assert logits is not None and int(logits["comparable_rows"]) > 0, q
+          for key in ("mean_absolute_error", "max_absolute_error", "rmse", "relative_l2"):
+              value = logits[key]
+              assert value is None or math.isfinite(float(value)), (key, value)
+
+          perf = r["performance"]
+          print(json.dumps({
+              "warm_budget_bytes": budget,
+              "token_agreement": q["aligned_token_agreement_ratio"],
+              "first_divergence": q["first_divergence_index"],
+              "text_exact_match": q["text_exact_match"],
+              "logit_relative_l2": logits["relative_l2"],
+              "baseline_decode_tps": perf["baseline_decode_tokens_per_second"],
+              "pressure_decode_tps": perf["external_decode_tokens_per_second"],
+              "peak_resident_bytes": store["peak_resident_bytes"],
+              "peak_offloaded_bytes": store["peak_offloaded_bytes"],
+              "peak_hot_slots": store["peak_hot_slots"],
+              "peak_warm_slots": store["peak_warm_slots"],
+              "peak_cold_slots": store["peak_cold_slots"],
+              "evictions": store["evictions"],
+              "budget_enforcements": store["budget_enforcements"],
+              "quiescent_offload_ns": store["quiescent_offload_ns"],
+              "quiescent_restore_ns": store["quiescent_restore_ns"],
+          }, sort_keys=True))
           PY
