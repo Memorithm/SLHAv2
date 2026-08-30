@@ -1,0 +1,63 @@
+name: CCOS bootstrap v2
+
+on:
+  push:
+    branches:
+      - feat/llama-ccos-elastic-k
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: ${{ !contains(github.event.head_commit.message, '[ccos-v2-done]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt,clippy
+
+      - name: Apply fixed-slot cache and C ABI patch
+        run: python3 tools/ccos_bootstrap.py
+
+      - name: Format and refresh lockfile
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo check -p slha-c
+
+      - name: Test elastic cache and C ABI
+        run: cargo test --locked -p slhav2-vram -p slha-c
+
+      - name: Clippy selected crates
+        run: cargo clippy --locked -p slhav2-vram -p slha-c --all-targets -- -D warnings
+
+      - name: Compile public C header strictly
+        run: |
+          cat > "$RUNNER_TEMP/ccos_header_smoke.c" <<'EOF'
+          #include "slha.h"
+          int main(void) {
+              SlhaElasticKvCache *cache = slha_elastic_cache_new(4096);
+              SlhaElasticKvCacheStats stats = {0};
+              (void) slha_elastic_cache_stats(cache, &stats);
+              (void) slha_elastic_cache_free(cache);
+              return SLHA_ERR_NOT_RESIDENT == -10 ? 0 : 1;
+          }
+          EOF
+          cc -std=c11 -Wall -Wextra -Werror -I slha-c/include -c "$RUNNER_TEMP/ccos_header_smoke.c" -o "$RUNNER_TEMP/ccos_header_smoke.o"
+
+      - name: Commit validated implementation
+        run: |
+          git diff --check
+          git config user.name "MEMOPERF"
+          git config user.email "contact@checkupauto.fr"
+          git add Cargo.lock slhav2-vram/src/elastic_cache.rs slha-c/Cargo.toml slha-c/src/lib.rs slha-c/src/elastic_ffi.rs slha-c/include/slha.h
+          git diff --cached --check
+          git commit -m "feat(ccos): expose elastic fixed-slot cache ABI [ccos-v2-done]"
+          git push origin HEAD:feat/llama-ccos-elastic-k
