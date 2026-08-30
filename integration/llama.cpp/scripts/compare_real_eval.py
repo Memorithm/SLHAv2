@@ -93,11 +93,13 @@ def parse_key_values_after_marker(log: str, marker: str) -> dict[str, Any] | Non
 
 
 def parse_external_store(log: str) -> dict[str, Any] | None:
-    match = re.search(r"^SLHA_EXTERNAL_K_STORE\s+(.+)$", log, re.MULTILINE)
-    if not match:
+    matches = re.findall(r"^SLHA_EXTERNAL_K_STORE\s+(.+)$", log, re.MULTILINE)
+    if not matches:
         return None
+    # The store is reported once after construction and again at shutdown.
+    # Only the last snapshot contains the complete cumulative runtime counters.
     result: dict[str, Any] = {}
-    for item in match.group(1).split():
+    for item in matches[-1].split():
         if "=" not in item:
             continue
         key, value = item.split("=", 1)
@@ -109,6 +111,12 @@ def parse_external_store(log: str) -> dict[str, Any] | None:
             except ValueError:
                 result[key] = value
     return result
+
+
+def nanoseconds_to_milliseconds(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value) / 1_000_000.0
+    return None
 
 
 def unit_bytes(value: float, unit: str) -> int:
@@ -289,12 +297,18 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     external_decode = [float(v) for v in external.get("timing", {}).get("decode_step_ms", [])]
 
     slha_store_bytes = None
+    slha_peak_physical_bytes = None
+    external_backend = external_store.get("backend") if external_store else None
     if external_store is not None:
         for key in ("allocated_bytes", "allocation_bytes", "owned_bytes"):
             value = external_store.get(key)
             if isinstance(value, int):
                 slha_store_bytes = value
                 break
+        peak_resident = external_store.get("peak_resident_bytes")
+        peak_offloaded = external_store.get("peak_offloaded_bytes")
+        if isinstance(peak_resident, int) and isinstance(peak_offloaded, int):
+            slha_peak_physical_bytes = peak_resident + peak_offloaded
 
     baseline_ppl = read_json(args.baseline_perplexity) if args.baseline_perplexity else None
     external_ppl = read_json(args.external_perplexity) if args.external_perplexity else None
@@ -331,7 +345,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "schema_version": 1,
-        "experiment": "llama.cpp baseline vs physical SLHA external-K",
+        "experiment": (
+            "llama.cpp baseline vs physical SLHA external-K (CCOS elastic)"
+            if external_backend == "ccos_elastic"
+            else "llama.cpp baseline vs physical SLHA external-K"
+        ),
         "provenance": {
             "slhav2_commit": args.slhav2_commit,
             "llama_cpp_commit": args.llama_commit,
@@ -371,7 +389,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "baseline_engine_v_bytes": baseline_kv["v_bytes"],
             "external_engine_k_sentinel_bytes": external_kv["k_bytes"],
             "external_engine_v_bytes": external_kv["v_bytes"],
+            "external_slha_backend": external_backend,
             "external_slha_store_allocated_bytes": slha_store_bytes,
+            "external_slha_peak_physical_bytes": slha_peak_physical_bytes,
             "external_slha_store": external_store,
         },
         "performance": {
@@ -387,11 +407,30 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "external_p50_decode_ms": percentile(external_decode, 0.50),
             "external_p95_decode_ms": percentile(external_decode, 0.95),
             "slha_runtime_cost": runtime_cost,
+            "slha_compression_ms": nanoseconds_to_milliseconds(
+                external_store.get("compression_ns") if external_store else None
+            ),
+            "slha_score_ms": nanoseconds_to_milliseconds(
+                external_store.get("score_ns") if external_store else None
+            ),
+            "slha_budget_enforcement_ms": nanoseconds_to_milliseconds(
+                external_store.get("budget_ns") if external_store else None
+            ),
         },
         "validity": {
             "same_prompt_tokens": baseline.get("prompt_tokens") == external.get("prompt_tokens"),
             "slha_replace_summary": replace_summary,
             "external_replace_valid": replace_summary.get("valid") if replace_summary else None,
+            "external_backend": external_backend,
+            "ccos_enabled": external_backend == "ccos_elastic",
+            "ccos_dense_no_cold": (
+                external_store.get("peak_cold_slots") == 0
+                if external_backend == "ccos_elastic" and external_store else None
+            ),
+            "ccos_budget_failures": (
+                external_store.get("budget_failures")
+                if external_backend == "ccos_elastic" and external_store else None
+            ),
             "logits_context_rule": (
                 "Logits are compared through the first divergent generated token only; "
                 "later rows are excluded because autoregressive contexts differ."
@@ -407,7 +446,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "RSS is process-level peak RSS and is not decomposed into weight residency and allocator overhead.",
             "K/V byte components are populated only when llama.cpp prints an explicit K/V split; otherwise they remain null.",
             "Perplexity remains null unless paired real perplexity evidence is supplied.",
-            "CCOS HOT/WARM/COLD transitions are outside this PR and are not represented here.",
+            "CCOS resident/offloaded byte counters describe cache-owned representations only and are not process RSS.",
         ],
     }
 

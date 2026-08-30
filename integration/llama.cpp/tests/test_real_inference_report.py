@@ -17,7 +17,8 @@ print_info: file type = Q8_0
 llama_kv_cache: CPU KV buffer size = 56.00 MiB
 llama_perf_context_print: prompt eval time = 100.00 ms / 10 tokens (10.00 ms per token, 100.00 tokens per second)
 llama_perf_context_print:        eval time = 200.00 ms / 5 runs   (40.00 ms per token, 25.00 tokens per second)
-SLHA_EXTERNAL_K_STORE valid=true layers=28 capacity=2048 tile_bytes=128 logical_tile_bytes=7340032 tile_backing_capacity_bytes=7340159 validity_backing_capacity_bytes=57344
+SLHA_EXTERNAL_K_STORE valid=true backend=vector layers=28 capacity=2048 tile_bytes=128 logical_tile_bytes=7340032 tile_backing_capacity_bytes=7340159 validity_backing_capacity_bytes=57344
+SLHA_EXTERNAL_K_STORE valid=true backend=ccos_elastic layers=28 capacity=2048 tile_bytes=128 logical_tile_bytes=7340032 peak_resident_bytes=4096 peak_offloaded_bytes=128 peak_cold_slots=0 budget_failures=0 compression_ns=1500000 score_ns=2750000 budget_ns=250000
 SLHA_REPLACE_SUMMARY
 callbacks=28
 active_expected_vectors=100
@@ -38,8 +39,11 @@ layer_0_success=1 layer_0_fail=0
     store = module.parse_external_store(log)
     assert store is not None
     assert store["valid"] is True
+    assert store["backend"] == "ccos_elastic"
     assert store["layers"] == 28
     assert store["logical_tile_bytes"] == 7340032
+    assert store["peak_resident_bytes"] == 4096
+    assert module.nanoseconds_to_milliseconds(store["score_ns"]) == 2.75
 
     summary = module.parse_replace_summary(log)
     assert summary is not None
