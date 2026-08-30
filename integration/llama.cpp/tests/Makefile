@@ -26,7 +26,9 @@ score_oracle_tests: score_oracle_tests.cpp ../shim/slha_score_oracle.cpp ../shim
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 external_k_contract_tests: external_k_contract_tests.cpp ../shim/slha_external_k.cpp
-	$(CXX) $(CXXFLAGS) -I../../../slha-c/include -o $@ $^
+	@test -n "$(SLHA_LIB)" || { echo "ERROR: SLHA_LIB must point to libslha.a"; exit 2; }
+	@test -f "$(SLHA_LIB)" || { echo "ERROR: missing SLHA static library: $(SLHA_LIB)"; exit 2; }
+	$(CXX) $(CXXFLAGS) -pthread -I../../../slha-c/include -o $@ $^ $(SLHA_LIB)
 
 tile_store_tests: tile_store_tests.cpp ../shim/slha_llama.cpp ../shim/slha_external_k.cpp ../shim/slha_replace_counters.cpp ../shim/slha_layer_mask.cpp ../shim/slha_score_scale.cpp ../shim/slha_scale_fit.cpp ../shim/slha_score_oracle.cpp ../shim/slha_oracle_metrics.cpp ../shim/slha_rank_dataset.cpp
 	@test -n "$(LLAMA_CPP_DIR)" || { echo "ERROR: LLAMA_CPP_DIR must point to a built llama.cpp checkout"; exit 2; }
