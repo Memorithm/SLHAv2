@@ -1,0 +1,76 @@
+name: CCOS real-model measurements phase 3
+
+on:
+  push:
+    branches:
+      - feat/llama-ccos-live-k
+    paths:
+      - tools/apply_ccos_measurements.py
+      - .github/workflows/ccos-measurements-phase3.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ccos-measurements-phase3
+  cancel-in-progress: true
+
+jobs:
+  validate-and-commit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Apply measurement harness update
+        run: python3 tools/apply_ccos_measurements.py
+
+      - name: Python comparison/report tests
+        run: |
+          python3 integration/llama.cpp/tests/test_compare_real_eval.py
+          python3 integration/llama.cpp/tests/test_real_inference_report.py
+
+      - name: Shell syntax and CCOS contract smoke
+        run: |
+          bash -n integration/llama.cpp/run_real_pair.sh
+          grep -q -- '--ccos)' integration/llama.cpp/run_real_pair.sh
+          grep -q 'backend=ccos_elastic' integration/llama.cpp/tests/test_compare_real_eval.py
+          grep -q -- '--ccos' .github/workflows/llama-real-model-smoke.yml
+
+      - name: Verify only intended files changed
+        run: |
+          git status --short
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'integration/llama.cpp/scripts/compare_real_eval.py',
+              'integration/llama.cpp/scripts/report_real_inference.py',
+              'integration/llama.cpp/run_real_pair.sh',
+              'integration/llama.cpp/tests/test_compare_real_eval.py',
+              'integration/llama.cpp/tests/test_real_inference_report.py',
+              '.github/workflows/llama-real-model-smoke.yml',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          extra = changed - allowed
+          missing = allowed - changed
+          if extra or missing:
+              raise SystemExit(f'unexpected diff: extra={sorted(extra)} missing={sorted(missing)}')
+          PY
+
+      - name: Commit validated measurement harness and remove bootstrap artifacts
+        run: |
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add \
+            integration/llama.cpp/scripts/compare_real_eval.py \
+            integration/llama.cpp/scripts/report_real_inference.py \
+            integration/llama.cpp/run_real_pair.sh \
+            integration/llama.cpp/tests/test_compare_real_eval.py \
+            integration/llama.cpp/tests/test_real_inference_report.py \
+            .github/workflows/llama-real-model-smoke.yml
+          git rm tools/apply_ccos_measurements.py .github/workflows/ccos-measurements-phase3.yml
+          git commit -m 'test(ccos): add real-model measurement mode'
+          git push origin HEAD:feat/llama-ccos-live-k
