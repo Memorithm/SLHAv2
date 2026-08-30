@@ -19,3 +19,4 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
+slhav2-vram = { version = "0.1.0", path = "../slhav2-vram" }

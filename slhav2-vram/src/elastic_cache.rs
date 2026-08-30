@@ -235,6 +235,116 @@ impl ElasticKvCache {
         slot
     }
 
+    /// Write a full tile at an exact stable slot id.
+    ///
+    /// This is the runtime-facing counterpart of [`Self::insert`]: KV engines
+    /// recycle physical positions, so replacing a position must not append a
+    /// second backing entry. Existing HOT/WARM/COLD backing for the slot is
+    /// dropped atomically and the new value becomes HOT (or remains PINNED if
+    /// the position itself was pinned). Importance is reset because the slot
+    /// now represents a different logical key.
+    pub fn write_at(
+        &mut self,
+        slot: usize,
+        mut tile: [u8; codec::TILE_BYTES],
+    ) -> Result<(), &'static str> {
+        Self::set_warm_flag(&mut tile, false);
+        let required_len = slot.checked_add(1).ok_or("slot index overflow")?;
+        if self.slots.len() < required_len {
+            self.slots
+                .try_reserve(required_len - self.slots.len())
+                .map_err(|_| "slot allocation failed")?;
+            self.slots.resize_with(required_len, || None);
+        }
+
+        let old_resident = self.slots[slot]
+            .as_ref()
+            .map_or(0, PhysicalSlot::allocated_bytes);
+        let pinned = self.slots[slot]
+            .as_ref()
+            .is_some_and(|state| state.tier == PhysicalTier::Pinned);
+        let next_resident = self
+            .resident_bytes
+            .checked_sub(old_resident)
+            .and_then(|bytes| bytes.checked_add(codec::TILE_BYTES))
+            .ok_or("resident byte accounting overflow")?;
+
+        self.slots[slot] = Some(PhysicalSlot {
+            bytes: tile.to_vec(),
+            offloaded: None,
+            warm_residual: None,
+            tier: if pinned {
+                PhysicalTier::Pinned
+            } else {
+                PhysicalTier::Hot
+            },
+            seq: self.next_seq,
+            importance: 0.0,
+        });
+        self.next_seq = self.next_seq.saturating_add(1);
+        self.resident_bytes = next_resident;
+        self.verify_accounting()
+    }
+
+    /// Remove one stable slot and all resident/backing bytes it owns.
+    /// Returns false when the slot was already absent.
+    pub fn clear_slot(&mut self, slot: usize) -> bool {
+        let Some(entry) = self.slots.get_mut(slot) else {
+            return false;
+        };
+        let Some(state) = entry.take() else {
+            return false;
+        };
+        self.resident_bytes = self.resident_bytes.saturating_sub(state.allocated_bytes());
+        debug_assert!(self.verify_accounting().is_ok());
+        true
+    }
+
+    /// Remove every logical slot while retaining controller configuration.
+    /// Sequence numbering remains monotonic so controller observations never
+    /// move backwards across a runtime cache clear.
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.resident_bytes = 0;
+        self.last_reason = None;
+        debug_assert!(self.verify_accounting().is_ok());
+    }
+
+    /// Current physical tier of a stable slot.
+    pub fn tier(&self, slot: usize) -> Option<PhysicalTier> {
+        self.slots.get(slot)?.as_ref().map(|state| state.tier)
+    }
+
+    /// Copy the representation that is currently resident and scoreable.
+    ///
+    /// HOT/PINNED return the full tile. WARM expands its 96 resident bytes
+    /// into a canonical 128-byte tile with a zero residual plane and the WARM
+    /// flag preserved, exactly matching [`Self::score`] semantics. COLD/absent
+    /// slots return `None`; this function never restores them.
+    pub fn resident_tile(&self, slot: usize) -> Option<[u8; codec::TILE_BYTES]> {
+        let state = self.slots.get(slot)?.as_ref()?;
+        match state.tier {
+            PhysicalTier::Hot | PhysicalTier::Pinned => state.bytes.as_slice().try_into().ok(),
+            PhysicalTier::Warm => {
+                let packed: &[u8; WARM_PACKED_BYTES] = state.bytes.as_slice().try_into().ok()?;
+                Some(codec::unpack_warm(packed))
+            }
+            PhysicalTier::Cold => None,
+        }
+    }
+
+    /// Transactionally reduce residency using the HOT→WARM→COLD demotion
+    /// policy. Callers that must keep all active keys scoreable should set a
+    /// target no lower than 96 bytes per active slot.
+    pub fn demote_to(&mut self, target_resident_bytes: usize) -> Result<bool, &'static str> {
+        self.apply_action(ActionRequest::Demote, target_resident_bytes)
+    }
+
+    /// Transactionally offload resident slots toward a COLD target.
+    pub fn offload_to(&mut self, target_resident_bytes: usize) -> Result<bool, &'static str> {
+        self.apply_action(ActionRequest::Offload, target_resident_bytes)
+    }
+
     /// Protect a resident slot from adaptation. WARM is promoted losslessly
     /// before pinning; COLD cannot be pinned without an explicit restore.
     pub fn pin(&mut self, slot: usize) -> bool {
@@ -758,6 +868,68 @@ mod tests {
         assert_eq!(cache.resident_bytes(), before_resident);
         assert_eq!(cache.offloaded_bytes(), before_offloaded);
         assert_eq!(cache.evictions(), before_evictions);
+    }
+
+    #[test]
+    fn fixed_slot_rewrite_is_bounded_and_drops_old_backing() {
+        let mut cache = ElasticKvCache::new(1024, "test");
+        cache.write_at(7, make_tile(1)).unwrap();
+        assert_eq!(cache.counts(), (1, 0, 0, 0));
+        assert_eq!(cache.resident_bytes(), codec::TILE_BYTES);
+
+        cache.evict_slot(7).unwrap();
+        assert_eq!(cache.counts(), (0, 0, 1, 0));
+        assert_eq!(cache.resident_bytes(), 0);
+        assert_eq!(cache.offloaded_bytes(), codec::TILE_BYTES);
+
+        cache.write_at(7, make_tile(2)).unwrap();
+        assert_eq!(cache.counts(), (1, 0, 0, 0));
+        assert_eq!(cache.resident_bytes(), codec::TILE_BYTES);
+        assert_eq!(cache.offloaded_bytes(), 0);
+        assert_eq!(cache.slots.iter().flatten().count(), 1);
+    }
+
+    #[test]
+    fn resident_tile_matches_warm_scoring_representation() {
+        let mut cache = ElasticKvCache::new(1024, "test");
+        cache.write_at(2, make_tile(5)).unwrap();
+        cache.demote_slot(2).unwrap();
+        let tile = cache.resident_tile(2).unwrap();
+        assert!(
+            u16::from_le_bytes([tile[codec::FLAGS_OFFSET], tile[codec::FLAGS_OFFSET + 1]])
+                & codec::FLAG_WARM
+                != 0
+        );
+        assert!(
+            tile[codec::RESIDUAL_OFFSET..codec::RESIDUAL_OFFSET + RESIDUAL_BYTES]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
+        assert_eq!(cache.tier(2), Some(PhysicalTier::Warm));
+    }
+
+    #[test]
+    fn clear_slot_releases_resident_and_backing_bytes() {
+        let mut cache = ElasticKvCache::new(1024, "test");
+        cache.write_at(3, make_tile(9)).unwrap();
+        cache.demote_slot(3).unwrap();
+        assert!(cache.clear_slot(3));
+        assert!(!cache.clear_slot(3));
+        assert_eq!(cache.resident_bytes(), 0);
+        assert_eq!(cache.offloaded_bytes(), 0);
+        assert_eq!(cache.tier(3), None);
+    }
+
+    #[test]
+    fn explicit_warm_target_never_requires_cold() {
+        let mut cache = ElasticKvCache::new(1024, "test");
+        for slot in 0..4 {
+            cache.write_at(slot, make_tile(slot as u8)).unwrap();
+        }
+        let target = 4 * WARM_PACKED_BYTES;
+        assert!(cache.demote_to(target).unwrap());
+        assert_eq!(cache.resident_bytes(), target);
+        assert_eq!(cache.counts(), (0, 4, 0, 0));
     }
 
     #[test]
