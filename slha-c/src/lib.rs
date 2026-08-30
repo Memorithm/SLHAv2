@@ -2,6 +2,9 @@
 // runs with -D warnings in CI, so an undocumented block fails the build.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+mod elastic_ffi;
+pub use elastic_ffi::*;
+
 use scirust::attention::slha_v2::{
     LatentCodec, SciRustSlhaTile, D_C, FLAG_MIX3, FLAG_MIXED, FLAG_NF4, FLAG_TQ3, FLAG_TQ3_NOCORR,
     FLAG_WARM, RESIDUAL_WORDS,

@@ -27,6 +27,7 @@ extern "C" {
 #define SLHA_ERR_INVALID_HANDLE (-7)
 #define SLHA_ERR_IO (-8)
 #define SLHA_ERR_UTF8 (-9)
+#define SLHA_ERR_NOT_RESIDENT (-10)
 
 /* Codec identifiers accepted by slha_encode_key. */
 #define SLHA_CODEC_INT4_SINGLE 0
@@ -118,6 +119,57 @@ SLHA_STATIC_ASSERT(
 
 typedef struct SlhaContext SlhaContext;
 typedef struct SlhaModel SlhaModel;
+typedef struct SlhaElasticKvCache SlhaElasticKvCache;
+
+#define SLHA_ELASTIC_TIER_ABSENT (-1)
+#define SLHA_ELASTIC_TIER_HOT 0
+#define SLHA_ELASTIC_TIER_WARM 1
+#define SLHA_ELASTIC_TIER_COLD 2
+#define SLHA_ELASTIC_TIER_PINNED 3
+
+typedef struct {
+    size_t resident_bytes;
+    size_t offloaded_bytes;
+    size_t hard_budget_bytes;
+    size_t hot_slots;
+    size_t warm_slots;
+    size_t cold_slots;
+    size_t pinned_slots;
+    uint64_t evictions;
+} SlhaElasticKvCacheStats;
+
+/* Elastic fixed-slot KV cache. Mutating/scoring calls are internally synchronized. */
+SlhaElasticKvCache* slha_elastic_cache_new(size_t hard_budget_bytes);
+int32_t slha_elastic_cache_free(SlhaElasticKvCache* cache);
+int32_t slha_elastic_cache_write(SlhaElasticKvCache* cache, size_t slot, const SciRustSlhaTile* tile);
+int32_t slha_elastic_cache_clear_slot(SlhaElasticKvCache* cache, size_t slot);
+int32_t slha_elastic_cache_clear(SlhaElasticKvCache* cache);
+int32_t slha_elastic_cache_score_range(
+    SlhaElasticKvCache* cache,
+    size_t start_slot,
+    size_t count,
+    const float* q_coarse,
+    const uint64_t* q_sign,
+    float* scores_out
+);
+int32_t slha_elastic_cache_observe_scores(
+    SlhaElasticKvCache* cache,
+    size_t start_slot,
+    const float* scores,
+    size_t count,
+    float temperature
+);
+int32_t slha_elastic_cache_demote_to(SlhaElasticKvCache* cache, size_t target_resident_bytes);
+int32_t slha_elastic_cache_offload_to(SlhaElasticKvCache* cache, size_t target_resident_bytes);
+int32_t slha_elastic_cache_restore_slot(SlhaElasticKvCache* cache, size_t slot);
+int32_t slha_elastic_cache_promote_slot(SlhaElasticKvCache* cache, size_t slot);
+int32_t slha_elastic_cache_tier(SlhaElasticKvCache* cache, size_t slot);
+int32_t slha_elastic_cache_resident_tile(
+    SlhaElasticKvCache* cache,
+    size_t slot,
+    SciRustSlhaTile* out_tile
+);
+int32_t slha_elastic_cache_stats(SlhaElasticKvCache* cache, SlhaElasticKvCacheStats* out);
 
 /* ABI and layout introspection. */
 uint32_t slha_abi_version(void);

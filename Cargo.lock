@@ -445,6 +445,7 @@ name = "slha-c"
 version = "0.2.0"
 dependencies = [
  "scirust",
+ "slhav2-vram",
 ]
 
 [[package]]
