@@ -26,7 +26,12 @@ jobs:
           fetch-depth: 0
 
       - name: Apply measurement harness update
-        run: python3 tools/apply_ccos_measurements.py
+        run: |
+          python3 tools/apply_ccos_measurements.py
+          # GITHUB_TOKEN cannot push workflow-file mutations. Validate the
+          # workflow change separately through the connector after this payload
+          # is committed, so restore it here before the CI-owned push.
+          git restore .github/workflows/llama-real-model-smoke.yml
 
       - name: Python comparison/report tests
         run: |
@@ -38,7 +43,6 @@ jobs:
           bash -n integration/llama.cpp/run_real_pair.sh
           grep -q -- '--ccos)' integration/llama.cpp/run_real_pair.sh
           grep -q 'backend=ccos_elastic' integration/llama.cpp/tests/test_compare_real_eval.py
-          grep -q -- '--ccos' .github/workflows/llama-real-model-smoke.yml
 
       - name: Verify only intended files changed
         run: |
@@ -51,7 +55,6 @@ jobs:
               'integration/llama.cpp/run_real_pair.sh',
               'integration/llama.cpp/tests/test_compare_real_eval.py',
               'integration/llama.cpp/tests/test_real_inference_report.py',
-              '.github/workflows/llama-real-model-smoke.yml',
           }
           changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           extra = changed - allowed
@@ -60,7 +63,7 @@ jobs:
               raise SystemExit(f'unexpected diff: extra={sorted(extra)} missing={sorted(missing)}')
           PY
 
-      - name: Commit validated measurement harness and remove bootstrap artifacts
+      - name: Commit validated measurement harness
         run: |
           git config user.name MEMOPERF
           git config user.email contact@checkupauto.fr
@@ -69,8 +72,7 @@ jobs:
             integration/llama.cpp/scripts/report_real_inference.py \
             integration/llama.cpp/run_real_pair.sh \
             integration/llama.cpp/tests/test_compare_real_eval.py \
-            integration/llama.cpp/tests/test_real_inference_report.py \
-            .github/workflows/llama-real-model-smoke.yml
-          git rm tools/apply_ccos_measurements.py .github/workflows/ccos-measurements-phase3.yml
+            integration/llama.cpp/tests/test_real_inference_report.py
+          git rm tools/apply_ccos_measurements.py
           git commit -m 'test(ccos): add real-model measurement mode'
           git push origin HEAD:feat/llama-ccos-live-k
