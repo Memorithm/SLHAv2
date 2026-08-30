@@ -31,8 +31,10 @@ jobs:
           bash -n integration/llama.cpp/run_real_inference.sh
           bash -n integration/llama.cpp/run_real_pair.sh
           python3 -m py_compile integration/llama.cpp/scripts/report_real_inference.py
+          python3 -m py_compile integration/llama.cpp/scripts/report_real_perplexity.py
           python3 -m py_compile integration/llama.cpp/scripts/compare_real_eval.py
           python3 integration/llama.cpp/tests/test_real_inference_report.py
+          python3 integration/llama.cpp/tests/test_real_perplexity_report.py
           python3 integration/llama.cpp/tests/test_compare_real_eval.py
 
       - name: Build SLHA C ABI
@@ -92,8 +94,8 @@ jobs:
             -DSLHA_LIB="$GITHUB_WORKSPACE/target/release/libslha.a" \
             -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build patched llama and CLI
-        run: cmake --build "$RUNNER_TEMP/llama.cpp/build" -j"$(nproc)" --target llama llama-cli
+      - name: Build patched llama, CLI and perplexity
+        run: cmake --build "$RUNNER_TEMP/llama.cpp/build" -j"$(nproc)" --target llama llama-cli llama-perplexity
 
       - name: Compile exact-logits evaluation probe
         run: |
@@ -108,6 +110,7 @@ jobs:
             -Wl,-rpath,"$RUNNER_TEMP/llama.cpp/build/bin" \
             -o "$RUNNER_TEMP/slha-real-eval"
           test -x "$RUNNER_TEMP/slha-real-eval"
+          test -x "$RUNNER_TEMP/llama.cpp/build/bin/llama-perplexity"
 
       - name: Record pinned engine revision
         run: |
