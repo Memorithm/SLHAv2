@@ -99,6 +99,7 @@ jobs:
         run: |
           g++ -O2 -std=c++17 -Wall -Wextra -Werror \
             -I"$RUNNER_TEMP/llama.cpp/include" \
+            -I"$RUNNER_TEMP/llama.cpp/src" \
             -I"$RUNNER_TEMP/llama.cpp/ggml/include" \
             integration/llama.cpp/tools/slha_real_eval.cpp \
             -L"$RUNNER_TEMP/llama.cpp/build/bin" \
