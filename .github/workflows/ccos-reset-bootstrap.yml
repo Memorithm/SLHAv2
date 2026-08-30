@@ -1,0 +1,63 @@
+name: CCOS reset lifecycle bootstrap
+
+on:
+  push:
+    branches:
+      - feat/llama-ccos-budget-pressure
+    paths:
+      - tools/fix_ccos_quiescent_reset.py
+      - .github/workflows/ccos-reset-bootstrap.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ccos-reset-lifecycle-bootstrap
+  cancel-in-progress: true
+
+jobs:
+  validate-and-commit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - name: Apply exact reset lifecycle patch
+        run: python3 tools/fix_ccos_quiescent_reset.py
+      - name: Build SLHA C ABI
+        run: cargo --locked build --release -p slha-c
+      - name: Build pinned llama.cpp dependency
+        run: |
+          git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$RUNNER_TEMP/llama.cpp"
+          test "$(git -C "$RUNNER_TEMP/llama.cpp" rev-parse HEAD)" = "fdb1db877c526ec90f668eca1b858da5dba85560"
+          cmake -S "$RUNNER_TEMP/llama.cpp" -B "$RUNNER_TEMP/llama.cpp/build" \
+            -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null
+          cmake --build "$RUNNER_TEMP/llama.cpp/build" -j2 --target llama
+      - name: Run strict external-K contract suite
+        run: |
+          make -C integration/llama.cpp/tests -j2 all test \
+            LLAMA_CPP_DIR="$RUNNER_TEMP/llama.cpp" \
+            SLHA_LIB="$GITHUB_WORKSPACE/target/release/libslha.a"
+          make -C integration/llama.cpp/tests compile-check \
+            LLAMA_CPP_DIR="$RUNNER_TEMP/llama.cpp"
+      - name: Verify and commit product diff
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          expected = {
+              'integration/llama.cpp/shim/slha_external_k.cpp',
+              'integration/llama.cpp/tests/external_k_contract_tests.cpp',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if changed != expected:
+              raise SystemExit(f'unexpected product diff: {sorted(changed)}')
+          PY
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add integration/llama.cpp/shim/slha_external_k.cpp \
+            integration/llama.cpp/tests/external_k_contract_tests.cpp
+          git commit -m 'fix(ccos): invalidate quiescent restore state on reset'
+          git push origin HEAD:feat/llama-ccos-budget-pressure
