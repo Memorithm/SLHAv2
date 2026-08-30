@@ -660,6 +660,13 @@ void slha_external_k_reset_store() {
         }
         return;
     }
+    std::lock_guard<std::mutex> lock(g_ccos_mutex);
+    // A context reset invalidates any pending quiescent restore intent. Keeping
+    // the pre-offload snapshot across reset would allow stale lifecycle state
+    // to be applied to a new logical context.
+    g_quiescent_pre_offload_resident = 0;
+    g_quiescent_pre_offload_hot = 0;
+    g_quiescent_pre_offload_warm = 0;
     if (g_ccos_cache) {
         (void) slha_elastic_cache_clear(g_ccos_cache);
     }
@@ -674,6 +681,9 @@ void slha_external_k_release_store() {
     g_ccos_n_layers = 0;
     g_ccos_capacity = 0;
     g_ccos_budget_bytes = 0;
+    g_quiescent_pre_offload_resident = 0;
+    g_quiescent_pre_offload_hot = 0;
+    g_quiescent_pre_offload_warm = 0;
 }
 
 void slha_external_k_record_compression_ns(uint64_t elapsed_ns) {
