@@ -1,0 +1,113 @@
+name: CCOS budget-pressure bootstrap v2
+
+on:
+  push:
+    branches:
+      - feat/llama-ccos-budget-pressure
+    paths:
+      - tools/fix_ccos_budget_pressure_shell.py
+      - .github/workflows/ccos-budget-pressure-bootstrap-v2.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ccos-budget-pressure-bootstrap-v2
+  cancel-in-progress: true
+
+jobs:
+  validate-and-commit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - name: Apply lifecycle patch
+        run: |
+          python3 tools/apply_ccos_budget_pressure.py
+          python3 tools/fix_ccos_budget_pressure_shell.py
+      - name: Validate harness syntax
+        run: |
+          bash -n integration/llama.cpp/run_real_pair.sh
+          python3 -m py_compile integration/llama.cpp/scripts/compare_real_eval.py
+      - name: Build SLHA C ABI
+        run: cargo --locked build --release -p slha-c
+      - name: Build pinned llama.cpp dependency
+        run: |
+          git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$RUNNER_TEMP/llama.cpp"
+          test "$(git -C "$RUNNER_TEMP/llama.cpp" rev-parse HEAD)" = "fdb1db877c526ec90f668eca1b858da5dba85560"
+          cmake -S "$RUNNER_TEMP/llama.cpp" -B "$RUNNER_TEMP/llama.cpp/build" \
+            -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null
+          cmake --build "$RUNNER_TEMP/llama.cpp/build" -j2 --target llama
+      - name: Run strict shim contract suite
+        run: |
+          make -C integration/llama.cpp/tests -j2 all test \
+            LLAMA_CPP_DIR="$RUNNER_TEMP/llama.cpp" \
+            SLHA_LIB="$GITHUB_WORKSPACE/target/release/libslha.a"
+          make -C integration/llama.cpp/tests compile-check LLAMA_CPP_DIR="$RUNNER_TEMP/llama.cpp"
+      - name: Build actually patched reference engine and evaluator
+        run: |
+          LLAMA="$RUNNER_TEMP/patched-llama.cpp"
+          git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$LLAMA"
+          normalize_patch() {
+            awk '
+              /^diff --git / { in_hunk = 0 }
+              /^@@ / { in_hunk = 1 }
+              { if (in_hunk && length($0) == 0) print " "; else print $0 }
+            ' "$1" > "$2"
+          }
+          for patch_id in 0001-slha-k-passthrough 0002-slha-external-k 0003-slha-external-k-hardening; do
+            normalize_patch "integration/llama.cpp/patches/$patch_id.patch" "$RUNNER_TEMP/$patch_id.patch"
+            git -C "$LLAMA" apply --recount --check "$RUNNER_TEMP/$patch_id.patch"
+            git -C "$LLAMA" apply --recount "$RUNNER_TEMP/$patch_id.patch"
+          done
+          for shim in \
+            slha_llama.hpp slha_llama.cpp slha_external_k.hpp slha_external_k.cpp \
+            slha_replace_counters.hpp slha_replace_counters.cpp slha_layer_mask.hpp slha_layer_mask.cpp \
+            slha_score_scale.hpp slha_score_scale.cpp slha_scale_fit.hpp slha_scale_fit.cpp \
+            slha_score_oracle.hpp slha_score_oracle.cpp slha_oracle_metrics.hpp slha_oracle_metrics.cpp \
+            slha_rank_dataset.hpp slha_rank_dataset.cpp; do
+            cp "integration/llama.cpp/shim/$shim" "$LLAMA/src/$shim"
+          done
+          cmake -S "$LLAMA" -B "$LLAMA/build-slha" \
+            -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DLLAMA_CURL=OFF \
+            -DSLHA_INTEGRATION=ON -DSLHA_INCLUDE_DIR="$GITHUB_WORKSPACE/slha-c/include" \
+            -DSLHA_LIB="$GITHUB_WORKSPACE/target/release/libslha.a" -DCMAKE_BUILD_TYPE=Release >/dev/null
+          cmake --build "$LLAMA/build-slha" -j2 --target llama
+          g++ -O2 -std=c++17 -Wall -Wextra -Werror \
+            -I"$LLAMA/include" -I"$LLAMA/ggml/include" -I"$LLAMA/src" \
+            integration/llama.cpp/tools/slha_real_eval.cpp \
+            -L"$LLAMA/build-slha/bin" -lllama -lggml -lggml-base -lggml-cpu \
+            -Wl,-rpath,"$LLAMA/build-slha/bin" -o "$RUNNER_TEMP/slha-real-eval"
+          set +e
+          usage="$($RUNNER_TEMP/slha-real-eval 2>&1)"
+          rc=$?
+          set -e
+          test "$rc" -eq 2
+          grep -q -- '--ccos-cold-cycle-step' <<< "$usage"
+      - name: Verify intended diff and commit
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'integration/llama.cpp/shim/slha_external_k.hpp',
+              'integration/llama.cpp/shim/slha_external_k.cpp',
+              'integration/llama.cpp/tests/external_k_contract_tests.cpp',
+              'integration/llama.cpp/tools/slha_real_eval.cpp',
+              'integration/llama.cpp/run_real_pair.sh',
+              'integration/llama.cpp/scripts/compare_real_eval.py',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if changed != allowed:
+              raise SystemExit(f'unexpected diff: {sorted(changed)}')
+          PY
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add integration/llama.cpp/shim/slha_external_k.hpp integration/llama.cpp/shim/slha_external_k.cpp \
+            integration/llama.cpp/tests/external_k_contract_tests.cpp integration/llama.cpp/tools/slha_real_eval.cpp \
+            integration/llama.cpp/run_real_pair.sh integration/llama.cpp/scripts/compare_real_eval.py
+          git commit -m 'feat(ccos): add quiescent COLD lifecycle probe'
+          git push origin HEAD:feat/llama-ccos-budget-pressure
