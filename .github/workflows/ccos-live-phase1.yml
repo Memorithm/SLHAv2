@@ -1,0 +1,71 @@
+name: CCOS live ABI phase 1
+
+on:
+  push:
+    branches:
+      - feat/llama-ccos-live-k
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt,clippy
+
+      - name: Apply strided ABI patch
+        run: python3 tools/apply_ccos_live_phase1.py
+
+      - name: Format
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+
+      - name: Build C ABI
+        run: cargo build --locked --release -p slha-c
+
+      - name: Test elastic cache and C ABI
+        run: cargo test --locked -p slhav2-vram -p slha-c
+
+      - name: Clippy selected crates
+        run: cargo clippy --locked -p slhav2-vram -p slha-c --all-targets -- -D warnings
+
+      - name: Compile public C header strictly
+        run: |
+          cat > "$RUNNER_TEMP/ccos_strided_header.c" <<'EOF'
+          #include "slha.h"
+          int main(void) {
+              SlhaElasticKvCache *cache = slha_elastic_cache_new(4096);
+              float q[SLHA_D_C] = {0};
+              uint64_t sign[SLHA_RESIDUAL_WORDS] = {0};
+              float scores[2] = {0};
+              (void) slha_elastic_hot_resident_bytes();
+              (void) slha_elastic_warm_resident_bytes();
+              (void) slha_elastic_cache_score_strided(cache, 1, 6, 2, q, sign, scores);
+              (void) slha_elastic_cache_observe_scores_strided(cache, 1, 6, scores, 2, 1.0f);
+              (void) slha_elastic_cache_free(cache);
+              return 0;
+          }
+          EOF
+          cc -std=c11 -Wall -Wextra -Werror -I slha-c/include \
+            -c "$RUNNER_TEMP/ccos_strided_header.c" -o "$RUNNER_TEMP/ccos_strided_header.o"
+
+      - name: Commit validated ABI and remove bootstrap artifacts
+        run: |
+          git diff --check
+          git config user.name "MEMOPERF"
+          git config user.email "contact@checkupauto.fr"
+          git rm tools/apply_ccos_live_phase1.py .github/workflows/ccos-live-phase1.yml
+          git add slha-c/src/elastic_ffi.rs slha-c/include/slha.h
+          git diff --cached --check
+          git commit -m "feat(ccos): add strided live-cache ABI"
+          git push origin HEAD:feat/llama-ccos-live-k
