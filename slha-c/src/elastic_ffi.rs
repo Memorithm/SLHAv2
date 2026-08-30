@@ -67,9 +67,7 @@ fn register_cache(inner: ElasticKvCache) -> *mut SlhaElasticKvCache {
     pointer
 }
 
-fn cache_arc(
-    handle: *const SlhaElasticKvCache,
-) -> Result<Arc<Mutex<ElasticKvCache>>, FfiError> {
+fn cache_arc(handle: *const SlhaElasticKvCache) -> Result<Arc<Mutex<ElasticKvCache>>, FfiError> {
     if handle.is_null() {
         return Err(ffi_error(SLHA_ERR_NULL, "elastic cache handle is NULL"));
     }
@@ -118,9 +116,7 @@ pub struct SlhaElasticKvCacheStats {
     pub evictions: u64,
 }
 
-fn lock_cache(
-    cache: &Arc<Mutex<ElasticKvCache>>,
-) -> std::sync::MutexGuard<'_, ElasticKvCache> {
+fn lock_cache(cache: &Arc<Mutex<ElasticKvCache>>) -> std::sync::MutexGuard<'_, ElasticKvCache> {
     cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -277,9 +273,10 @@ pub unsafe extern "C" fn slha_elastic_cache_write(
         let cache = cache_arc(handle)?;
         // SAFETY: guaranteed by this function's caller contract.
         let bytes = unsafe { read_tile_unaligned(tile) }?;
-        lock_cache(&cache)
+        let result = lock_cache(&cache)
             .write_at(slot, bytes)
-            .map_err(|error| cache_error("elastic fixed-slot write failed", error))
+            .map_err(|error| cache_error("elastic fixed-slot write failed", error));
+        result
     })
 }
 
@@ -351,7 +348,10 @@ pub unsafe extern "C" fn slha_elastic_cache_score_range(
             .map_err(|_| ffi_error(SLHA_ERR_PANIC, "score buffer allocation failed"))?;
         for offset in 0..count {
             let slot = start_slot.checked_add(offset).ok_or_else(|| {
-                ffi_error(SLHA_ERR_DIMENSION, "elastic score slot range overflows usize")
+                ffi_error(
+                    SLHA_ERR_DIMENSION,
+                    "elastic score slot range overflows usize",
+                )
             })?;
             values.push(guard.score(slot, &coarse, &sign).ok_or_else(|| {
                 ffi_error(
@@ -419,10 +419,11 @@ pub extern "C" fn slha_elastic_cache_demote_to(
 ) -> i32 {
     ffi_status(|| {
         let cache = cache_arc(handle)?;
-        lock_cache(&cache)
+        let result = lock_cache(&cache)
             .demote_to(target_resident_bytes)
             .map(|_| ())
-            .map_err(|error| cache_error("elastic demotion failed", error))
+            .map_err(|error| cache_error("elastic demotion failed", error));
+        result
     })
 }
 
@@ -434,10 +435,11 @@ pub extern "C" fn slha_elastic_cache_offload_to(
 ) -> i32 {
     ffi_status(|| {
         let cache = cache_arc(handle)?;
-        lock_cache(&cache)
+        let result = lock_cache(&cache)
             .offload_to(target_resident_bytes)
             .map(|_| ())
-            .map_err(|error| cache_error("elastic offload failed", error))
+            .map_err(|error| cache_error("elastic offload failed", error));
+        result
     })
 }
 
@@ -449,12 +451,13 @@ pub extern "C" fn slha_elastic_cache_restore_slot(
 ) -> i32 {
     ffi_status(|| {
         let cache = cache_arc(handle)?;
-        lock_cache(&cache).restore_slot(slot).map_err(|error| {
+        let result = lock_cache(&cache).restore_slot(slot).map_err(|error| {
             ffi_error(
                 SLHA_ERR_NOT_RESIDENT,
                 format!("elastic restore failed for slot {slot}: {error}"),
             )
-        })
+        });
+        result
     })
 }
 
@@ -466,12 +469,13 @@ pub extern "C" fn slha_elastic_cache_promote_slot(
 ) -> i32 {
     ffi_status(|| {
         let cache = cache_arc(handle)?;
-        lock_cache(&cache).promote_slot(slot).map_err(|error| {
+        let result = lock_cache(&cache).promote_slot(slot).map_err(|error| {
             ffi_error(
                 SLHA_ERR_NOT_RESIDENT,
                 format!("elastic promotion failed for slot {slot}: {error}"),
             )
-        })
+        });
+        result
     })
 }
 
@@ -479,14 +483,12 @@ pub extern "C" fn slha_elastic_cache_promote_slot(
 /// handle or slot. Use `slha_elastic_cache_stats` when an explicit handle error
 /// code is required.
 #[no_mangle]
-pub extern "C" fn slha_elastic_cache_tier(
-    handle: *mut SlhaElasticKvCache,
-    slot: usize,
-) -> i32 {
+pub extern "C" fn slha_elastic_cache_tier(handle: *mut SlhaElasticKvCache, slot: usize) -> i32 {
     let Ok(cache) = cache_arc(handle) else {
         return SLHA_ELASTIC_TIER_ABSENT;
     };
-    match lock_cache(&cache).tier(slot) {
+    let tier = lock_cache(&cache).tier(slot);
+    match tier {
         Some(PhysicalTier::Hot) => SLHA_ELASTIC_TIER_HOT,
         Some(PhysicalTier::Warm) => SLHA_ELASTIC_TIER_WARM,
         Some(PhysicalTier::Cold) => SLHA_ELASTIC_TIER_COLD,
@@ -617,12 +619,18 @@ mod tests {
         let q_coarse = [0.0f32; D_C];
         let q_sign = [0u64; RESIDUAL_WORDS];
         let mut output = [-1.0f32];
-        assert_eq!(score(handle, 0, 1, &q_coarse, &q_sign, &mut output), SLHA_OK);
+        assert_eq!(
+            score(handle, 0, 1, &q_coarse, &q_sign, &mut output),
+            SLHA_OK
+        );
         assert_eq!(output[0], 64.0);
 
         assert_eq!(slha_elastic_cache_demote_to(handle, 96), SLHA_OK);
         assert_eq!(slha_elastic_cache_tier(handle, 0), SLHA_ELASTIC_TIER_WARM);
-        assert_eq!(score(handle, 0, 1, &q_coarse, &q_sign, &mut output), SLHA_OK);
+        assert_eq!(
+            score(handle, 0, 1, &q_coarse, &q_sign, &mut output),
+            SLHA_OK
+        );
         assert_eq!(output[0], 0.0);
 
         assert_eq!(slha_elastic_cache_offload_to(handle, 0), SLHA_OK);
