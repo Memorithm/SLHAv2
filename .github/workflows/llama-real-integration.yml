@@ -101,6 +101,7 @@ jobs:
             -I"$RUNNER_TEMP/llama.cpp/include" \
             -I"$RUNNER_TEMP/llama.cpp/src" \
             -I"$RUNNER_TEMP/llama.cpp/ggml/include" \
+            -I"$GITHUB_WORKSPACE/slha-c/include" \
             integration/llama.cpp/tools/slha_real_eval.cpp \
             -L"$RUNNER_TEMP/llama.cpp/build/bin" \
             -lllama -lggml -lggml-base -lggml-cpu \
