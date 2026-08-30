@@ -19,6 +19,8 @@ CCOS=0
 CCOS_BUDGET_BYTES=""
 CCOS_IMPORTANCE_TEMPERATURE=""
 CCOS_COLD_CYCLE_STEP=""
+PERPLEXITY_CORPUS=""
+PERPLEXITY_CHUNKS=2
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,6 +40,8 @@ while [[ $# -gt 0 ]]; do
         --ccos-budget-bytes) CCOS_BUDGET_BYTES="${2:?missing value for --ccos-budget-bytes}"; shift 2 ;;
         --ccos-importance-temperature) CCOS_IMPORTANCE_TEMPERATURE="${2:?missing value for --ccos-importance-temperature}"; shift 2 ;;
         --ccos-cold-cycle-step) CCOS_COLD_CYCLE_STEP="${2:?missing value for --ccos-cold-cycle-step}"; shift 2 ;;
+        --perplexity-corpus) PERPLEXITY_CORPUS="${2:?missing value for --perplexity-corpus}"; shift 2 ;;
+        --perplexity-chunks) PERPLEXITY_CHUNKS="${2:?missing value for --perplexity-chunks}"; shift 2 ;;
         *) echo "ERROR: unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -53,6 +57,14 @@ compgen -G "$WEIGHTS_DIR/layer-*.slhw" >/dev/null || {
     echo "ERROR: no layer-*.slhw files in $WEIGHTS_DIR" >&2
     exit 2
 }
+if [[ -n "$PERPLEXITY_CORPUS" ]]; then
+    [[ -f "$PERPLEXITY_CORPUS" ]] || { echo "ERROR: perplexity corpus not found: $PERPLEXITY_CORPUS" >&2; exit 2; }
+    [[ -s "$PERPLEXITY_CORPUS" ]] || { echo "ERROR: perplexity corpus is empty: $PERPLEXITY_CORPUS" >&2; exit 2; }
+fi
+if ! [[ "$PERPLEXITY_CHUNKS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: --perplexity-chunks must be a positive integer" >&2
+    exit 2
+fi
 if [[ "$CCOS" -ne 1 && ( -n "$CCOS_BUDGET_BYTES" || -n "$CCOS_IMPORTANCE_TEMPERATURE" || -n "$CCOS_COLD_CYCLE_STEP" ) ]]; then
     echo "ERROR: CCOS budget/temperature/lifecycle options require --ccos" >&2
     exit 2
@@ -86,6 +98,11 @@ printf 'GPU layers    : %s\n' "$GPU_LAYERS"
 printf 'external back.: %s\n' "$([[ "$CCOS" -eq 1 ]] && echo ccos_elastic || echo vector)"
 printf 'CCOS budget   : %s\n' "${CCOS_BUDGET_BYTES:-default-full-HOT}"
 printf 'CCOS temp.    : %s\n' "${CCOS_IMPORTANCE_TEMPERATURE:-default-1.0}"
+if [[ -n "$PERPLEXITY_CORPUS" ]]; then
+    printf 'PPL corpus     : %s\n' "$PERPLEXITY_CORPUS"
+    printf 'PPL corpus SHA : %s\n' "$(sha256sum "$PERPLEXITY_CORPUS" | awk '{print $1}')"
+    printf 'PPL chunks     : %s\n' "$PERPLEXITY_CHUNKS"
+fi
 
 ( cd "$REPO_ROOT" && cargo --locked build --release -p slha-c )
 
@@ -140,7 +157,7 @@ cmake -S "$LLAMA_DIR" -B "$LLAMA_DIR/build" \
     -DSLHA_INCLUDE_DIR="$REPO_ROOT/slha-c/include" \
     -DSLHA_LIB="$REPO_ROOT/target/release/libslha.a" \
     -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build "$LLAMA_DIR/build" -j"$(nproc)" --target llama
+cmake --build "$LLAMA_DIR/build" -j"$(nproc)" --target llama llama-perplexity
 
 g++ -O2 -std=c++17 -Wall -Wextra -Werror \
     -I"$LLAMA_DIR/include" \
@@ -152,13 +169,8 @@ g++ -O2 -std=c++17 -Wall -Wextra -Werror \
     -Wl,-rpath,"$LLAMA_DIR/build/bin" \
     -o "$EVAL_BIN"
 
-run_arm() {
+configure_arm_env() {
     local mode="$1"
-    local json="$OUTPUT_DIR/$mode.eval.json"
-    local logits="$OUTPUT_DIR/$mode.logits.f32"
-    local log="$OUTPUT_DIR/$mode.log"
-    local time_file="$OUTPUT_DIR/$mode.time"
-
     unset SLHA_EXTERNAL_K SLHA_KV_MODE SLHA_SCORE_MODE SLHA_SCORE_LAYERS
     unset SLHA_SCORE_ORACLE SLHA_ORACLE_METRICS_JSON SLHA_SCALE_FIT_JSON
     unset SLHA_RANK_DATASET_DIR SLHA_WEIGHTS_DIR SLHA_CODEC
@@ -178,6 +190,16 @@ run_arm() {
                 export SLHA_CCOS_IMPORTANCE_TEMPERATURE="$CCOS_IMPORTANCE_TEMPERATURE"
         fi
     fi
+}
+
+run_arm() {
+    local mode="$1"
+    local json="$OUTPUT_DIR/$mode.eval.json"
+    local logits="$OUTPUT_DIR/$mode.logits.f32"
+    local log="$OUTPUT_DIR/$mode.log"
+    local time_file="$OUTPUT_DIR/$mode.time"
+
+    configure_arm_env "$mode"
 
     echo "== running $mode =="
     local eval_args=(
@@ -210,8 +232,93 @@ run_arm() {
     python3 -m json.tool "$json" >/dev/null
 }
 
+run_perplexity_arm() {
+    local mode="$1"
+    local log="$OUTPUT_DIR/$mode.perplexity.log"
+    local json="$OUTPUT_DIR/$mode.perplexity.json"
+
+    configure_arm_env "$mode"
+
+    echo "== running $mode perplexity =="
+    set +e
+    LC_ALL=C "$LLAMA_DIR/build/bin/llama-perplexity" \
+        -m "$MODEL" \
+        -f "$PERPLEXITY_CORPUS" \
+        --chunks "$PERPLEXITY_CHUNKS" \
+        -c "$CTX_SIZE" \
+        --batch-size "$CTX_SIZE" \
+        -t "$THREADS" \
+        --parallel 1 \
+        --flash-attn off \
+        --cache-type-k "$CACHE_TYPE_K" \
+        --cache-type-v "$CACHE_TYPE_V" \
+        --gpu-layers "$GPU_LAYERS" \
+        2>&1 | tee "$log"
+    local rc=${PIPESTATUS[0]}
+    set -e
+    if [[ "$rc" -ne 0 ]]; then
+        echo "ERROR: $mode perplexity failed with exit code $rc" >&2
+        return "$rc"
+    fi
+
+    python3 "$REPO_ROOT/integration/llama.cpp/scripts/report_real_perplexity.py" \
+        --mode "$mode" \
+        --log "$log" \
+        --corpus "$PERPLEXITY_CORPUS" \
+        --model-sha256 "$MODEL_SHA256" \
+        --llama-commit "$LLAMA_EXPECTED" \
+        --context-size "$CTX_SIZE" \
+        --chunks "$PERPLEXITY_CHUNKS" \
+        --threads "$THREADS" \
+        --gpu-layers "$GPU_LAYERS" \
+        --cache-type-k "$CACHE_TYPE_K" \
+        --cache-type-v "$CACHE_TYPE_V" \
+        --output "$json"
+    python3 -m json.tool "$json" >/dev/null
+}
+
 run_arm baseline
 run_arm external
+
+COMPARE_PPL_ARGS=()
+if [[ -n "$PERPLEXITY_CORPUS" ]]; then
+    run_perplexity_arm baseline
+    run_perplexity_arm external
+
+    python3 - "$OUTPUT_DIR/baseline.perplexity.json" "$OUTPUT_DIR/external.perplexity.json" "$CCOS" <<'PY'
+import json, math, sys
+baseline = json.load(open(sys.argv[1]))
+external = json.load(open(sys.argv[2]))
+ccos_requested = sys.argv[3] == "1"
+keys = (
+    "engine", "llama_cpp_commit", "model_sha256", "corpus_sha256",
+    "corpus_bytes", "context_size", "batch_size", "parallel",
+    "chunks_requested", "threads", "gpu_layers", "cache_type_k", "cache_type_v",
+)
+for key in keys:
+    if baseline.get(key) != external.get(key):
+        raise SystemExit(f"perplexity pair mismatch for {key}: {baseline.get(key)!r} != {external.get(key)!r}")
+for name, report in (("baseline", baseline), ("external", external)):
+    ppl = report.get("perplexity")
+    if not isinstance(ppl, (int, float)) or not math.isfinite(float(ppl)) or float(ppl) <= 0:
+        raise SystemExit(f"{name} perplexity is not finite and positive: {ppl!r}")
+if external.get("external_replace_valid") is not True:
+    raise SystemExit("external perplexity replacement summary is not valid")
+if ccos_requested and external.get("external_backend") != "ccos_elastic":
+    raise SystemExit(f"CCOS perplexity requested but backend is {external.get('external_backend')!r}")
+print(json.dumps({
+    "corpus_sha256": baseline["corpus_sha256"],
+    "baseline_perplexity": baseline["perplexity"],
+    "external_perplexity": external["perplexity"],
+    "absolute_delta": float(external["perplexity"]) - float(baseline["perplexity"]),
+}, sort_keys=True))
+PY
+
+    COMPARE_PPL_ARGS=(
+        --baseline-perplexity "$OUTPUT_DIR/baseline.perplexity.json"
+        --external-perplexity "$OUTPUT_DIR/external.perplexity.json"
+    )
+fi
 
 python3 "$REPO_ROOT/integration/llama.cpp/scripts/compare_real_eval.py" \
     --baseline-json "$OUTPUT_DIR/baseline.eval.json" \
@@ -227,7 +334,8 @@ python3 "$REPO_ROOT/integration/llama.cpp/scripts/compare_real_eval.py" \
     --prompt-sha256 "$PROMPT_SHA256" \
     --slhav2-commit "$SLHA_COMMIT" \
     --llama-commit "$LLAMA_EXPECTED" \
-    --output "$OUTPUT_DIR/comparison.json"
+    --output "$OUTPUT_DIR/comparison.json" \
+    "${COMPARE_PPL_ARGS[@]}"
 
 python3 - "$OUTPUT_DIR/comparison.json" "$CCOS" <<'PY'
 import json, sys
@@ -257,6 +365,10 @@ print(f"common prefix       : {q['common_prefix_tokens']} tokens")
 print(f"first divergence    : {q['first_divergence_index']}")
 print(f"text exact match    : {q['text_exact_match']}")
 print(f"logit relative L2   : {q['next_token_logits']['relative_l2'] if q['next_token_logits'] else None}")
+if q.get("perplexity") is not None:
+    print(f"baseline perplexity : {q['perplexity']['baseline']}")
+    print(f"external perplexity : {q['perplexity']['external']}")
+    print(f"perplexity delta    : {q['perplexity']['absolute_delta']}")
 print(f"baseline decode t/s : {pf['baseline_decode_tokens_per_second']}")
 print(f"external decode t/s : {pf['external_decode_tokens_per_second']}")
 print(f"baseline peak RSS KB: {mem['baseline_max_process_rss_kb']}")
