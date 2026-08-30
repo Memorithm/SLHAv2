@@ -6,6 +6,7 @@ on:
       - feat/llama-ccos-live-k
     paths:
       - tools/apply_ccos_hard_budget_fix.py
+      - tools/fix_ccos_hard_budget_borrow.py
       - .github/workflows/ccos-hard-budget-fix.yml
 
 permissions:
@@ -30,7 +31,9 @@ jobs:
           components: rustfmt,clippy
 
       - name: Apply hard-budget fix
-        run: python3 tools/apply_ccos_hard_budget_fix.py
+        run: |
+          python3 tools/apply_ccos_hard_budget_fix.py
+          python3 tools/fix_ccos_hard_budget_borrow.py
 
       - name: Rust formatting, tests and Clippy
         run: |
