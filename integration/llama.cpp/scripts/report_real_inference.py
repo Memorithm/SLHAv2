@@ -52,11 +52,11 @@ def parse_perf_tps(log: str) -> tuple[float | None, float | None]:
 
 
 def parse_external_store(log: str) -> dict[str, Any] | None:
-    match = re.search(r"^SLHA_EXTERNAL_K_STORE\s+(.+)$", log, re.MULTILINE)
-    if not match:
+    matches = re.findall(r"^SLHA_EXTERNAL_K_STORE\s+(.+)$", log, re.MULTILINE)
+    if not matches:
         return None
     result: dict[str, Any] = {}
-    for item in match.group(1).split():
+    for item in matches[-1].split():
         if "=" not in item:
             continue
         key, value = item.split("=", 1)
@@ -68,6 +68,12 @@ def parse_external_store(log: str) -> dict[str, Any] | None:
         except ValueError:
             result[key] = value
     return result
+
+
+def nanoseconds_to_milliseconds(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value) / 1_000_000.0
+    return None
 
 
 def parse_replace_summary(log: str) -> dict[str, Any] | None:
@@ -150,6 +156,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     log = Path(args.log).read_text(errors="replace")
     time_text = Path(args.time).read_text(errors="replace") if Path(args.time).exists() else ""
     prompt_tps, decode_tps = parse_perf_tps(log)
+    external_store = parse_external_store(log)
 
     max_rss = parse_time_value(time_text, "max_rss_kb")
     kv_lines = [
@@ -178,7 +185,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "gpu_layers": args.gpu_layers,
             "cache_type_k": args.cache_type_k,
             "cache_type_v": args.cache_type_v,
-            "codec": args.codec if args.mode == "external" else None,
+            "codec": args.codec if args.mode in ("external", "ccos") else None,
             "weights_dir": os.path.abspath(args.weights_dir) if args.weights_dir else None,
         },
         "host": {
@@ -192,7 +199,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "memory": {
             "max_process_rss_kb": int(max_rss) if max_rss is not None else None,
             "engine_kv_allocation_lines": kv_lines,
-            "external_k_store": parse_external_store(log),
+            "external_k_store": external_store,
             "weights_resident_bytes": None,
             "runtime_overhead_bytes": None,
             "baseline_kv_bytes": None,
@@ -207,8 +214,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "time_to_first_token_ms": None,
             "p50_token_latency_ms": None,
             "p95_token_latency_ms": None,
-            "slha_compression_cost_ms": None,
-            "slha_score_cost_ms": None,
+            "slha_compression_cost_ms": nanoseconds_to_milliseconds(
+                external_store.get("compression_ns") if external_store else None
+            ),
+            "slha_score_cost_ms": nanoseconds_to_milliseconds(
+                external_store.get("score_ns") if external_store else None
+            ),
+            "slha_budget_enforcement_cost_ms": nanoseconds_to_milliseconds(
+                external_store.get("budget_ns") if external_store else None
+            ),
         },
         "slha_replace_summary": parse_replace_summary(log),
         "quality": {
@@ -228,14 +242,14 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "limitations": [
             "PR1 records real autoregressive execution and process RSS but does not infer model-weight residency from file size.",
             "TTFT and p50/p95 token latency require per-token instrumentation and remain null here.",
-            "CCOS HOT/WARM/COLD is not connected to the llama.cpp external-K path in PR1.",
+            "CCOS cache-owned residency counters are distinct from process RSS and model-weight residency.",
         ],
     }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("baseline", "external"), required=True)
+    parser.add_argument("--mode", choices=("baseline", "external", "ccos"), required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--time", required=True)

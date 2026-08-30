@@ -1,4 +1,5 @@
 #include "slha_llama.hpp"
+#include "slha_external_k.hpp"
 #include "slha_replace_counters.hpp"
 #include "slha_layer_mask.hpp"
 #include "slha_score_scale.hpp"
@@ -10,6 +11,7 @@
 #include "slha.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -951,9 +953,7 @@ void slha_k_clear_all() {
     for (size_t i = 0; i < SLHA_MAX_LAYERS; ++i) {
         g_slha_tiles_written[i].store(0, std::memory_order_relaxed);
     }
-    if (g_slha_tile_store.n_layers > 0) {
-        g_slha_tile_store.reset();
-    }
+    slha_external_k_reset_store();
 }
 
 void slha_global_shutdown() {
@@ -1040,6 +1040,14 @@ void slha_global_shutdown() {
         layer.collected_k.clear();
         layer.shadow_metrics.reset();
     }
+    // Emit the final external-K/CCOS physical-store accounting before
+    // releasing the optional Rust cache. Peak counters survive logical clears
+    // and therefore remain meaningful even if llama.cpp reset the KV lifecycle.
+    if (slha_external_k_enabled()) {
+        slha_external_k_print_store_summary();
+    }
+    slha_external_k_release_store();
+
     state.layers.clear();
     state.initialized = false;
     g_slha_tile_store.reset();
@@ -1661,43 +1669,22 @@ void slha_shadow_score(
                 static_cast<size_t>(n_kv) - n_written, std::memory_order_relaxed);
         }
 
-        // Materialize exactly one immutable contiguous snapshot.  Do not call
-        // read()/read_range() again before slha_score_tiles(): another copy-out
-        // call on this thread invalidates the snapshot lifetime contract.
-        const SciRustSlhaTile * tiles = n_check > 0
-            ? static_cast<const SciRustSlhaTile *>(
-                g_slha_tile_store.read_range(layer->layer_id, 0, n_check))
-            : nullptr;
-        const size_t first_missing =
-            (n_check > 0 && !tiles) ? 0 : SIZE_MAX;
-        if (first_missing != SIZE_MAX) {
-            g_slha_replace_counters.n_missing_tile.fetch_add(1, std::memory_order_relaxed);
-            g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
-            g_slha_replace_counters.error_code.store(1, std::memory_order_release);
-            if (ith == 0 && first_missing < 5) {
-                static thread_local size_t diag_count = 0;
-                if (diag_count < 3) {
-                    ++diag_count;
-                    std::cerr << "[SLHA] replace diag: layer=" << layer->layer_id
-                              << " n_kv=" << n_kv << " n_token=" << n_token
-                              << " n_written=" << n_written << " n_check=" << n_check
-                              << " s=" << s << " t=" << t << " h=" << h
-                              << " first_missing=" << first_missing
-                              << " tiles_ptr=" << (void*)tiles << "\n";
-                }
-            }
-            continue;
-        }
-
         if (n_check > 0) {
-            rc = slha_score_tiles(model, tiles, n_check, q_coarse.data(), q_sign.data(), temp_scores.data());
+            rc = slha_external_k_score_tiles(
+                model, layer->layer_id, 0, n_check,
+                q_coarse.data(), q_sign.data(), temp_scores.data());
             if (rc != SLHA_OK) {
-                g_slha_replace_counters.n_score_fail.fetch_add(1, std::memory_order_relaxed);
+                if (rc == SLHA_ERR_NOT_RESIDENT) {
+                    g_slha_replace_counters.n_missing_tile.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    g_slha_replace_counters.n_score_fail.fetch_add(1, std::memory_order_relaxed);
+                }
                 g_slha_replace_counters.n_failed_vectors.fetch_add(1, std::memory_order_relaxed);
                 g_slha_replace_counters.error_code.store(1, std::memory_order_release);
                 if (ith == 0) {
                     std::cerr << "[SLHA] replace layer " << layer->layer_id
-                              << " score_tiles failed: " << slha_last_error_message() << "\n";
+                              << " external score failed rc=" << rc
+                              << ": " << slha_last_error_message() << "\n";
                 }
                 continue;
             }
@@ -2082,7 +2069,12 @@ void slha_k_transform_with_idxs(
                 continue;
             }
             alignas(SLHA_TILE_ALIGN) SciRustSlhaTile tile;
+            const auto encode_start = std::chrono::steady_clock::now();
             int rc = slha_encode_key(model, src_row, d, static_cast<uint32_t>(pos), codec, &tile);
+            const auto encode_end = std::chrono::steady_clock::now();
+            slha_external_k_record_compression_ns(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    encode_end - encode_start).count()));
             if (rc != SLHA_OK) {
                 std::cerr << "[SLHA] layer " << layer->layer_id
                           << " token " << t << " encode failed: "
@@ -2103,10 +2095,15 @@ void slha_k_transform_with_idxs(
                 layer->raw_k_max_pos =
                     std::max(layer->raw_k_max_pos, static_cast<size_t>(pos) + 1);
             }
-            if (!g_slha_tile_store.write(layer->layer_id, static_cast<size_t>(pos), &tile)) {
+            if (!slha_external_k_write_tile(
+                    layer->layer_id, static_cast<size_t>(pos), &tile)) {
                 std::cerr << "[SLHA] layer " << layer->layer_id
-                          << " position " << pos << " tile store overflow (capacity="
+                          << " position " << pos
+                          << " external-K store write/budget enforcement failed (capacity="
                           << g_slha_tile_store.capacity << ")\n";
+                if (slha_external_k_enabled()) {
+                    g_slha_replace_counters.error_code.store(1, std::memory_order_release);
+                }
             } else {
                 const size_t pos_plus_1 = static_cast<size_t>(pos) + 1;
                 if (pos_plus_1 > my_max_pos) {

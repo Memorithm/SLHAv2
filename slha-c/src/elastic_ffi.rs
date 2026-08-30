@@ -1,5 +1,8 @@
 use scirust::attention::slha_v2::{SciRustSlhaTile, D_C, RESIDUAL_WORDS};
-use slhav2_vram::elastic_cache::{ElasticKvCache, PhysicalTier};
+use slhav2_vram::{
+    codec,
+    elastic_cache::{ElasticKvCache, PhysicalTier},
+};
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::ptr;
@@ -227,6 +230,33 @@ unsafe fn write_tile(out_tile: *mut SciRustSlhaTile, bytes: &[u8; 128]) {
     }
 }
 
+/// Resident bytes charged by one full HOT tile.
+#[no_mangle]
+pub extern "C" fn slha_elastic_hot_resident_bytes() -> usize {
+    codec::HOT_BYTES
+}
+
+/// Resident bytes charged by one WARM tile.
+#[no_mangle]
+pub extern "C" fn slha_elastic_warm_resident_bytes() -> usize {
+    codec::WARM_BYTES
+}
+
+fn strided_slot(start_slot: usize, stride: usize, offset: usize) -> Result<usize, FfiError> {
+    let delta = stride.checked_mul(offset).ok_or_else(|| {
+        ffi_error(
+            SLHA_ERR_DIMENSION,
+            "elastic strided slot multiplication overflows usize",
+        )
+    })?;
+    start_slot.checked_add(delta).ok_or_else(|| {
+        ffi_error(
+            SLHA_ERR_DIMENSION,
+            "elastic strided slot addition overflows usize",
+        )
+    })
+}
+
 /// Create a registry-backed elastic fixed-slot KV cache.
 #[no_mangle]
 pub extern "C" fn slha_elastic_cache_new(hard_budget_bytes: usize) -> *mut SlhaElasticKvCache {
@@ -276,6 +306,34 @@ pub unsafe extern "C" fn slha_elastic_cache_write(
         let result = lock_cache(&cache)
             .write_at(slot, bytes)
             .map_err(|error| cache_error("elastic fixed-slot write failed", error));
+        result
+    })
+}
+
+/// Transactionally write a dense-attention tile under an exact resident target.
+///
+/// Existing HOT slots may become WARM, but the operation never creates COLD
+/// slots and never commits resident accounting above `target_resident_bytes`.
+///
+/// # Safety
+/// `tile` must point to one readable `SciRustSlhaTile`. Unaligned storage is
+/// accepted. `handle` may be any pointer value; only registered handles are
+/// accepted and the handle itself is never dereferenced.
+#[no_mangle]
+pub unsafe extern "C" fn slha_elastic_cache_write_dense_budget(
+    handle: *mut SlhaElasticKvCache,
+    slot: usize,
+    tile: *const SciRustSlhaTile,
+    target_resident_bytes: usize,
+) -> i32 {
+    ffi_status(|| {
+        let cache = cache_arc(handle)?;
+        // SAFETY: guaranteed by this function's caller contract.
+        let bytes = unsafe { read_tile_unaligned(tile) }?;
+        let result = lock_cache(&cache)
+            .write_at_dense_budget(slot, bytes, target_resident_bytes)
+            .map(|_| ())
+            .map_err(|error| cache_error("elastic dense-budget write failed", error));
         result
     })
 }
@@ -367,6 +425,67 @@ pub unsafe extern "C" fn slha_elastic_cache_score_range(
     })
 }
 
+/// Score a fixed-slot arithmetic progression without partially modifying
+/// output on failure. This lets an engine interleave layers by physical KV
+/// position without materializing a dense `layers * context` backing array.
+///
+/// # Safety
+/// `q_coarse` points to `D_C` readable f32 values, `q_sign` points to
+/// `RESIDUAL_WORDS` readable u64 values and `scores_out` points to `count`
+/// writable f32 values. Unaligned storage is accepted.
+#[no_mangle]
+pub unsafe extern "C" fn slha_elastic_cache_score_strided(
+    handle: *mut SlhaElasticKvCache,
+    start_slot: usize,
+    stride: usize,
+    count: usize,
+    q_coarse: *const f32,
+    q_sign: *const u64,
+    scores_out: *mut f32,
+) -> i32 {
+    ffi_status(|| {
+        let cache = cache_arc(handle)?;
+        if count > MAX_TILES {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                format!("score count {count} exceeds safety bound {MAX_TILES}"),
+            ));
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        if count > 1 && stride == 0 {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                "elastic strided score requires non-zero stride when count > 1",
+            ));
+        }
+        if scores_out.is_null() {
+            return Err(ffi_error(SLHA_ERR_NULL, "score output pointer is NULL"));
+        }
+        // SAFETY: guaranteed by this function's caller contract.
+        let (coarse, sign) = unsafe { read_query(q_coarse, q_sign) }?;
+        let guard = lock_cache(&cache);
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| ffi_error(SLHA_ERR_PANIC, "score buffer allocation failed"))?;
+        for offset in 0..count {
+            let slot = strided_slot(start_slot, stride, offset)?;
+            values.push(guard.score(slot, &coarse, &sign).ok_or_else(|| {
+                ffi_error(
+                    SLHA_ERR_NOT_RESIDENT,
+                    format!("elastic cache slot {slot} is absent or COLD"),
+                )
+            })?);
+        }
+        drop(guard);
+        // SAFETY: output is validated above and caller guarantees `count` slots.
+        unsafe { write_scores(scores_out, &values) };
+        Ok(())
+    })
+}
+
 /// Update slot importance from a contiguous range of attention scores.
 ///
 /// # Safety
@@ -405,6 +524,57 @@ pub unsafe extern "C" fn slha_elastic_cache_observe_scores(
                 )
             })?;
             observations.push((slot, score));
+        }
+        lock_cache(&cache).observe_scores(&observations, temperature);
+        Ok(())
+    })
+}
+
+/// Update slot importance over a fixed-slot arithmetic progression.
+///
+/// # Safety
+/// `scores` points to `count` readable f32 values. Unaligned storage is
+/// accepted. `temperature` must be finite and strictly positive.
+#[no_mangle]
+pub unsafe extern "C" fn slha_elastic_cache_observe_scores_strided(
+    handle: *mut SlhaElasticKvCache,
+    start_slot: usize,
+    stride: usize,
+    scores: *const f32,
+    count: usize,
+    temperature: f32,
+) -> i32 {
+    ffi_status(|| {
+        let cache = cache_arc(handle)?;
+        if !temperature.is_finite() || temperature <= 0.0 {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                "elastic score temperature must be finite and positive",
+            ));
+        }
+        if count > MAX_TILES {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                format!("score count {count} exceeds safety bound {MAX_TILES}"),
+            ));
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        if count > 1 && stride == 0 {
+            return Err(ffi_error(
+                SLHA_ERR_DIMENSION,
+                "elastic strided observation requires non-zero stride when count > 1",
+            ));
+        }
+        // SAFETY: guaranteed by this function's caller contract.
+        let values = unsafe { read_scores(scores, count) }?;
+        let mut observations = Vec::new();
+        observations
+            .try_reserve_exact(count)
+            .map_err(|_| ffi_error(SLHA_ERR_PANIC, "importance buffer allocation failed"))?;
+        for (offset, score) in values.into_iter().enumerate() {
+            observations.push((strided_slot(start_slot, stride, offset)?, score));
         }
         lock_cache(&cache).observe_scores(&observations, temperature);
         Ok(())
@@ -642,6 +812,115 @@ mod tests {
         );
         assert_eq!(output[0], 123.0);
         assert_eq!(slha_elastic_cache_restore_slot(handle, 0), SLHA_OK);
+        assert_eq!(slha_elastic_cache_free(handle), SLHA_OK);
+    }
+
+    #[test]
+    fn resident_byte_constants_match_physical_codec() {
+        assert_eq!(slha_elastic_hot_resident_bytes(), codec::HOT_BYTES);
+        assert_eq!(slha_elastic_warm_resident_bytes(), codec::WARM_BYTES);
+        assert_eq!(slha_elastic_hot_resident_bytes(), 128);
+        assert_eq!(slha_elastic_warm_resident_bytes(), 96);
+    }
+
+    #[test]
+    fn ffi_dense_budget_write_creates_warm_without_cold_and_rolls_back() {
+        let handle = slha_elastic_cache_new(192);
+        assert!(!handle.is_null());
+        let input = tile();
+
+        assert_eq!(
+            // SAFETY: test passes one live local tile and a registered handle.
+            unsafe { slha_elastic_cache_write_dense_budget(handle, 0, &input, 96) },
+            SLHA_OK
+        );
+        let mut snapshot = SlhaElasticKvCacheStats::default();
+        assert_eq!(stats(handle, &mut snapshot), SLHA_OK);
+        assert_eq!(snapshot.resident_bytes, 96);
+        assert_eq!(snapshot.offloaded_bytes, 32);
+        assert_eq!(snapshot.hot_slots, 0);
+        assert_eq!(snapshot.warm_slots, 1);
+        assert_eq!(snapshot.cold_slots, 0);
+
+        assert_eq!(
+            // SAFETY: the same tile remains readable for the second call.
+            unsafe { slha_elastic_cache_write_dense_budget(handle, 1, &input, 96) },
+            SLHA_ERR_DIMENSION
+        );
+        let mut after = SlhaElasticKvCacheStats::default();
+        assert_eq!(stats(handle, &mut after), SLHA_OK);
+        assert_eq!(after, snapshot);
+        assert_eq!(slha_elastic_cache_tier(handle, 1), SLHA_ELASTIC_TIER_ABSENT);
+        assert_eq!(slha_elastic_cache_free(handle), SLHA_OK);
+    }
+
+    #[test]
+    fn strided_scoring_addresses_one_interleaved_layer_transactionally() {
+        let handle = slha_elastic_cache_new(4096);
+        assert!(!handle.is_null());
+        let mut first = tile();
+        first.latent_kv.fill(0x88);
+        let mut gap = tile();
+        gap.latent_kv.fill(0x99);
+        let mut second = tile();
+        second.latent_kv.fill(0x88);
+        assert_eq!(write(handle, 1, &first), SLHA_OK);
+        assert_eq!(write(handle, 2, &gap), SLHA_OK);
+        assert_eq!(write(handle, 4, &second), SLHA_OK);
+
+        let q_coarse = [1.0f32; D_C];
+        let q_sign = [0u64; RESIDUAL_WORDS];
+        let mut output = [-7.0f32; 2];
+        // SAFETY: all buffers are local and sized according to the ABI contract.
+        let rc = unsafe {
+            slha_elastic_cache_score_strided(
+                handle,
+                1,
+                3,
+                2,
+                q_coarse.as_ptr(),
+                q_sign.as_ptr(),
+                output.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, SLHA_OK);
+        assert_eq!(output[0], output[1]);
+
+        let observations = [4.0f32, 1.0f32];
+        assert_eq!(
+            // SAFETY: the score buffer is local and contains exactly two elements.
+            unsafe {
+                slha_elastic_cache_observe_scores_strided(
+                    handle,
+                    1,
+                    3,
+                    observations.as_ptr(),
+                    observations.len(),
+                    1.0,
+                )
+            },
+            SLHA_OK
+        );
+
+        output.fill(123.0);
+        assert_eq!(slha_elastic_cache_clear_slot(handle, 4), SLHA_OK);
+        assert_eq!(
+            // SAFETY: all buffers remain valid; the missing second slot must
+            // leave the complete output unchanged.
+            unsafe {
+                slha_elastic_cache_score_strided(
+                    handle,
+                    1,
+                    3,
+                    2,
+                    q_coarse.as_ptr(),
+                    q_sign.as_ptr(),
+                    output.as_mut_ptr(),
+                )
+            },
+            SLHA_ERR_NOT_RESIDENT
+        );
+        assert_eq!(output, [123.0, 123.0]);
         assert_eq!(slha_elastic_cache_free(handle), SLHA_OK);
     }
 

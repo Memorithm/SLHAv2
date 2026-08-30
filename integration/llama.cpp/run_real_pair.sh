@@ -15,6 +15,9 @@ GPU_LAYERS=0
 CODEC="mixed"
 CACHE_TYPE_K="f16"
 CACHE_TYPE_V="f16"
+CCOS=0
+CCOS_BUDGET_BYTES=""
+CCOS_IMPORTANCE_TEMPERATURE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -30,6 +33,9 @@ while [[ $# -gt 0 ]]; do
         --codec) CODEC="${2:?missing value for --codec}"; shift 2 ;;
         --cache-type-k) CACHE_TYPE_K="${2:?missing value for --cache-type-k}"; shift 2 ;;
         --cache-type-v) CACHE_TYPE_V="${2:?missing value for --cache-type-v}"; shift 2 ;;
+        --ccos) CCOS=1; shift ;;
+        --ccos-budget-bytes) CCOS_BUDGET_BYTES="${2:?missing value for --ccos-budget-bytes}"; shift 2 ;;
+        --ccos-importance-temperature) CCOS_IMPORTANCE_TEMPERATURE="${2:?missing value for --ccos-importance-temperature}"; shift 2 ;;
         *) echo "ERROR: unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -45,6 +51,10 @@ compgen -G "$WEIGHTS_DIR/layer-*.slhw" >/dev/null || {
     echo "ERROR: no layer-*.slhw files in $WEIGHTS_DIR" >&2
     exit 2
 }
+if [[ "$CCOS" -ne 1 && ( -n "$CCOS_BUDGET_BYTES" || -n "$CCOS_IMPORTANCE_TEMPERATURE" ) ]]; then
+    echo "ERROR: CCOS budget/temperature options require --ccos" >&2
+    exit 2
+fi
 for tool in git cmake cargo python3 sha256sum g++; do
     command -v "$tool" >/dev/null || { echo "ERROR: $tool is required" >&2; exit 2; }
 done
@@ -71,6 +81,9 @@ printf 'context       : %s\n' "$CTX_SIZE"
 printf 'max tokens    : %s\n' "$MAX_TOKENS"
 printf 'threads       : %s\n' "$THREADS"
 printf 'GPU layers    : %s\n' "$GPU_LAYERS"
+printf 'external back.: %s\n' "$([[ "$CCOS" -eq 1 ]] && echo ccos_elastic || echo vector)"
+printf 'CCOS budget   : %s\n' "${CCOS_BUDGET_BYTES:-default-full-HOT}"
+printf 'CCOS temp.    : %s\n' "${CCOS_IMPORTANCE_TEMPERATURE:-default-1.0}"
 
 ( cd "$REPO_ROOT" && cargo --locked build --release -p slha-c )
 
@@ -145,6 +158,7 @@ run_arm() {
     unset SLHA_EXTERNAL_K SLHA_KV_MODE SLHA_SCORE_MODE SLHA_SCORE_LAYERS
     unset SLHA_SCORE_ORACLE SLHA_ORACLE_METRICS_JSON SLHA_SCALE_FIT_JSON
     unset SLHA_RANK_DATASET_DIR SLHA_WEIGHTS_DIR SLHA_CODEC
+    unset SLHA_CCOS SLHA_CCOS_BUDGET_BYTES SLHA_CCOS_IMPORTANCE_TEMPERATURE
 
     if [[ "$mode" == "external" ]]; then
         export SLHA_EXTERNAL_K=1
@@ -153,6 +167,12 @@ run_arm() {
         export SLHA_SCORE_LAYERS=all
         export SLHA_WEIGHTS_DIR="$WEIGHTS_DIR"
         export SLHA_CODEC="$CODEC"
+        if [[ "$CCOS" -eq 1 ]]; then
+            export SLHA_CCOS=1
+            [[ -z "$CCOS_BUDGET_BYTES" ]] || export SLHA_CCOS_BUDGET_BYTES="$CCOS_BUDGET_BYTES"
+            [[ -z "$CCOS_IMPORTANCE_TEMPERATURE" ]] || \
+                export SLHA_CCOS_IMPORTANCE_TEMPERATURE="$CCOS_IMPORTANCE_TEMPERATURE"
+        fi
     fi
 
     echo "== running $mode =="
@@ -200,13 +220,25 @@ python3 "$REPO_ROOT/integration/llama.cpp/scripts/compare_real_eval.py" \
     --llama-commit "$LLAMA_EXPECTED" \
     --output "$OUTPUT_DIR/comparison.json"
 
-python3 - "$OUTPUT_DIR/comparison.json" <<'PY'
+python3 - "$OUTPUT_DIR/comparison.json" "$CCOS" <<'PY'
 import json, sys
 p = sys.argv[1]
+ccos_requested = sys.argv[2] == "1"
 r = json.load(open(p))
 valid = r.get("validity", {}).get("external_replace_valid")
 if valid is not True:
     raise SystemExit(f"external SLHA replace summary is not valid: {valid!r}")
+validity = r.get("validity", {})
+backend = validity.get("external_backend")
+if ccos_requested:
+    if backend != "ccos_elastic":
+        raise SystemExit(f"CCOS was requested but measured backend is {backend!r}")
+    if validity.get("ccos_dense_no_cold") is not True:
+        raise SystemExit("dense CCOS run observed a COLD slot")
+    if validity.get("ccos_budget_failures") != 0:
+        raise SystemExit(
+            f"CCOS budget failures are non-zero: {validity.get('ccos_budget_failures')!r}"
+        )
 q = r["quality"]
 pf = r["performance"]
 mem = r["memory"]
@@ -220,5 +252,14 @@ print(f"baseline decode t/s : {pf['baseline_decode_tokens_per_second']}")
 print(f"external decode t/s : {pf['external_decode_tokens_per_second']}")
 print(f"baseline peak RSS KB: {mem['baseline_max_process_rss_kb']}")
 print(f"external peak RSS KB: {mem['external_max_process_rss_kb']}")
+print(f"external backend    : {validity.get('external_backend')}")
+if ccos_requested:
+    store = mem.get("external_slha_store") or {}
+    print(f"CCOS peak resident  : {store.get('peak_resident_bytes')} bytes")
+    print(f"CCOS peak offloaded : {store.get('peak_offloaded_bytes')} bytes")
+    print(f"CCOS HOT/WARM/COLD  : {store.get('peak_hot_slots')}/{store.get('peak_warm_slots')}/{store.get('peak_cold_slots')}")
+    print(f"CCOS compression ms : {pf.get('slha_compression_ms')}")
+    print(f"CCOS score ms       : {pf.get('slha_score_ms')}")
+    print(f"CCOS budget ms      : {pf.get('slha_budget_enforcement_ms')}")
 print(f"report              : {p}")
 PY

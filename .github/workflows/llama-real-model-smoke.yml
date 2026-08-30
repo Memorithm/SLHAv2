@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   real-model-smoke:
-    name: TinyStories 15M real autoregressive external-K
+    name: TinyStories 15M real autoregressive CCOS external-K
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -64,19 +64,24 @@ jobs:
           THREADS: "2"
           SLHA_CALIBRATION_MIN_ROWS: "16"
         run: |
-          # build_and_roundtrip.sh predates the normalized-patch helper used by
-          # the exact-head CI. Prepare its checkout with the same normalized
-          # patch first; the script then detects SLHA_INTEGRATION and does not
-          # invoke the legacy `patch` parser on the historical patch artifact.
           mkdir -p "$WORK"
           git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$WORK/llama.cpp"
-          awk '
-            /^diff --git / { in_hunk = 0 }
-            /^@@ / { in_hunk = 1 }
-            { if (in_hunk && length($0) == 0) print " "; else print $0 }
-          ' integration/llama.cpp/patches/0001-slha-k-passthrough.patch > "$WORK/0001.normalized.patch"
-          git -C "$WORK/llama.cpp" apply --recount --check "$WORK/0001.normalized.patch"
-          git -C "$WORK/llama.cpp" apply --recount "$WORK/0001.normalized.patch"
+          normalize_patch() {
+            awk '
+              /^diff --git / { in_hunk = 0 }
+              /^@@ / { in_hunk = 1 }
+              { if (in_hunk && length($0) == 0) print " "; else print $0 }
+            ' "$1" > "$2"
+          }
+          for patch_id in 0001-slha-k-passthrough 0002-slha-external-k 0003-slha-external-k-hardening; do
+            normalize_patch \
+              "integration/llama.cpp/patches/$patch_id.patch" \
+              "$WORK/$patch_id.normalized.patch"
+            git -C "$WORK/llama.cpp" apply --recount --check "$WORK/$patch_id.normalized.patch"
+            git -C "$WORK/llama.cpp" apply --recount "$WORK/$patch_id.normalized.patch"
+          done
+          cp integration/llama.cpp/shim/slha_external_k.hpp "$WORK/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_external_k.cpp "$WORK/llama.cpp/src/"
 
           bash integration/llama.cpp/build_and_roundtrip.sh collect
           test -f "$CALIB_DIR/calibration_manifest.json"
@@ -108,7 +113,7 @@ jobs:
           test "$(find "$WEIGHTS_DIR" -maxdepth 1 -name 'layer-*.slhw' -type f | wc -l)" -eq 6
           python3 -m json.tool "$WEIGHTS_DIR/manifest.json" >/dev/null
 
-      - name: Run paired baseline and physical SLHA decode
+      - name: Run paired baseline and physical CCOS SLHA decode
         env:
           WORK: ${{ runner.temp }}/slha-real-smoke/pair-work
         run: |
@@ -121,9 +126,10 @@ jobs:
             --threads 2 \
             --gpu-layers 0 \
             --codec mixed \
+            --ccos \
             --output-dir "$RUNNER_TEMP/slha-real-smoke/evidence"
 
-      - name: Validate and print real-model evidence
+      - name: Validate and print real-model CCOS evidence
         run: |
           REPORT="$RUNNER_TEMP/slha-real-smoke/evidence/comparison.json"
           python3 -m json.tool "$REPORT" >/dev/null
@@ -134,6 +140,14 @@ jobs:
           assert r["quality"]["baseline_generated_tokens"] > 0, r["quality"]
           assert r["quality"]["external_generated_tokens"] > 0, r["quality"]
           assert r["quality"]["next_token_logits"] is not None, r["quality"]
-          assert r["memory"]["external_slha_store"] is not None, r["memory"]
+          store = r["memory"]["external_slha_store"]
+          assert store is not None, r["memory"]
+          assert store.get("backend") == "ccos_elastic", store
+          assert store.get("peak_resident_bytes", 0) > 0, store
+          assert store.get("score_calls", 0) > 0, store
+          assert store.get("compression_ns", 0) > 0, store
+          assert store.get("peak_cold_slots") == 0, store
+          assert store.get("budget_failures") == 0, store
+          assert r["validity"]["ccos_dense_no_cold"] is True, r["validity"]
           print(json.dumps(r, sort_keys=True))
           PY

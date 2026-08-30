@@ -65,11 +65,16 @@ def main() -> None:
 
         external_log = root / "external.log"
         external_log.write_text(
-            "SLHA_EXTERNAL_K_STORE allocated_bytes=1234 capacity=64\n"
+            "SLHA_EXTERNAL_K_STORE valid=true backend=vector allocated_bytes=1234 capacity=64\n"
+            "SLHA_EXTERNAL_K_STORE valid=true backend=ccos_elastic peak_resident_bytes=960 peak_offloaded_bytes=32 peak_cold_slots=0 budget_failures=0 compression_ns=2500000 score_ns=4000000 budget_ns=500000\n"
             "SLHA_REPLACE_SUMMARY\n"
             "callbacks=2\nvalid=true\n\n"
         )
-        assert mod.parse_external_store(external_log.read_text())["allocated_bytes"] == 1234
+        parsed_store = mod.parse_external_store(external_log.read_text())
+        assert parsed_store["backend"] == "ccos_elastic"
+        assert parsed_store["peak_resident_bytes"] == 960
+        assert parsed_store["budget_failures"] == 0
+        assert mod.nanoseconds_to_milliseconds(parsed_store["compression_ns"]) == 2.5
         assert mod.parse_key_values_after_marker(
             external_log.read_text(), "SLHA_REPLACE_SUMMARY"
         )["valid"] is True

@@ -139,9 +139,17 @@ typedef struct {
 } SlhaElasticKvCacheStats;
 
 /* Elastic fixed-slot KV cache. Mutating/scoring calls are internally synchronized. */
+size_t slha_elastic_hot_resident_bytes(void);
+size_t slha_elastic_warm_resident_bytes(void);
 SlhaElasticKvCache* slha_elastic_cache_new(size_t hard_budget_bytes);
 int32_t slha_elastic_cache_free(SlhaElasticKvCache* cache);
 int32_t slha_elastic_cache_write(SlhaElasticKvCache* cache, size_t slot, const SciRustSlhaTile* tile);
+int32_t slha_elastic_cache_write_dense_budget(
+    SlhaElasticKvCache* cache,
+    size_t slot,
+    const SciRustSlhaTile* tile,
+    size_t target_resident_bytes
+);
 int32_t slha_elastic_cache_clear_slot(SlhaElasticKvCache* cache, size_t slot);
 int32_t slha_elastic_cache_clear(SlhaElasticKvCache* cache);
 int32_t slha_elastic_cache_score_range(
@@ -152,9 +160,26 @@ int32_t slha_elastic_cache_score_range(
     const uint64_t* q_sign,
     float* scores_out
 );
+int32_t slha_elastic_cache_score_strided(
+    SlhaElasticKvCache* cache,
+    size_t start_slot,
+    size_t stride,
+    size_t count,
+    const float* q_coarse,
+    const uint64_t* q_sign,
+    float* scores_out
+);
 int32_t slha_elastic_cache_observe_scores(
     SlhaElasticKvCache* cache,
     size_t start_slot,
+    const float* scores,
+    size_t count,
+    float temperature
+);
+int32_t slha_elastic_cache_observe_scores_strided(
+    SlhaElasticKvCache* cache,
+    size_t start_slot,
+    size_t stride,
     const float* scores,
     size_t count,
     float temperature

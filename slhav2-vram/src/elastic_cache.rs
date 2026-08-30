@@ -286,6 +286,126 @@ impl ElasticKvCache {
         self.verify_accounting()
     }
 
+    /// Transactionally write one dense-attention slot without ever charging
+    /// more than `target_resident_bytes` to resident KV storage.
+    ///
+    /// The target is clamped to the cache hard budget. Existing HOT slots may
+    /// be demoted to WARM to make room, but this operation never creates COLD
+    /// state because every active dense-attention key must remain scoreable.
+    /// The new value is stored directly as HOT when it fits or directly as
+    /// WARM (96 resident bytes + reversible residual backing) otherwise.
+    /// Any impossible target rolls the complete mutation back.
+    pub fn write_at_dense_budget(
+        &mut self,
+        slot: usize,
+        mut tile: [u8; codec::TILE_BYTES],
+        target_resident_bytes: usize,
+    ) -> Result<PhysicalTier, &'static str> {
+        let snapshot_slots = self.slots.clone();
+        let snapshot_resident = self.resident_bytes;
+        let snapshot_next_seq = self.next_seq;
+        let target = target_resident_bytes.min(self.config_budget_bytes());
+
+        let result = (|| {
+            if self.resident_bytes > self.config_budget_bytes() {
+                return Err("physical residency already exceeds hard budget");
+            }
+
+            let required_len = slot.checked_add(1).ok_or("slot index overflow")?;
+            if self.slots.len() < required_len {
+                self.slots
+                    .try_reserve(required_len - self.slots.len())
+                    .map_err(|_| "slot allocation failed")?;
+                self.slots.resize_with(required_len, || None);
+            }
+
+            let pinned = self.slots[slot]
+                .as_ref()
+                .is_some_and(|state| state.tier == PhysicalTier::Pinned);
+            let old_resident = self.slots[slot]
+                .as_ref()
+                .map_or(0, PhysicalSlot::allocated_bytes);
+            self.slots[slot] = None;
+            self.resident_bytes = self
+                .resident_bytes
+                .checked_sub(old_resident)
+                .ok_or("resident byte accounting underflow")?;
+
+            let minimum_new_resident = if pinned {
+                codec::TILE_BYTES
+            } else {
+                WARM_PACKED_BYTES
+            };
+
+            while self
+                .resident_bytes
+                .checked_add(minimum_new_resident)
+                .ok_or("resident byte accounting overflow")?
+                > target
+            {
+                let prior = self.resident_bytes;
+                if self.demote_lowest_importance(1) == 0 || self.resident_bytes == prior {
+                    return Err("dense write target cannot be satisfied without COLD residency");
+                }
+            }
+
+            Self::set_warm_flag(&mut tile, false);
+            let hot_fits = self
+                .resident_bytes
+                .checked_add(codec::TILE_BYTES)
+                .is_some_and(|bytes| bytes <= target);
+            let tier = if pinned {
+                PhysicalTier::Pinned
+            } else if hot_fits {
+                PhysicalTier::Hot
+            } else {
+                PhysicalTier::Warm
+            };
+
+            let (bytes, warm_residual) = match tier {
+                PhysicalTier::Hot | PhysicalTier::Pinned => (tile.to_vec(), None),
+                PhysicalTier::Warm => {
+                    let mut residual = [0u8; RESIDUAL_BYTES];
+                    residual.copy_from_slice(
+                        &tile[codec::RESIDUAL_OFFSET..codec::RESIDUAL_OFFSET + RESIDUAL_BYTES],
+                    );
+                    Self::set_warm_flag(&mut tile, true);
+                    (codec::pack_warm(&tile).to_vec(), Some(residual))
+                }
+                PhysicalTier::Cold => unreachable!("dense write never creates COLD state"),
+            };
+
+            let next_resident = self
+                .resident_bytes
+                .checked_add(bytes.len())
+                .ok_or("resident byte accounting overflow")?;
+            if next_resident > target || next_resident > self.config_budget_bytes() {
+                return Err("dense write would exceed resident hard budget");
+            }
+
+            self.slots[slot] = Some(PhysicalSlot {
+                bytes,
+                offloaded: None,
+                warm_residual,
+                tier,
+                seq: self.next_seq,
+                importance: 0.0,
+            });
+            self.next_seq = self.next_seq.saturating_add(1);
+            self.resident_bytes = next_resident;
+            self.verify_accounting()?;
+            Ok(tier)
+        })();
+
+        if result.is_err() {
+            self.slots = snapshot_slots;
+            self.resident_bytes = snapshot_resident;
+            self.next_seq = snapshot_next_seq;
+            debug_assert!(self.verify_accounting().is_ok());
+        }
+        result
+    }
+
     /// Remove one stable slot and all resident/backing bytes it owns.
     /// Returns false when the slot was already absent.
     pub fn clear_slot(&mut self, slot: usize) -> bool {
@@ -868,6 +988,49 @@ mod tests {
         assert_eq!(cache.resident_bytes(), before_resident);
         assert_eq!(cache.offloaded_bytes(), before_offloaded);
         assert_eq!(cache.evictions(), before_evictions);
+    }
+
+    #[test]
+    fn dense_budget_write_admits_warm_directly_and_rolls_back_impossible_target() {
+        let mut cache = ElasticKvCache::new(192, "dense-budget");
+
+        let tier = cache
+            .write_at_dense_budget(0, make_tile(1), WARM_PACKED_BYTES)
+            .unwrap();
+        assert_eq!(tier, PhysicalTier::Warm);
+        assert_eq!(cache.resident_bytes(), WARM_PACKED_BYTES);
+        assert_eq!(cache.offloaded_bytes(), RESIDUAL_BYTES);
+        assert_eq!(cache.counts(), (0, 1, 0, 0));
+
+        let before_counts = cache.counts();
+        let before_resident = cache.resident_bytes();
+        let before_offloaded = cache.offloaded_bytes();
+        assert!(cache
+            .write_at_dense_budget(1, make_tile(2), WARM_PACKED_BYTES)
+            .is_err());
+        assert_eq!(cache.counts(), before_counts);
+        assert_eq!(cache.resident_bytes(), before_resident);
+        assert_eq!(cache.offloaded_bytes(), before_offloaded);
+        assert_eq!(cache.tier(1), None);
+    }
+
+    #[test]
+    fn dense_budget_write_demotes_existing_hot_without_cold() {
+        let mut cache = ElasticKvCache::new(192, "dense-budget");
+        assert_eq!(
+            cache.write_at_dense_budget(0, make_tile(1), 192).unwrap(),
+            PhysicalTier::Hot
+        );
+        assert_eq!(cache.resident_bytes(), 128);
+
+        assert_eq!(
+            cache.write_at_dense_budget(1, make_tile(2), 192).unwrap(),
+            PhysicalTier::Warm
+        );
+        assert_eq!(cache.resident_bytes(), 192);
+        assert_eq!(cache.offloaded_bytes(), 64);
+        assert_eq!(cache.counts(), (0, 2, 0, 0));
+        cache.verify_accounting().unwrap();
     }
 
     #[test]
