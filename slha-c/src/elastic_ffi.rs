@@ -310,6 +310,34 @@ pub unsafe extern "C" fn slha_elastic_cache_write(
     })
 }
 
+/// Transactionally write a dense-attention tile under an exact resident target.
+///
+/// Existing HOT slots may become WARM, but the operation never creates COLD
+/// slots and never commits resident accounting above `target_resident_bytes`.
+///
+/// # Safety
+/// `tile` must point to one readable `SciRustSlhaTile`. Unaligned storage is
+/// accepted. `handle` may be any pointer value; only registered handles are
+/// accepted and the handle itself is never dereferenced.
+#[no_mangle]
+pub unsafe extern "C" fn slha_elastic_cache_write_dense_budget(
+    handle: *mut SlhaElasticKvCache,
+    slot: usize,
+    tile: *const SciRustSlhaTile,
+    target_resident_bytes: usize,
+) -> i32 {
+    ffi_status(|| {
+        let cache = cache_arc(handle)?;
+        // SAFETY: guaranteed by this function's caller contract.
+        let bytes = unsafe { read_tile_unaligned(tile) }?;
+        let result = lock_cache(&cache)
+            .write_at_dense_budget(slot, bytes, target_resident_bytes)
+            .map(|_| ())
+            .map_err(|error| cache_error("elastic dense-budget write failed", error));
+        result
+    })
+}
+
 /// Clear one stable slot and all backing owned by it.
 #[no_mangle]
 pub extern "C" fn slha_elastic_cache_clear_slot(
@@ -793,6 +821,37 @@ mod tests {
         assert_eq!(slha_elastic_warm_resident_bytes(), codec::WARM_BYTES);
         assert_eq!(slha_elastic_hot_resident_bytes(), 128);
         assert_eq!(slha_elastic_warm_resident_bytes(), 96);
+    }
+
+    #[test]
+    fn ffi_dense_budget_write_creates_warm_without_cold_and_rolls_back() {
+        let handle = slha_elastic_cache_new(192);
+        assert!(!handle.is_null());
+        let input = tile();
+
+        assert_eq!(
+            // SAFETY: test passes one live local tile and a registered handle.
+            unsafe { slha_elastic_cache_write_dense_budget(handle, 0, &input, 96) },
+            SLHA_OK
+        );
+        let mut snapshot = SlhaElasticKvCacheStats::default();
+        assert_eq!(stats(handle, &mut snapshot), SLHA_OK);
+        assert_eq!(snapshot.resident_bytes, 96);
+        assert_eq!(snapshot.offloaded_bytes, 32);
+        assert_eq!(snapshot.hot_slots, 0);
+        assert_eq!(snapshot.warm_slots, 1);
+        assert_eq!(snapshot.cold_slots, 0);
+
+        assert_eq!(
+            // SAFETY: the same tile remains readable for the second call.
+            unsafe { slha_elastic_cache_write_dense_budget(handle, 1, &input, 96) },
+            SLHA_ERR_DIMENSION
+        );
+        let mut after = SlhaElasticKvCacheStats::default();
+        assert_eq!(stats(handle, &mut after), SLHA_OK);
+        assert_eq!(after, snapshot);
+        assert_eq!(slha_elastic_cache_tier(handle, 1), SLHA_ELASTIC_TIER_ABSENT);
+        assert_eq!(slha_elastic_cache_free(handle), SLHA_OK);
     }
 
     #[test]

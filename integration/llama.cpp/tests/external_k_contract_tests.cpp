@@ -186,6 +186,8 @@ int main() {
     assert(stats.cold_slots == 0u);
     assert(stats.resident_bytes == 96u);
     assert(stats.offloaded_bytes == 32u);
+    assert(stats.peak_resident_bytes == 96u);
+    assert(stats.peak_offloaded_bytes == 32u);
     assert(stats.budget_enforcements == 1u);
     assert(!slha_external_k_write_tile(1, 0, &tile));
     assert(slha_external_k_store_stats_snapshot(&stats));

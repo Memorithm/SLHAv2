@@ -417,33 +417,47 @@ bool slha_external_k_write_tile(
         return false;
     }
 
-    const int32_t write_rc = slha_elastic_cache_write(g_ccos_cache, slot, tile);
-    if (write_rc != SLHA_OK) {
-        g_cache_misses.fetch_add(1, std::memory_order_relaxed);
+    const int32_t prior_tier = slha_elastic_cache_tier(g_ccos_cache, slot);
+    size_t prior_slot_resident = 0;
+    if (prior_tier == SLHA_ELASTIC_TIER_HOT || prior_tier == SLHA_ELASTIC_TIER_PINNED) {
+        prior_slot_resident = slha_elastic_hot_resident_bytes();
+    } else if (prior_tier == SLHA_ELASTIC_TIER_WARM) {
+        prior_slot_resident = slha_elastic_warm_resident_bytes();
+    }
+    if (before.resident_bytes < prior_slot_resident) {
+        g_budget_failures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-
-    SlhaElasticKvCacheStats after_write{};
-    if (!snapshot_ccos(&after_write)) {
-        g_cache_misses.fetch_add(1, std::memory_order_relaxed);
+    size_t hot_after_rewrite = 0;
+    const size_t resident_without_slot = before.resident_bytes - prior_slot_resident;
+    if (!checked_add(
+            resident_without_slot, slha_elastic_hot_resident_bytes(), &hot_after_rewrite)) {
+        g_budget_failures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    record_cache_snapshot(after_write);
-
-    if (after_write.resident_bytes > g_ccos_budget_bytes) {
+    const bool budget_action = hot_after_rewrite > g_ccos_budget_bytes;
+    if (budget_action) {
         g_budget_enforcements.fetch_add(1, std::memory_order_relaxed);
-        const auto budget_start = steady_clock::now();
-        const int32_t budget_rc =
-            slha_elastic_cache_demote_to(g_ccos_cache, g_ccos_budget_bytes);
-        const auto budget_end = steady_clock::now();
+    }
+
+    const auto budget_start = steady_clock::now();
+    const int32_t write_rc = slha_elastic_cache_write_dense_budget(
+        g_ccos_cache, slot, tile, g_ccos_budget_bytes);
+    const auto budget_end = steady_clock::now();
+    if (budget_action) {
+        // This is wall time for the complete budget-aware admission call. It
+        // includes the direct HOT/WARM write because admission and mutation are
+        // intentionally one atomic operation; it is not presented as a pure
+        // codec-only timing.
         g_budget_ns.fetch_add(
             static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 budget_end - budget_start).count()),
             std::memory_order_relaxed);
-        if (budget_rc != SLHA_OK) {
-            g_budget_failures.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
+    }
+    if (write_rc != SLHA_OK) {
+        g_budget_failures.fetch_add(1, std::memory_order_relaxed);
+        g_cache_misses.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
 
     SlhaElasticKvCacheStats final_stats{};
