@@ -18,6 +18,7 @@ CACHE_TYPE_V="f16"
 CCOS=0
 CCOS_BUDGET_BYTES=""
 CCOS_IMPORTANCE_TEMPERATURE=""
+CCOS_COLD_CYCLE_STEP=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --ccos) CCOS=1; shift ;;
         --ccos-budget-bytes) CCOS_BUDGET_BYTES="${2:?missing value for --ccos-budget-bytes}"; shift 2 ;;
         --ccos-importance-temperature) CCOS_IMPORTANCE_TEMPERATURE="${2:?missing value for --ccos-importance-temperature}"; shift 2 ;;
+        --ccos-cold-cycle-step) CCOS_COLD_CYCLE_STEP="${2:?missing value for --ccos-cold-cycle-step}"; shift 2 ;;
         *) echo "ERROR: unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -51,8 +53,8 @@ compgen -G "$WEIGHTS_DIR/layer-*.slhw" >/dev/null || {
     echo "ERROR: no layer-*.slhw files in $WEIGHTS_DIR" >&2
     exit 2
 }
-if [[ "$CCOS" -ne 1 && ( -n "$CCOS_BUDGET_BYTES" || -n "$CCOS_IMPORTANCE_TEMPERATURE" ) ]]; then
-    echo "ERROR: CCOS budget/temperature options require --ccos" >&2
+if [[ "$CCOS" -ne 1 && ( -n "$CCOS_BUDGET_BYTES" || -n "$CCOS_IMPORTANCE_TEMPERATURE" || -n "$CCOS_COLD_CYCLE_STEP" ) ]]; then
+    echo "ERROR: CCOS budget/temperature/lifecycle options require --ccos" >&2
     exit 2
 fi
 for tool in git cmake cargo python3 sha256sum g++; do
@@ -143,6 +145,7 @@ cmake --build "$LLAMA_DIR/build" -j"$(nproc)" --target llama
 g++ -O2 -std=c++17 -Wall -Wextra -Werror \
     -I"$LLAMA_DIR/include" \
     -I"$LLAMA_DIR/ggml/include" \
+    -I"$LLAMA_DIR/src" \
     "$REPO_ROOT/integration/llama.cpp/tools/slha_real_eval.cpp" \
     -L"$LLAMA_DIR/build/bin" -lllama -lggml -lggml-base -lggml-cpu \
     -Wl,-rpath,"$LLAMA_DIR/build/bin" \
@@ -176,22 +179,27 @@ run_arm() {
     fi
 
     echo "== running $mode =="
+    local eval_args=(
+        --model "$MODEL"
+        --prompt "$PROMPT"
+        --output-json "$json"
+        --logits-bin "$logits"
+        --max-tokens "$MAX_TOKENS"
+        --context-size "$CTX_SIZE"
+        --threads "$THREADS"
+        --gpu-layers "$GPU_LAYERS"
+        --cache-type-k "$CACHE_TYPE_K"
+        --cache-type-v "$CACHE_TYPE_V"
+    )
+    if [[ "$mode" == "external" && -n "$CCOS_COLD_CYCLE_STEP" ]]; then
+        eval_args+=(--ccos-cold-cycle-step "$CCOS_COLD_CYCLE_STEP")
+    fi
+
     set +e
     LC_ALL=C /usr/bin/time \
         -f 'max_rss_kb=%M\nelapsed_s=%e\nuser_s=%U\nsys_s=%S' \
         -o "$time_file" \
-        "$EVAL_BIN" \
-        --model "$MODEL" \
-        --prompt "$PROMPT" \
-        --output-json "$json" \
-        --logits-bin "$logits" \
-        --max-tokens "$MAX_TOKENS" \
-        --context-size "$CTX_SIZE" \
-        --threads "$THREADS" \
-        --gpu-layers "$GPU_LAYERS" \
-        --cache-type-k "$CACHE_TYPE_K" \
-        --cache-type-v "$CACHE_TYPE_V" \
-        2>&1 | tee "$log"
+        "$EVAL_BIN" "${eval_args[@]}" 2>&1 | tee "$log"
     local rc=${PIPESTATUS[0]}
     set -e
     if [[ "$rc" -ne 0 ]]; then

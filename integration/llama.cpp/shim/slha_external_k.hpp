@@ -61,6 +61,23 @@ int32_t slha_external_k_score_tiles(
     float * scores_out
 );
 
+/**
+ * Move every currently active CCOS key to COLD backing storage.
+ *
+ * This is a quiescent lifecycle operation: callers must invoke it only after a
+ * synchronous llama_decode has returned and before another decode starts. Dense
+ * attention cannot score COLD keys. The operation is fail-closed and leaves the
+ * cache unchanged on an offload failure.
+ */
+bool slha_external_k_ccos_offload_quiescent();
+
+/**
+ * Restore a cache previously offloaded with
+ * slha_external_k_ccos_offload_quiescent(). HOT/WARM representations are
+ * restored exactly before the next decode is allowed to run.
+ */
+bool slha_external_k_ccos_restore_quiescent();
+
 /** Reset logical live tiles while retaining configured backend state. */
 void slha_external_k_reset_store();
 
@@ -102,6 +119,11 @@ struct slha_external_k_store_stats {
     uint64_t budget_failures = 0;
     uint64_t cache_hits = 0;
     uint64_t cache_misses = 0;
+    uint64_t quiescent_offload_calls = 0;
+    uint64_t quiescent_restore_calls = 0;
+    uint64_t quiescent_restored_slots = 0;
+    uint64_t quiescent_offload_ns = 0;
+    uint64_t quiescent_restore_ns = 0;
     uint64_t compression_ns = 0;
     uint64_t score_ns = 0;
     uint64_t budget_ns = 0;
