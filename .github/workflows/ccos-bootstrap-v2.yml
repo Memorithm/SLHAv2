@@ -24,7 +24,9 @@ jobs:
           components: rustfmt,clippy
 
       - name: Apply fixed-slot cache and C ABI patch
-        run: python3 tools/ccos_bootstrap.py
+        run: |
+          python3 tools/ccos_bootstrap.py
+          python3 tools/ccos_fix_clippy.py
 
       - name: Format and refresh lockfile
         run: |
