@@ -1,0 +1,65 @@
+name: CCOS CI fix
+
+on:
+  push:
+    branches:
+      - feat/llama-ccos-elastic-k
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt,clippy
+
+      - name: Apply borrow-lifetime fix
+        run: python3 tools/ccos_ci_fix.py
+
+      - name: Format
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+
+      - name: Build C ABI
+        run: cargo build --locked --release -p slha-c
+
+      - name: Test elastic cache and C ABI
+        run: cargo test --locked -p slhav2-vram -p slha-c
+
+      - name: Clippy selected crates
+        run: cargo clippy --locked -p slhav2-vram -p slha-c --all-targets -- -D warnings
+
+      - name: Compile public C header strictly
+        run: |
+          cat > "$RUNNER_TEMP/ccos_header_smoke.c" <<'EOF'
+          #include "slha.h"
+          int main(void) {
+              SlhaElasticKvCache *cache = slha_elastic_cache_new(4096);
+              SlhaElasticKvCacheStats stats = {0};
+              (void) slha_elastic_cache_stats(cache, &stats);
+              (void) slha_elastic_cache_free(cache);
+              return SLHA_ERR_NOT_RESIDENT == -10 ? 0 : 1;
+          }
+          EOF
+          cc -std=c11 -Wall -Wextra -Werror -I slha-c/include -c "$RUNNER_TEMP/ccos_header_smoke.c" -o "$RUNNER_TEMP/ccos_header_smoke.o"
+
+      - name: Commit validated fix and remove bootstrap artifacts
+        run: |
+          git diff --check
+          git config user.name "MEMOPERF"
+          git config user.email "contact@checkupauto.fr"
+          git rm tools/ccos_ci_fix.py .github/workflows/ccos-ci-fix.yml
+          git add slha-c/src/elastic_ffi.rs
+          git diff --cached --check
+          git commit -m "fix(ccos): harden cache FFI lifetimes and formatting"
+          git push origin HEAD:feat/llama-ccos-elastic-k
