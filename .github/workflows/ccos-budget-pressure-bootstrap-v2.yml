@@ -79,6 +79,7 @@ jobs:
           cmake --build "$LLAMA/build-slha" -j2 --target llama
           g++ -O2 -std=c++17 -Wall -Wextra -Werror \
             -I"$LLAMA/include" -I"$LLAMA/ggml/include" -I"$LLAMA/src" \
+            -I"$GITHUB_WORKSPACE/slha-c/include" \
             integration/llama.cpp/tools/slha_real_eval.cpp \
             -L"$LLAMA/build-slha/bin" -lllama -lggml -lggml-base -lggml-cpu \
             -Wl,-rpath,"$LLAMA/build-slha/bin" -o "$RUNNER_TEMP/slha-real-eval"
