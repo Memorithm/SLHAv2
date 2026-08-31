@@ -1,3 +1,22 @@
+# SLHAv2 Agent Bootstrap Contract
+
+Before any autonomous coding, real-model integration, KV-format change, performance/quality promotion, cross-repository integration, PR creation, or merge decision, fetch and read the persistent roadmap:
+
+```bash
+git fetch origin agent/ecosystem-roadmap && \
+git show origin/agent/ecosystem-roadmap:.agent/SLHAV2_ECOSYSTEM_ROADMAP.yaml
+```
+
+The off-main roadmap is authoritative for current strategy, ecosystem ownership, real-model milestones, and promotion state. If it cannot be fetched or read, fail closed for major model-integration, KV-format, quality-promotion, performance-promotion, cross-repository integration, or merge decisions. Read-only diagnosis is allowed.
+
+Reread it at every session start, before selecting the next major phase, before integrating ElasticXxx/NNIS/FLAT-ATTENTION/Forge/Hub/Verify/SciCapsule, after strategy or quality-budget changes, and before relevant PR/merge decisions.
+
+Do not merge the roadmap itself into the default branch unless the user explicitly requests it.
+
+The workspace intelligence below remains useful as a local implementation snapshot, but verify it against the current head and the persistent roadmap before relying on milestone or CI-status statements.
+
+---
+
 # AGENTS.md — SLHAv2 Workspace Intelligence
 
 ## Project
@@ -57,10 +76,8 @@ SLHAV2_REQUIRE_CUDA=1 cargo test -p slhav2-vram --features cuda -- --ignored --n
 (cd integration/llama.cpp/tests && make test && make compile-check LLAMA_CPP_DIR=/path/to/llama.cpp)
 ```
 
-## CI Status (current commit)
-- ✅ Gate A: Formatting passes
-- ✅ Gate B: Clippy passes (0 warnings)
-- ✅ Gate C: workspace test suite green (`cargo test --workspace --all-features` — 412 tests incl. elastic 46; CUDA tests are `#[ignore]`d and compile-only in CI but **runtime-validated on NVIDIA Thor during the mission: 12/12**)
-- ✅ Elastic standalone extraction: 46 tests pass outside the workspace, zero SLHA/CCOS references
-- ✅ llama shim: 7 test binaries ALL PASS + syntax check against real ggml headers
-- ✅ Python wheel: built/installed/imported (aarch64); MCP: full lifecycle verified
+## CI Status (historical snapshot; verify current head before relying on this section)
+- Gate A: Formatting was reported passing at the snapshot that created this file.
+- Gate B: Clippy was reported passing at that snapshot.
+- Gate C: workspace tests were reported green at that snapshot; CUDA tests were compile-only in CI and separately hardware-validated on NVIDIA Thor during that mission.
+- Elastic standalone extraction, llama shim, Python wheel, and MCP were reported validated at that snapshot.
