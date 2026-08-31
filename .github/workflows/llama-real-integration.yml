@@ -68,6 +68,7 @@ jobs:
           cp integration/llama.cpp/shim/slha_llama.cpp "$RUNNER_TEMP/llama.cpp/src/"
           cp integration/llama.cpp/shim/slha_external_k.hpp "$RUNNER_TEMP/llama.cpp/src/"
           cp integration/llama.cpp/shim/slha_external_k.cpp "$RUNNER_TEMP/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_external_k_runtime.cpp "$RUNNER_TEMP/llama.cpp/src/"
           cp integration/llama.cpp/shim/slha_replace_counters.hpp "$RUNNER_TEMP/llama.cpp/src/"
           cp integration/llama.cpp/shim/slha_replace_counters.cpp "$RUNNER_TEMP/llama.cpp/src/"
           cp integration/llama.cpp/shim/slha_layer_mask.hpp "$RUNNER_TEMP/llama.cpp/src/"
