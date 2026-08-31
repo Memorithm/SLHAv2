@@ -9,7 +9,110 @@ diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
      target_compile_definitions(llama PRIVATE SLHA_INTEGRATION)
      target_include_directories(llama PRIVATE ${SLHA_INCLUDE_DIR})
      target_link_libraries(llama PRIVATE ${SLHA_LIB})
-diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+diff --git a/src/slha_external_k_runtime.cpp b/src/slha_external_k_runtime.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/slha_external_k_runtime.cpp
+@@ -0,0 +1,99 @@
++// Keep the existing external-K implementation and lifecycle extensions in one
++// translation unit. The suffix extension needs the private CCOS handle but does
++// not expose it through any public header or C ABI.
++#include "slha_external_k.cpp"
++
++bool slha_external_k_trim_suffix(
++    size_t new_high_water,
++    size_t old_high_water
++) {
++    if (!slha_external_k_enabled() || new_high_water > old_high_water) {
++        return false;
++    }
++    if (new_high_water == old_high_water) {
++        return true;
++    }
++
++    if (!slha_external_k_ccos_enabled()) {
++        std::lock_guard<std::mutex> lock(g_slha_tile_store.mutex);
++        const size_t n_layers = g_slha_tile_store.n_layers;
++        const size_t capacity = g_slha_tile_store.capacity;
++        const size_t tile_bytes = g_slha_tile_store.tile_bytes;
++        if (n_layers == 0 || tile_bytes == 0 || old_high_water > capacity) {
++            return false;
++        }
++
++        // Preflight every tile first. A failed trim must not intentionally
++        // create a partial suffix/hole in the dense external store.
++        for (size_t layer = 0; layer < n_layers; ++layer) {
++            for (size_t position = new_high_water; position < old_high_water; ++position) {
++                size_t index = 0;
++                size_t base = 0;
++                if (!checked_mul(layer, capacity, &base) ||
++                    !checked_add(base, position, &index) ||
++                    index >= g_slha_tile_store.valid.size() ||
++                    g_slha_tile_store.valid[index] == 0u) {
++                    return false;
++                }
++            }
++        }
++
++        for (size_t layer = 0; layer < n_layers; ++layer) {
++            for (size_t position = new_high_water; position < old_high_water; ++position) {
++                size_t index = 0;
++                size_t base = 0;
++                size_t byte_delta = 0;
++                size_t byte_offset = 0;
++                if (!checked_mul(layer, capacity, &base) ||
++                    !checked_add(base, position, &index) ||
++                    !checked_mul(index, tile_bytes, &byte_delta) ||
++                    !checked_add(g_slha_tile_store.tile_base_offset, byte_delta, &byte_offset) ||
++                    byte_offset > g_slha_tile_store.tiles.size() ||
++                    tile_bytes > g_slha_tile_store.tiles.size() - byte_offset) {
++                    return false;
++                }
++                std::fill(
++                    g_slha_tile_store.tiles.begin() + static_cast<std::ptrdiff_t>(byte_offset),
++                    g_slha_tile_store.tiles.begin() + static_cast<std::ptrdiff_t>(byte_offset + tile_bytes),
++                    0u);
++                g_slha_tile_store.valid[index] = 0u;
++            }
++        }
++        return true;
++    }
++
++    std::lock_guard<std::mutex> lock(g_ccos_mutex);
++    if (!g_ccos_cache || g_ccos_n_layers == 0 || old_high_water > g_ccos_capacity) {
++        return false;
++    }
++
++    // CCOS uses interleaved stable slots: position*n_layers + layer. Preflight
++    // all suffix slots before releasing any one of them.
++    for (size_t position = new_high_water; position < old_high_water; ++position) {
++        for (size_t layer = 0; layer < g_ccos_n_layers; ++layer) {
++            size_t slot = 0;
++            if (!ccos_geometry_slot(static_cast<int32_t>(layer), position, &slot) ||
++                slha_elastic_cache_tier(g_ccos_cache, slot) == SLHA_ELASTIC_TIER_ABSENT) {
++                return false;
++            }
++        }
++    }
++
++    for (size_t position = new_high_water; position < old_high_water; ++position) {
++        for (size_t layer = 0; layer < g_ccos_n_layers; ++layer) {
++            size_t slot = 0;
++            if (!ccos_geometry_slot(static_cast<int32_t>(layer), position, &slot) ||
++                slha_elastic_cache_clear_slot(g_ccos_cache, slot) != SLHA_OK) {
++                return false;
++            }
++        }
++    }
++
++    SlhaElasticKvCacheStats after{};
++    if (!snapshot_ccos(&after)) {
++        return false;
++    }
++    record_cache_snapshot(after);
++    return true;
++}
+ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -7,6 +7,7 @@
@@ -83,7 +186,7 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 +            k_stream.push_back(has_k && !slha_external_k
 +                ? ggml_view_2d(ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2])
 +                : nullptr);
-             v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
+             v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa, kv_size, v->nb[1], s*k->nb[2]) : nullptr);
          }
  
 @@ -1191,6 +1216,12 @@ bool llama_kv_cache::get_can_shift() const {
