@@ -28,6 +28,66 @@ bool slha_external_k_ccos_enabled();
 bool slha_external_k_validate_environment(std::string * error);
 
 /**
+ * Validate the llama.cpp runtime geometry supported by physical external-K.
+ *
+ * The current integration intentionally supports one KV stream and one logical
+ * sequence. A unified KV cache can otherwise expose multiple logical sequences
+ * through one physical stream; accepting that shape would silently overstate
+ * lifecycle support. Keep this policy in the shim so standalone contract tests
+ * exercise the same predicate used by the engine patch.
+ */
+inline bool slha_external_k_validate_runtime(
+    size_t n_stream,
+    size_t n_seq_max,
+    std::string * error
+) {
+    if (!slha_external_k_enabled()) {
+        return true;
+    }
+    if (n_stream != 1u) {
+        if (error) {
+            *error = "SLHA external-K currently requires exactly one KV stream";
+        }
+        return false;
+    }
+    if (n_seq_max != 1u) {
+        if (error) {
+            *error = "SLHA external-K currently requires exactly one logical sequence";
+        }
+        return false;
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+/**
+ * State persistence is unsupported until the physical external-K payload and
+ * its liveness/tier metadata are part of llama.cpp's state format.
+ *
+ * Returning false here is deliberate: serializing only llama.cpp's constant-K
+ * sentinel plus V cache would create a state file that appears valid but cannot
+ * reconstruct the SLHA attention state.
+ */
+inline bool slha_external_k_state_serialization_supported() {
+    return !slha_external_k_enabled();
+}
+
+/**
+ * Sparse sequence mutation is unsupported until llama cell liveness is
+ * synchronized with the external store and scorer.
+ *
+ * seq_rm/seq_keep/seq_cp can create holes or new logical references without
+ * rewriting K. The current external scorer intentionally assumes a dense live
+ * prefix, so these operations must fail closed rather than leave stale or
+ * missing physical tiles behind llama.cpp metadata.
+ */
+inline bool slha_external_k_sparse_sequence_mutation_supported() {
+    return !slha_external_k_enabled();
+}
+
+/**
  * Prepare physical external-K storage from llama.cpp's real KV capacity.
  *
  * Legacy external-K allocates the existing C++ tile vector. With SLHA_CCOS=1,
