@@ -19,7 +19,7 @@ jobs:
   real-model-smoke:
     name: TinyStories 15M real autoregressive CCOS external-K
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -52,6 +52,9 @@ jobs:
               f.write(text * 120)
           PY
           test -s "$RUNNER_TEMP/slha-real-smoke/calibration.txt"
+          test -s integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt
+          test "$(sha256sum "$RUNNER_TEMP/slha-real-smoke/calibration.txt" | awk '{print $1}')" != \
+               "$(sha256sum integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt | awk '{print $1}')"
 
       - name: Collect real K activations
         env:
@@ -113,7 +116,7 @@ jobs:
           test "$(find "$WEIGHTS_DIR" -maxdepth 1 -name 'layer-*.slhw' -type f | wc -l)" -eq 6
           python3 -m json.tool "$WEIGHTS_DIR/manifest.json" >/dev/null
 
-      - name: Run paired baseline and full-HOT physical CCOS decode
+      - name: Run paired baseline and full-HOT physical CCOS decode plus held-out perplexity
         env:
           WORK: ${{ runner.temp }}/slha-real-smoke/pair-work
         run: |
@@ -127,19 +130,47 @@ jobs:
             --gpu-layers 0 \
             --codec mixed \
             --ccos \
+            --perplexity-corpus integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt \
+            --perplexity-chunks 2 \
             --output-dir "$RUNNER_TEMP/slha-real-smoke/evidence-hot"
 
-      - name: Validate full-HOT real-model CCOS evidence
+      - name: Validate full-HOT real-model CCOS and paired perplexity evidence
         run: |
           REPORT="$RUNNER_TEMP/slha-real-smoke/evidence-hot/comparison.json"
+          BASE_PPL="$RUNNER_TEMP/slha-real-smoke/evidence-hot/baseline.perplexity.json"
+          EXT_PPL="$RUNNER_TEMP/slha-real-smoke/evidence-hot/external.perplexity.json"
           python3 -m json.tool "$REPORT" >/dev/null
-          python3 - "$REPORT" <<'PY'
-          import json, sys
+          python3 -m json.tool "$BASE_PPL" >/dev/null
+          python3 -m json.tool "$EXT_PPL" >/dev/null
+          python3 - "$REPORT" "$BASE_PPL" "$EXT_PPL" integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt <<'PY'
+          import hashlib, json, math, sys
           r = json.load(open(sys.argv[1]))
+          baseline_ppl = json.load(open(sys.argv[2]))
+          external_ppl = json.load(open(sys.argv[3]))
+          corpus_path = sys.argv[4]
+          corpus_sha = hashlib.sha256(open(corpus_path, "rb").read()).hexdigest()
+
           assert r["validity"]["external_replace_valid"] is True, r["validity"]
           assert r["quality"]["baseline_generated_tokens"] > 0, r["quality"]
           assert r["quality"]["external_generated_tokens"] > 0, r["quality"]
           assert r["quality"]["next_token_logits"] is not None, r["quality"]
+          ppl = r["quality"]["perplexity"]
+          assert ppl is not None, r["quality"]
+          assert ppl["corpus_sha256"] == corpus_sha, ppl
+          for key in ("baseline", "external", "absolute_delta"):
+              assert math.isfinite(float(ppl[key])), (key, ppl[key])
+          assert float(ppl["baseline"]) > 0.0, ppl
+          assert float(ppl["external"]) > 0.0, ppl
+
+          assert baseline_ppl["corpus_sha256"] == corpus_sha, baseline_ppl
+          assert external_ppl["corpus_sha256"] == corpus_sha, external_ppl
+          assert baseline_ppl["context_size"] == external_ppl["context_size"] == 128
+          assert baseline_ppl["batch_size"] == external_ppl["batch_size"] == 128
+          assert baseline_ppl["parallel"] == external_ppl["parallel"] == 1
+          assert baseline_ppl["chunks_requested"] == external_ppl["chunks_requested"] == 2
+          assert external_ppl["external_replace_valid"] is True, external_ppl
+          assert external_ppl["external_backend"] == "ccos_elastic", external_ppl
+
           store = r["memory"]["external_slha_store"]
           assert store is not None, r["memory"]
           assert store.get("backend") == "ccos_elastic", store
@@ -149,7 +180,13 @@ jobs:
           assert store.get("peak_cold_slots") == 0, store
           assert store.get("budget_failures") == 0, store
           assert r["validity"]["ccos_dense_no_cold"] is True, r["validity"]
-          print(json.dumps(r, sort_keys=True))
+          print(json.dumps({
+              "baseline_perplexity": ppl["baseline"],
+              "external_perplexity": ppl["external"],
+              "absolute_delta": ppl["absolute_delta"],
+              "corpus_sha256": corpus_sha,
+              "external_backend": external_ppl["external_backend"],
+          }, sort_keys=True))
           PY
 
       - name: Run WARM budget pressure with quiescent COLD cycle
