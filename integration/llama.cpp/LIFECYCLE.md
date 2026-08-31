@@ -28,6 +28,8 @@ The integration does **not** silently emulate the following operations:
 
 - more than one logical sequence (`n_seq_max != 1`), even when llama.cpp uses a
   unified single physical KV stream;
+- sparse sequence mutation through `seq_rm`, `seq_keep`, or a non-trivial
+  `seq_cp`; these APIs can change cell liveness without rewriting physical K;
 - non-zero sequence position shifts (`seq_add`), because compressed RoPE K is
   not rotated after a logical shift;
 - sequence position division (`seq_div`);
@@ -38,10 +40,11 @@ The integration does **not** silently emulate the following operations:
 These paths are rejected before they can claim a valid external-K result.
 Ordinary llama.cpp baseline mode is not restricted by this policy.
 
-## Not yet claimed: sparse context reuse
+## Next lifecycle increment: sparse context reuse
 
 `seq_rm`, `seq_keep`, same-stream `seq_cp`, SWA cell reuse, and arbitrary reuse
-of holes inside the KV address space require a separate liveness design.
+of holes inside the KV address space require a separate liveness design. They
+remain gated in external-K until that design is implemented and validated.
 
 Today the external scorer uses a per-layer high-water mark and scores a dense
 prefix of cache addresses. The CCOS ABI already exposes
@@ -51,9 +54,10 @@ while retaining stale physical data is only safe as long as llama.cpp's KQ mask
 continues to exclude that cell.
 
 The next lifecycle increment must therefore synchronize llama cell liveness with
-external-K scoring, not merely reclaim storage. Until that work has a dedicated
-real-model trim/reuse test, sparse context reuse is intentionally not presented
-as supported.
+external-K scoring, not merely reclaim storage. The intended design keeps the
+existing dense fast path unchanged and uses sparse scoring only after a cell
+liveness mutation has introduced a hole. Sparse context reuse will not be
+presented as supported until a dedicated real-model trim/reuse test passes.
 
 ## State-format requirement for future persistence
 
