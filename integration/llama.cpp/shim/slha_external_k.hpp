@@ -122,6 +122,21 @@ int32_t slha_external_k_score_tiles(
 );
 
 /**
+ * Remove a fully populated dense suffix [new_high_water, old_high_water) from
+ * every external-K layer.
+ *
+ * This is a quiescent lifecycle operation. The complete suffix is preflighted
+ * before mutation, so a missing tile rejects the trim instead of intentionally
+ * creating a hole. The vector backend invalidates/zeroes its slots; the CCOS
+ * backend releases the corresponding fixed slots. The caller is responsible
+ * for lowering llama-side high-water metadata only after this returns true.
+ */
+bool slha_external_k_trim_suffix(
+    size_t new_high_water,
+    size_t old_high_water
+);
+
+/**
  * Move every currently active CCOS key to COLD backing storage.
  *
  * This is a quiescent lifecycle operation: callers must invoke it only after a
