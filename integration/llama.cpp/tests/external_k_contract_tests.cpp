@@ -145,6 +145,34 @@ int main() {
     assert(stats.tile_backing_capacity_bytes >= stats.logical_tile_bytes);
     assert(stats.validity_backing_capacity_bytes >= 3u * 4096u);
 
+    const SciRustSlhaTile trim_tile = make_tile();
+
+    // Vector suffix trim is all-or-nothing across every layer. A complete
+    // suffix is invalidated; a missing tile in the preflight leaves all other
+    // suffix tiles intact.
+    assert(slha_external_k_prepare_store(8));
+    for (int32_t layer = 0; layer < 3; ++layer) {
+        assert(slha_external_k_write_tile(layer, 0, &trim_tile));
+        assert(slha_external_k_write_tile(layer, 1, &trim_tile));
+    }
+    assert(slha_external_k_trim_suffix(1, 1));
+    assert(slha_external_k_trim_suffix(1, 2));
+    for (int32_t layer = 0; layer < 3; ++layer) {
+        assert(g_slha_tile_store.read_range(layer, 0, 1) != nullptr);
+        assert(g_slha_tile_store.read_range(layer, 1, 1) == nullptr);
+    }
+
+    assert(slha_external_k_prepare_store(8));
+    for (int32_t layer = 0; layer < 3; ++layer) {
+        assert(slha_external_k_write_tile(layer, 0, &trim_tile));
+    }
+    assert(slha_external_k_write_tile(0, 1, &trim_tile));
+    assert(slha_external_k_write_tile(1, 1, &trim_tile));
+    assert(!slha_external_k_trim_suffix(1, 2));
+    assert(g_slha_tile_store.read_range(0, 1, 1) != nullptr);
+    assert(g_slha_tile_store.read_range(1, 1, 1) != nullptr);
+    assert(g_slha_tile_store.read_range(2, 0, 1) != nullptr);
+
     // CCOS with no explicit pressure owns the physical tiles in Rust and does
     // not allocate the context-sized C++ tile/validity vectors.
     set_valid_ccos_env();
@@ -172,6 +200,41 @@ int main() {
     assert(stats.write_calls == 1u);
     assert(stats.score_calls == 1u);
     assert(stats.observe_calls == 1u);
+
+    // CCOS suffix trim releases the stable fixed slots. The same preflight
+    // guarantee prevents a partially populated suffix from being partially
+    // cleared.
+    set_valid_ccos_env("768");
+    assert(slha_external_k_prepare_store(8));
+    for (int32_t layer = 0; layer < 3; ++layer) {
+        assert(slha_external_k_write_tile(layer, 0, &tile));
+        assert(slha_external_k_write_tile(layer, 1, &tile));
+    }
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 6u);
+    assert(stats.resident_bytes == 6u * 128u);
+    assert(slha_external_k_trim_suffix(1, 2));
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == 3u);
+    assert(stats.resident_bytes == 3u * 128u);
+    assert(slha_external_k_score_tiles(nullptr, 0, 0, 1, q_coarse, q_sign, &score) == SLHA_OK);
+    assert(slha_external_k_score_tiles(nullptr, 0, 1, 1, q_coarse, q_sign, &score) == SLHA_ERR_NOT_RESIDENT);
+
+    set_valid_ccos_env("768");
+    assert(slha_external_k_prepare_store(8));
+    for (int32_t layer = 0; layer < 3; ++layer) {
+        assert(slha_external_k_write_tile(layer, 0, &tile));
+    }
+    assert(slha_external_k_write_tile(0, 1, &tile));
+    assert(slha_external_k_write_tile(1, 1, &tile));
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    const size_t before_failed_trim_slots = stats.hot_slots;
+    assert(before_failed_trim_slots == 5u);
+    assert(!slha_external_k_trim_suffix(1, 2));
+    assert(slha_external_k_store_stats_snapshot(&stats));
+    assert(stats.hot_slots == before_failed_trim_slots);
+    assert(slha_external_k_score_tiles(nullptr, 0, 1, 1, q_coarse, q_sign, &score) == SLHA_OK);
+    assert(slha_external_k_score_tiles(nullptr, 1, 1, 1, q_coarse, q_sign, &score) == SLHA_OK);
 
     // A 96-byte budget forces the first active key HOT -> WARM. A second active
     // key would require at least 192 resident bytes, so it must fail BEFORE the
