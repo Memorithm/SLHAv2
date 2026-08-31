@@ -7,13 +7,22 @@ git fetch origin agent/ecosystem-roadmap && \
 git show origin/agent/ecosystem-roadmap:.agent/SLHAV2_ECOSYSTEM_ROADMAP.yaml
 ```
 
-The off-main roadmap is authoritative for current strategy, ecosystem ownership, real-model milestones, and promotion state. If it cannot be fetched or read, fail closed for major model-integration, KV-format, quality-promotion, performance-promotion, cross-repository integration, or merge decisions. Read-only diagnosis is allowed.
+For any real-model, KV execution, codec, quality, memory, throughput, attention-adapter, Elastic, or cross-repository ML work, also read:
 
-Reread it at every session start, before selecting the next major phase, before integrating ElasticXxx/NNIS/FLAT-ATTENTION/Forge/Hub/Verify/SciCapsule, after strategy or quality-budget changes, and before relevant PR/merge decisions.
+```bash
+git fetch origin agent/ecosystem-roadmap && \
+git show origin/agent/ecosystem-roadmap:.agent/ML_MATURITY_5_OF_5.yaml
+```
 
-Do not merge the roadmap itself into the default branch unless the user explicitly requests it.
+The off-main roadmap is authoritative for current strategy, ecosystem ownership, real-model milestones, and promotion state. The ML maturity overlay makes 5/5 an evidence-backed exit criterion: proxy decode, tile-size projections, codec SNR, or synthetic kernel fidelity never substitute for a real tokenizer + real weights + prefill + autoregressive decode comparison against the same uncompressed baseline.
 
-The workspace intelligence below remains useful as a local implementation snapshot, but verify it against the current head and the persistent roadmap before relying on milestone or CI-status statements.
+If either required roadmap or the applicable ML overlay cannot be fetched or read, fail closed for major model-integration, KV-format, quality-promotion, performance-promotion, cross-repository integration, or merge decisions. Read-only diagnosis is allowed.
+
+Reread them at every session start, before selecting the next major phase, before integrating ElasticXxx/NNIS/FLAT-ATTENTION/TurboQuant/Forge/Hub/Verify/SciCapsule, after strategy or quality-budget changes, and before relevant PR/merge decisions.
+
+Do not merge the roadmap or ML maturity overlay itself into the default branch unless the user explicitly requests it.
+
+The workspace intelligence below remains useful as a local implementation snapshot, but verify it against the current head, persistent roadmap, and ML maturity overlay before relying on milestone or CI-status statements.
 
 ---
 
