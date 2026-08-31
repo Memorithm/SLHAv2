@@ -75,6 +75,19 @@ inline bool slha_external_k_state_serialization_supported() {
 }
 
 /**
+ * Sparse sequence mutation is unsupported until llama cell liveness is
+ * synchronized with the external store and scorer.
+ *
+ * seq_rm/seq_keep/seq_cp can create holes or new logical references without
+ * rewriting K. The current external scorer intentionally assumes a dense live
+ * prefix, so these operations must fail closed rather than leave stale or
+ * missing physical tiles behind llama.cpp metadata.
+ */
+inline bool slha_external_k_sparse_sequence_mutation_supported() {
+    return !slha_external_k_enabled();
+}
+
+/**
  * Prepare physical external-K storage from llama.cpp's real KV capacity.
  *
  * Legacy external-K allocates the existing C++ tile vector. With SLHA_CCOS=1,
