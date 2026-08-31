@@ -1,0 +1,65 @@
+schema_version: 1
+kind: memorithm_ml_maturity_program
+status: active
+last_updated: "2026-08-31"
+repository: Memorithm/SLHAv2
+objective: >-
+  Raise compressed-KV and real-model integration maturity to evidence-backed 5/5.
+  SLHAv2 must stop at product-specific KV semantics and must not duplicate SciRust
+  tensor/training ownership or ElasticXxx generic adaptation semantics.
+score_policy:
+  five_of_five_requires:
+    - real_model_real_tokenizer_prefill_and_autoregressive_decode
+    - baseline_and_SLHA_paths_use_the_same_model_weights_prompts_and_decode_policy
+    - measured_quality_memory_and_tokens_per_second_together
+    - codec_and_paging_state_identity_recorded
+    - exact_head_required_CI_green
+  forbidden:
+    - treating_benchmark_decode_proxy_as_real_LLM_evidence
+    - projecting_full_model_memory_savings_from_tile_size_alone
+    - claiming_quality_from_codec_SNR_alone
+priority_program:
+  - id: SML0
+    name: Real LLM integration
+    priority: P0
+    goals:
+      - connect_to_a_real_decoder_runtime_starting_with_NNIS_or_an_explicit_reference_adapter
+      - use_real_tokenizer_real_weights_prefill_decode_and_generation
+      - preserve_uncompressed_baseline_KV_path
+    exit_criteria:
+      - same_prompt_suite_generates_baseline_and_SLHA_outputs_under_identical_model_configuration
+  - id: SML1
+    name: Versioned KV execution contract
+    priority: P0
+    goals:
+      - define_layout_dtype_head_position_epoch_and_representation_identity
+      - expose_attention_views_without_forcing_full_decompression
+      - support_FLAT_or_other_attention_consumers_through_explicit_adapters
+      - reject_incompatible_codec_or_view_versions_fail_closed
+  - id: SML2
+    name: Quality memory performance qualification
+    priority: P0
+    goals:
+      - measure_peak_and_steady_state_KV_memory
+      - measure_prefill_and_decode_tokens_per_second_and_latency_distribution
+      - measure_task_or_logit_perplexity_quality_with_a_predeclared_protocol
+      - retain_codec_level_microbenchmarks_as_secondary_evidence_only
+  - id: SML3
+    name: TurboQuant convergence
+    priority: P0
+    goals:
+      - eliminate_semantic_drift_between_TQ3_implementations
+      - use_one_versioned_codec_contract_and_golden_vectors
+      - preserve_TurboQuant_ownership_of_codec_semantics
+  - id: SML4
+    name: Elastic adaptation integration
+    priority: P1
+    goals:
+      - expose_HOT_WARM_COLD_representation_and_cost_capabilities_to_ElasticXxx
+      - let_ElasticXxx_plan_only_with_explicit_quality_and_budget_invariants
+      - verify_then_commit_or_rollback_every_runtime_transition
+completion_definition: >-
+  SLHAv2 is 5/5 only when a real model executes end to end through compressed KV,
+  baseline parity is available, quality/memory/throughput are jointly measured,
+  TurboQuant semantics are converged, and Elastic adaptation is explicit,
+  versioned and rollback-safe.
