@@ -1,7 +1,17 @@
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -149,6 +149,7 @@ llama_kv_cache::llama_kv_cache(
+@@ -143,12 +143,16 @@ llama_kv_cache::llama_kv_cache(
+         if (!slha_external_k_validate_environment(&error)) {
+             throw std::runtime_error("invalid SLHA external-K configuration: " + error);
+         }
+-        if (n_stream != 1) {
+-            throw std::runtime_error("SLHA external-K currently requires exactly one KV stream");
++        std::string runtime_error;
++        if (!slha_external_k_validate_runtime(n_stream, n_seq_max, &runtime_error)) {
++            throw std::runtime_error(
++                "invalid SLHA external-K runtime geometry: " + runtime_error);
+         }
          if (!slha_external_k_prepare_store(kv_size)) {
              throw std::runtime_error("failed to size SLHA external-K tile store from llama.cpp KV capacity");
          }
@@ -9,7 +19,7 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
      }
  #else
      const bool slha_external_k = false;
-@@ -280,7 +281,7 @@ llama_kv_cache::llama_kv_cache(
+@@ -280,7 +284,7 @@ llama_kv_cache::llama_kv_cache(
          ggml_tensor * k = has_k
              ? (slha_external_k
 -                ? ggml_new_tensor_1d(ctx, type_k, 1)
@@ -17,7 +27,7 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
                  : ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream))
              : nullptr;
  #if defined(SLHA_INTEGRATION)
-@@ -579,6 +580,13 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
+@@ -579,6 +583,13 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
      if (shift == 0) {
          return;
      }
@@ -29,7 +39,7 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
  
      uint32_t new_head = cells.size();
  
-@@ -629,6 +637,13 @@ void llama_kv_cache::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
+@@ -629,6 +640,13 @@ void llama_kv_cache::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
      if (d == 1) {
          return;
      }
@@ -41,3 +51,29 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
  
      if (p0 < 0) {
          p0 = 0;
+@@ -1956,6 +1974,13 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+     if (other) {
+         return;
+     }
++
++#if defined(SLHA_INTEGRATION)
++    if (!slha_external_k_state_serialization_supported()) {
++        throw std::runtime_error("SLHA external-K state serialization is not implemented");
++    }
++#endif
+ 
+     GGML_UNUSED(flags);
+ 
+@@ -2011,6 +2036,13 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+     if (other) {
+         return;
+     }
++
++#if defined(SLHA_INTEGRATION)
++    if (!slha_external_k_state_serialization_supported()) {
++        throw std::runtime_error("SLHA external-K state restore is not implemented");
++    }
++#endif
+ 
+     GGML_UNUSED(flags);
+ 
