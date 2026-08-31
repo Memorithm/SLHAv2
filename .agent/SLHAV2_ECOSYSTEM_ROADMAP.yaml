@@ -1,0 +1,269 @@
+schema_version: 1
+kind: slhav2_ecosystem_agent_roadmap
+status: active
+last_updated: "2026-08-31"
+repository: Memorithm/SLHAv2
+intended_consumer: autonomous_coding_agent
+visibility_note: >-
+  This roadmap is intentionally kept off the default branch on an agent-oriented
+  branch. Never store secrets, credentials, private keys, model-license secrets,
+  or sensitive deployment data here.
+merge_policy: never_merge_this_file_to_default_branch_unless_user_explicitly_requests
+
+mission:
+  primary: >-
+    Move SLHAv2 from validated compressed-KV mechanisms and proxy benchmarks to a
+    real end-to-end decoder-only LLM integration with real tokenization, prefill,
+    autoregressive decode, a baseline KV path, an SLHA KV path, measured quality,
+    measured memory, and measured tokens/second.
+  ecosystem_goal: >-
+    Remain the specialized compressed-KV and adaptive cache product of the
+    Memorithm ecosystem while consuming generic adaptive-resource control from
+    ElasticXxx and reusable numerical/tensor primitives from SciRust instead of
+    duplicating their generic responsibilities.
+
+verified_current_facts:
+  - SLHAv2_has_a_CPU_reference_core_and_a_sl_hav2_vram_accelerated_path
+  - compressed_tiles_have_a_128_byte_hot_layout_and_multiple_codecs
+  - CCOS_or_ElasticKvCache_mechanisms_and_budget_enforcement_exist
+  - a_llama_cpp_integration_shim_exists_but_the_repository_documentation_describes_real_LLM_integration_as_not_yet_delivered
+  - benchmark_decode_is_a_proxy_not_a_real_LLM_end_to_end_measurement
+  - slha_audit_and_MCP_surfaces_exist
+  - existing_AGENTS_md_contains_a_historical_workspace_snapshot_and_gate_commands
+  - an_Elastic_incubator_exists_inside_the_repository_but_ElasticXxx_is_now_the_separate_generic_adaptive_resource_project
+
+invariants:
+  - correctness_and_declared_semantics_dominate_optimization
+  - no_fabricated_quality_memory_or_performance_claims
+  - proxy_benchmarks_must_not_be_reported_as_real_model_results
+  - baseline_and_SLHA_paths_must_use_the_same_model_tokenizer_prompt_decode_length_and_quality_scope
+  - codec_or_cache_policy_changes_must_fail_closed_on_unknown_or_invalid_metadata
+  - reported_residency_bytes_must_match_real_allocated_or_materialized_bytes_for_the_claimed_path
+  - real_model_quality_must_be_measured_not_inferred_from_kernel_similarity
+  - generic_Elastic_semantics_must_not_diverge_silently_from_Memorithm_ElasticXxx
+  - required_CI_must_be_green_on_the_exact_PR_head_before_merge
+
+ownership:
+  role: specialized_compressed_KV_cache_and_real_model_integration_product
+  owns:
+    - SLHA_tile_formats_codecs_and_scoring_semantics
+    - CCOS_or_SLHA_specific_KV_residency_and_eviction_policy
+    - SLHA_specific_attention_or_scoring_adapters
+    - real_model_baseline_vs_SLHA_integration_and_measurement
+    - SLHA_specific_CUDA_acceleration_and_platform_adapters_currently_in_this_repository
+    - SLHA_audit_and_MCP_product_surfaces
+  does_not_own:
+    - generic_elastic_resource_model_or_runtime_control_loop_owned_by_ElasticXxx
+    - SciRust_general_tensor_autodiff_scientific_oracle_or_representation_semantics
+    - FLAT_ATTENTION_specialized_fused_attention_kernel_ownership
+    - NNIS_native_NVIDIA_model_runtime_ownership
+    - Forge_candidate_search_strategy
+    - SciRust_Hub_global_registry_workflow_orchestration
+    - SciCapsule_container_trust_and_execution_product_semantics
+    - SciRust_Verify_evidence_dossier_and_verdict_semantics
+
+control_loop:
+  - SELECT_PINNED_REAL_MODEL_AND_TOKENIZER
+  - DEFINE_BASELINE_KV_PATH
+  - DEFINE_SLHA_KV_PATH
+  - PREFILL_IDENTICAL_INPUTS
+  - AUTOREGRESSIVE_DECODE_IDENTICAL_POLICY
+  - VERIFY_TOKEN_AND_QUALITY_SEMANTICS
+  - MEASURE_REAL_MEMORY
+  - MEASURE_END_TO_END_THROUGHPUT
+  - RECORD_ENVIRONMENT_AND_PROVENANCE
+  - PROMOTE_OR_ROLLBACK
+
+ecosystem_interfaces:
+  Memorithm/ElasticXxx:
+    relationship: generic_adaptive_resource_runtime_provider
+    status: active_convergence_target
+    required_direction:
+      - audit_overlap_between_in_repo_elastic_incubator_and_ElasticXxx
+      - preserve_SLHA_specific_KV_semantics_here
+      - move_or_bridge_only_generic_resource_control_through_versioned_contracts
+      - avoid_two_diverging_generic_Elastic_runtimes
+    candidate_contracts:
+      - KV_budget_observation
+      - admissible_hot_warm_cold_or_representation_transitions
+      - quality_or_error_invariants
+      - rollback_on_failed_post_actuation_verification
+  Memorithm/scirust:
+    relationship: reusable_scientific_tensor_quantization_and_oracle_substrate
+    status: active_ecosystem_dependency_direction
+    desired_contract:
+      - reuse_general_math_quantization_tensor_and_validation_primitives_when_they_are_truly_shared
+      - do_not_move_SLHA_tile_or_cache_product_semantics_into_SciRust
+  Memorithm/NVIDIA-Native-Inference-Stack:
+    relationship: optional_native_NVIDIA_model_runtime_for_real_model_execution
+    status: planned_not_assumed
+    desired_contract:
+      - expose_KV_or_attention_extension_points_without_copying_NNIS_runtime_internals
+      - compare_against_same_model_and_decode_semantics
+  Memorithm/FLAT-ATTENTION:
+    relationship: specialized_attention_execution_partner
+    status: planned_not_assumed
+    desired_contract:
+      - feed_SLHA_KV_views_or_reconstructed_blocks_only_through_explicit_layout_contracts
+      - keep_FLAT_kernel_ownership_in_FLAT_ATTENTION
+  Memorithm/forge:
+    relationship: optional_candidate_search_for_codec_scoring_or_cache_algorithms
+    status: planned_not_assumed
+    constraints:
+      - independent_quality_and_correctness_gate_before_performance_selection
+      - no_candidate_promotion_from_microbenchmark_only
+  Memorithm/SciRust-Verify:
+    relationship: future_evidence_normalization_and_verdict_layer
+    status: planned_not_assumed
+    desired_contract:
+      - ingest_real_model_quality_memory_and_throughput_evidence_with_exact_environment_identity
+      - distinguish_proxy_kernel_evidence_from_end_to_end_model_evidence
+  Memorithm/scirust-hub:
+    relationship: future_orchestration_control_plane
+    status: planned_not_assumed
+    desired_contract:
+      - register_SLHA_real_model_bench_or_runtime_capability_as_a_component
+      - retain_artifacts_and_provenance_without_moving_KV_semantics_into_Hub
+  Memorithm/SciCapsule:
+    relationship: future_reproducible_packaging_for_bench_inputs_or_adapters
+    status: planned_not_assumed
+
+roadmap:
+  - id: SL0
+    name: Current-head audit and baseline truth
+    status: active
+    goals:
+      - audit_current_workspace_tile_format_CCOs_scoring_RoPE_residual_adapters_and_bindings
+      - identify_exactly_which_real_model_integration_parts_exist_vs_design_only
+      - classify_every_current_performance_claim_as_kernel_proxy_or_end_to_end
+      - pin_one_small_decoder_only_model_and_tokenizer_for_initial_integration
+    exit_criteria:
+      - no_real_model_claim_depends_on_proxy_benchmark_data
+
+  - id: SL1
+    name: Real model loading and tokenization
+    status: active
+    goals:
+      - load_a_real_supported_decoder_only_checkpoint
+      - use_real_tokenization_and_detokenization
+      - record_model_hash_or_exact_revision_and_tokenizer_identity
+      - expose_clear_failure_for_unsupported_architecture_or_weight_format
+      - keep_the_initial_path_small_and_testable
+
+  - id: SL2
+    name: Baseline prefill and decode
+    status: pending_after_SL1
+    goals:
+      - implement_or_integrate_a_reference_baseline_KV_path
+      - run_real_prefill
+      - run_autoregressive_decode
+      - record_generated_token_ids_logits_or_quality_observations_needed_for_comparison
+      - measure_actual_baseline_KV_memory_and_end_to_end_throughput
+    rule: >-
+      The baseline must be executable under the same model, tokenizer, prompt,
+      decode length, device, precision policy, and sampling/greedy semantics used
+      for SLHA comparison.
+
+  - id: SL3
+    name: SLHA KV path in the same real model
+    status: pending_after_SL2
+    goals:
+      - route_real_KV_materialization_through_SLHA_tiles
+      - preserve_position_head_layer_and_codec_identity
+      - integrate_HOT_WARM_COLD_or_other_supported_residency_states_without_fake_accounting
+      - run_the_same_prefill_and_decode_workload_as_the_baseline
+      - fail_closed_on_any_layout_or_codec_mismatch
+
+  - id: SL4
+    name: Measured quality and semantic gate
+    status: pending_after_SL3
+    goals:
+      - define_quality_metrics_suitable_for_the_pinned_model_and_workload
+      - compare_generated_tokens_and_or_logit_or_perplexity_metrics_as_appropriate
+      - record_SLHA_vs_baseline_deltas
+      - reject_or_quarantine_candidates_that_exceed_the_declared_quality_budget
+      - keep_kernel_similarity_metrics_as_supporting_not_end_to_end_evidence
+
+  - id: SL5
+    name: Measured memory and throughput
+    status: pending_after_SL4
+    goals:
+      - measure_real_process_or_device_memory_relevant_to_the_KV_path
+      - separate_exact_tile_storage_from_allocator_runtime_and_model_weight_memory
+      - measure_end_to_end_prefill_and_decode_throughput
+      - capture_warmup_repetition_and_environment_fingerprint
+      - publish_no_speedup_claim_without_same_regime_baseline
+
+  - id: SL6
+    name: ElasticXxx convergence
+    status: active_parallel_after_contract_audit
+    goals:
+      - audit_the_in_repo_elastic_incubator_against_current_ElasticXxx
+      - identify_generic_components_to_deprecate_bridge_or_promote_without_breaking_SLHA
+      - keep_KV_specific_policies_and_adapters_in_SLHAv2
+      - use_ElasticXxx_for_generic_observe_plan_validate_act_verify_commit_or_rollback_when_contracts_are_ready
+    forbid:
+      - deleting_working_SLHA_paths_before_equivalent_external_contract_exists
+      - maintaining_two_silently_divergent_generic_Elastic_models
+
+  - id: SL7
+    name: Specialized runtime and attention adapters
+    status: pending_after_SL3_SL5
+    goals:
+      - evaluate_NNIS_as_a_native_NVIDIA_model_runtime_integration_target
+      - evaluate_FLAT_ATTENTION_for_attention_execution_when_layout_contracts_match
+      - keep_llama_cpp_or_other_external_adapters_versioned_and_fail_closed
+      - avoid_forcing_any_single_runtime_as_a_mandatory_dependency_of_the_core_tile_format
+
+  - id: SL8
+    name: Ecosystem evidence and orchestration
+    status: pending_after_SL5
+    goals:
+      - emit_machine_readable_real_model_evidence_for_SciRust_Verify
+      - expose_selected_SLHA_capabilities_to_SciRust_Hub_through_published_contracts
+      - package_reproducible_inputs_or_runs_with_SciCapsule_when_useful
+      - preserve_exact_model_tokenizer_source_and_environment_provenance
+
+  - id: SL9
+    name: Productization
+    status: long_term
+    goals:
+      - stabilize_tile_and_adapter_versioning
+      - document_supported_models_runtimes_platforms_and_quality_budgets
+      - maintain_reproducible_baseline_vs_SLHA_regression_suites
+      - publish_semver_MSRV_and_compatibility_policy
+      - retain_negative_quality_or_performance_results_as_evidence
+
+cross_repository_change_protocol:
+  before_editing_another_repository:
+    - read_that_repository_AGENTS_md
+    - read_that_repository_current_off_main_agent_roadmap
+    - verify_ownership_and_contract_status
+    - record_exact_source_and_target_SHAs
+  before_performance_or_quality_promotion:
+    - require_same_model_tokenizer_workload_and_environment_scope
+    - require_real_end_to_end_evidence_for_end_to_end_claims
+    - preserve_raw_results_and_limitations
+  before_merge:
+    - re_read_relevant_roadmaps
+    - verify_exact_PR_head_SHA
+    - require_all_required_CI_green_on_that_head
+    - fail_closed_on_missing_required_evidence
+
+agent_operating_protocol:
+  must_read_this_file:
+    - at_start_of_every_agent_session_on_this_repository
+    - before_selecting_the_next_real_model_or_integration_phase
+    - before_any_ElasticXxx_NNIS_FLAT_Forge_Hub_Verify_or_SciCapsule_integration
+    - after_any_user_change_to_quality_performance_or_ecosystem_strategy
+    - before_opening_or_merging_a_real_model_KV_format_quality_or_performance_PR
+  must_update_this_file:
+    - when_a_phase_changes_status
+    - when_a_real_model_baseline_or_candidate_is_promoted_or_rejected
+    - when_a_cross_repository_contract_is_published_changed_or_rejected
+    - when_quality_or_performance_evidence_changes_the_next_action
+  fail_closed: >-
+    If this roadmap cannot be fetched or read, an autonomous agent must not make
+    a major model-integration, KV-format, quality-promotion, performance-promotion,
+    cross-repository integration, or merge decision. Read-only diagnosis is
+    allowed.
