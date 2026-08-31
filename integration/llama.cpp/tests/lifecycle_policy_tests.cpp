@@ -22,6 +22,7 @@ int main() {
     assert(slha_external_k_validate_runtime(4, 8, &error));
     assert(error == "stale");
     assert(slha_external_k_state_serialization_supported());
+    assert(slha_external_k_sparse_sequence_mutation_supported());
 
     setenv("SLHA_EXTERNAL_K", "1", 1);
 
@@ -29,6 +30,7 @@ int main() {
     assert(slha_external_k_validate_runtime(1, 1, &error));
     assert(error.empty());
     assert(!slha_external_k_state_serialization_supported());
+    assert(!slha_external_k_sparse_sequence_mutation_supported());
 
     error.clear();
     assert(!slha_external_k_validate_runtime(2, 1, &error));
