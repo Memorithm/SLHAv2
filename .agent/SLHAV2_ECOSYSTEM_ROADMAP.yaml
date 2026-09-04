@@ -1,7 +1,7 @@
 schema_version: 2
 kind: slhav2_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-09-04T21:08+0200"
+last_updated: "2026-09-04T21:15+0200"
 repository: Memorithm/SLHAv2
 intended_consumer: autonomous_coding_agent
 visibility_note: >-
@@ -34,8 +34,15 @@ verified_current_facts:
   - PR_104_unweighted_layer_mean_Spearman_was_0_915928045_and_mean_Kendall_tau_b_was_0_776570447_on_diagnostic_only_data
   - PR_104_mean_top1_agreement_was_0_712962963_and_min_layer_top1_agreement_was_0_555555556
   - PR_104_is_DIAGNOSTIC_ONLY_NOT_QUALITY_PROMOTION_and_does_not_authorize_a_scorer_change_by_itself
-  - PR_105_is_the_active_fixed_rank_value_intervention_diagnostic_on_the_same_non_holdout_TinyStories_lineage
+  - PR_105_fixed_rank_value_intervention_diagnostic_is_qualified_on_exact_head_d74a30f449cb1e4da97b62106837b1c850e6176d
   - PR_105_reuses_existing_paired_baseline_score_oracles_and_changes_no_Cpp_scoring_codec_CCOS_external_K_or_KV_layout_semantics
+  - PR_105_baseline_identity_exactly_matches_baseline_at_PPL_16_2157_and_SLHA_identity_exactly_matches_strict_at_PPL_16_6949
+  - PR_105_strict_minus_baseline_gap_is_0_4792_on_the_separate_non_holdout_diagnostic_corpus
+  - PR_105_baseline_rank_with_SLHA_values_PPL_is_16_2646_recovering_0_897954925_of_the_strict_minus_baseline_gap
+  - PR_105_SLHA_rank_with_baseline_values_PPL_is_17_8384_and_therefore_worsens_the_strict_result
+  - PR_105_baseline_top1_PPL_is_17_1939_while_baseline_top16_PPL_is_16_2188_with_0_993530885_descriptive_gap_recovery
+  - PR_105_supports_a_broad_top_set_ranking_defect_as_the_leading_diagnostic_hypothesis_but_is_DIAGNOSTIC_ONLY_NOT_QUALITY_PROMOTION
+  - PR_105_does_not_authorize_a_deployable_scorer_change_or_use_of_the_protected_quality_holdout_for_candidate_selection
   - benchmark_decode_remains_a_proxy_and_is_not_substituted_for_real_model_end_to_end_measurement
   - slha_audit_and_MCP_surfaces_exist
   - existing_AGENTS_md_contains_a_historical_workspace_snapshot_and_gate_commands
@@ -190,13 +197,19 @@ roadmap:
     status: active_diagnostic_no_quality_promotion
     current_evidence:
       - PR_104_measured_pairwise_ranking_quality_on_separate_non_holdout_diagnostic_corpus
-      - ranking_errors_are_observed_but_do_not_alone_identify_the_end_to_end_quality_gap
-      - PR_105_fixed_rank_value_intervention_matrix_is_active_to_separate_ranking_effects_from_order_preserving_score_geometry_effects
+      - PR_104_observed_high_mean_rank_correlation_but_material_top1_disagreement_especially_in_late_layers
+      - PR_105_fixed_rank_value_intervention_matrix_is_qualified_on_exact_head_d74a30f449cb1e4da97b62106837b1c850e6176d
+      - PR_105_identity_controls_pass_exactly_on_printed_PPL_values
+      - PR_105_baseline_rank_with_SLHA_values_recovers_about_89_8_percent_of_the_strict_minus_baseline_gap_on_diagnostic_data
+      - PR_105_baseline_top16_recovers_about_99_35_percent_while_baseline_top1_is_harmful_on_this_diagnostic
+      - PR_105_SLHA_rank_with_baseline_values_is_worse_than_strict_showing_non_additive_rank_value_interaction
     next_decision_rule: >-
-      Do not modify or promote the scorer from rank correlations alone. First
-      require valid baseline-identity and SLHA-identity controls and interpret the
-      fixed rank/value interventions on the separate diagnostic corpus. Any later
-      scorer candidate must be frozen before protected quality evaluation.
+      Do not modify or promote the production scorer directly from PR_104 or
+      PR_105. The next candidate must be a bounded, predeclared hypothesis about
+      broader top-set/rank structure, trained or selected only on non-protected
+      diagnostic/calibration data. Freeze that candidate and its thresholds before
+      any protected quality evaluation; protected holdout results may validate or
+      reject a frozen candidate but must not tune or select it.
     goals:
       - define_quality_metrics_suitable_for_the_pinned_model_and_workload
       - compare_generated_tokens_and_or_logit_or_perplexity_metrics_as_appropriate
