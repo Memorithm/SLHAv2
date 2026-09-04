@@ -1,7 +1,7 @@
-schema_version: 1
+schema_version: 2
 kind: slhav2_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-08-31"
+last_updated: "2026-09-04T21:08+0200"
 repository: Memorithm/SLHAv2
 intended_consumer: autonomous_coding_agent
 visibility_note: >-
@@ -26,8 +26,17 @@ verified_current_facts:
   - SLHAv2_has_a_CPU_reference_core_and_a_sl_hav2_vram_accelerated_path
   - compressed_tiles_have_a_128_byte_hot_layout_and_multiple_codecs
   - CCOS_or_ElasticKvCache_mechanisms_and_budget_enforcement_exist
-  - a_llama_cpp_integration_shim_exists_but_the_repository_documentation_describes_real_LLM_integration_as_not_yet_delivered
-  - benchmark_decode_is_a_proxy_not_a_real_LLM_end_to_end_measurement
+  - a_real_llama_cpp_decoder_integration_now_executes_pinned_real_weights_baseline_and_SLHA_paths
+  - TinyStories_15M_Q8_0_is_the_current_small_real_model_diagnostic_lineage_with_model_sha_2eda49203f2f044f3dddf29a7dd7cc861ef5a0340f518a19613d73ba6d9c06b6
+  - PR_104_merged_as_eed0147e34f0ff9ab2febfce1debf563ffbef0dc_from_exact_head_b57c651217be96717b4c0567c82ee32e205c3110
+  - PR_104_added_a_separate_non_holdout_real_model_ranking_diagnostic_without_changing_scoring_codec_CCOS_or_external_K_semantics
+  - PR_104_ranking_diagnostic_sampled_108_rows_across_6_layers_with_zero_active_accounting_failures
+  - PR_104_unweighted_layer_mean_Spearman_was_0_915928045_and_mean_Kendall_tau_b_was_0_776570447_on_diagnostic_only_data
+  - PR_104_mean_top1_agreement_was_0_712962963_and_min_layer_top1_agreement_was_0_555555556
+  - PR_104_is_DIAGNOSTIC_ONLY_NOT_QUALITY_PROMOTION_and_does_not_authorize_a_scorer_change_by_itself
+  - PR_105_is_the_active_fixed_rank_value_intervention_diagnostic_on_the_same_non_holdout_TinyStories_lineage
+  - PR_105_reuses_existing_paired_baseline_score_oracles_and_changes_no_Cpp_scoring_codec_CCOS_external_K_or_KV_layout_semantics
+  - benchmark_decode_remains_a_proxy_and_is_not_substituted_for_real_model_end_to_end_measurement
   - slha_audit_and_MCP_surfaces_exist
   - existing_AGENTS_md_contains_a_historical_workspace_snapshot_and_gate_commands
   - an_Elastic_incubator_exists_inside_the_repository_but_ElasticXxx_is_now_the_separate_generic_adaptive_resource_project
@@ -42,6 +51,8 @@ invariants:
   - real_model_quality_must_be_measured_not_inferred_from_kernel_similarity
   - generic_Elastic_semantics_must_not_diverge_silently_from_Memorithm_ElasticXxx
   - required_CI_must_be_green_on_the_exact_PR_head_before_merge
+  - diagnostic_baseline_QK_oracles_must_never_be_described_as_deployable_compressed_KV_methods
+  - protected_quality_holdout_data_must_not_be_used_for_diagnostic_scorer_selection_or_intervention_tuning
 
 ownership:
   role: specialized_compressed_KV_cache_and_real_model_integration_product
@@ -142,7 +153,7 @@ roadmap:
 
   - id: SL1
     name: Real model loading and tokenization
-    status: active
+    status: implemented_for_current_TinyStories_reference_adapter
     goals:
       - load_a_real_supported_decoder_only_checkpoint
       - use_real_tokenization_and_detokenization
@@ -152,7 +163,7 @@ roadmap:
 
   - id: SL2
     name: Baseline prefill and decode
-    status: pending_after_SL1
+    status: implemented_for_current_TinyStories_reference_adapter
     goals:
       - implement_or_integrate_a_reference_baseline_KV_path
       - run_real_prefill
@@ -166,7 +177,7 @@ roadmap:
 
   - id: SL3
     name: SLHA KV path in the same real model
-    status: pending_after_SL2
+    status: implemented_active_qualification_on_current_TinyStories_reference_adapter
     goals:
       - route_real_KV_materialization_through_SLHA_tiles
       - preserve_position_head_layer_and_codec_identity
@@ -176,7 +187,16 @@ roadmap:
 
   - id: SL4
     name: Measured quality and semantic gate
-    status: pending_after_SL3
+    status: active_diagnostic_no_quality_promotion
+    current_evidence:
+      - PR_104_measured_pairwise_ranking_quality_on_separate_non_holdout_diagnostic_corpus
+      - ranking_errors_are_observed_but_do_not_alone_identify_the_end_to_end_quality_gap
+      - PR_105_fixed_rank_value_intervention_matrix_is_active_to_separate_ranking_effects_from_order_preserving_score_geometry_effects
+    next_decision_rule: >-
+      Do not modify or promote the scorer from rank correlations alone. First
+      require valid baseline-identity and SLHA-identity controls and interpret the
+      fixed rank/value interventions on the separate diagnostic corpus. Any later
+      scorer candidate must be frozen before protected quality evaluation.
     goals:
       - define_quality_metrics_suitable_for_the_pinned_model_and_workload
       - compare_generated_tokens_and_or_logit_or_perplexity_metrics_as_appropriate
@@ -186,7 +206,7 @@ roadmap:
 
   - id: SL5
     name: Measured memory and throughput
-    status: pending_after_SL4
+    status: active_evidence_accumulation_not_product_claim
     goals:
       - measure_real_process_or_device_memory_relevant_to_the_KV_path
       - separate_exact_tile_storage_from_allocator_runtime_and_model_weight_memory
