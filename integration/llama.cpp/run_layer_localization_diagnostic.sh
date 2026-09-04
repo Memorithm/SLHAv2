@@ -257,6 +257,51 @@ def parse_summary(text, begin, end):
             out[key.strip()] = value.strip()
     return out
 
+
+def normalize_layer_list(value):
+    value = value.strip()
+    if value in ("", "(none)"):
+        return ""
+    return ",".join(part.strip() for part in value.split(",") if part.strip())
+
+
+def require_zero_summary(summary, label):
+    if summary is None:
+        raise SystemExit(f"{label}: missing replacement summary")
+    zero_integer_fields = (
+        "callbacks",
+        "active_expected_vectors",
+        "active_replaced_vectors",
+        "active_expected_logits",
+        "active_replaced_logits",
+        "failed_vectors",
+        "fallback_vectors",
+        "missing_tile",
+        "query_prep_fail",
+        "score_fail",
+        "nonfinite_score",
+        "unsupported_shape",
+        "unsupported_stride",
+        "error_code",
+        "n_stream",
+    )
+    for field in zero_integer_fields:
+        try:
+            value = int(summary.get(field, "-1"))
+        except ValueError as exc:
+            raise SystemExit(f"{label}: non-integer {field}: {summary}") from exc
+        if value != 0:
+            raise SystemExit(f"{label}: expected {field}=0 for empty mask: {summary}")
+    try:
+        coverage = float(summary.get("active_coverage", "nan"))
+    except ValueError as exc:
+        raise SystemExit(f"{label}: invalid active_coverage: {summary}") from exc
+    if coverage != 0.0:
+        raise SystemExit(f"{label}: expected active_coverage=0 for empty mask: {summary}")
+    if summary.get("valid") != "false":
+        raise SystemExit(f"{label}: empty mask must have inactive replacement summary: {summary}")
+
+
 parsed = {}
 for label, mask in cases.items():
     path = os.path.join(output_dir, label + ".log")
@@ -278,10 +323,17 @@ for label, mask in cases.items():
             raise SystemExit(f"{label}: requested mask mismatch: {mask_summary}")
         if mask_summary.get("mask_valid") != "true" or mask_summary.get("mask_error") != "false":
             raise SystemExit(f"{label}: invalid score mask: {mask_summary}")
-        if mask_summary.get("resolved_layers", "") != expected_layers[label]:
+
+        expected = expected_layers[label]
+        expected_count = 0 if expected == "" else len(expected.split(","))
+        if normalize_layer_list(mask_summary.get("resolved_layers", "")) != expected:
             raise SystemExit(f"{label}: resolved layer mismatch: {mask_summary}")
-        if mask_summary.get("executed_layers", "") != expected_layers[label]:
+        if normalize_layer_list(mask_summary.get("executed_layers", "")) != expected:
             raise SystemExit(f"{label}: executed layer mismatch: {mask_summary}")
+        if int(mask_summary.get("resolved_count", "-1")) != expected_count:
+            raise SystemExit(f"{label}: resolved count mismatch: {mask_summary}")
+        if int(mask_summary.get("executed_count", "-1")) != expected_count:
+            raise SystemExit(f"{label}: executed count mismatch: {mask_summary}")
 
         replace_summary = parse_summary(text, "SLHA_REPLACE_SUMMARY", "END_SLHA_REPLACE_SUMMARY")
         if replace_summary is None:
@@ -294,7 +346,9 @@ for label, mask in cases.items():
                     if "=" in line:
                         key, value = line.split("=", 1)
                         replace_summary[key.strip()] = value.strip()
-        if mask != "none":
+        if mask == "none":
+            require_zero_summary(replace_summary, label)
+        else:
             if replace_summary is None or replace_summary.get("valid") != "true":
                 raise SystemExit(f"{label}: replacement summary missing or invalid: {replace_summary}")
             if int(replace_summary.get("failed_vectors", "-1")) != 0:
