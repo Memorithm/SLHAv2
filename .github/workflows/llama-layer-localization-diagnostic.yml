@@ -1,0 +1,188 @@
+name: llama.cpp real-model layer localization diagnostic
+
+on:
+  pull_request:
+    paths:
+      - "integration/llama.cpp/run_layer_localization_diagnostic.sh"
+      - "integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt"
+      - "integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt"
+      - "integration/llama.cpp/shim/**"
+      - "integration/llama.cpp/patches/**"
+      - "integration/llama.cpp/build_and_roundtrip.sh"
+      - "integration/llama.cpp/run_real_pair.sh"
+      - "integration/llama.cpp/scripts/train_layer_weights.sh"
+      - "slha-c/**"
+      - "scirust/**"
+      - ".github/workflows/llama-layer-localization-diagnostic.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llama-layer-localization-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  layer-localization:
+    name: TinyStories 15M paired layer localization diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Validate diagnostic runner syntax
+        run: bash -n integration/llama.cpp/run_layer_localization_diagnostic.sh
+
+      - name: Download pinned real GGUF and verify SHA-256
+        env:
+          MODEL_URL: https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q8_0.gguf?download=true
+          MODEL_SHA256: 2eda49203f2f044f3dddf29a7dd7cc861ef5a0340f518a19613d73ba6d9c06b6
+        run: |
+          mkdir -p "$RUNNER_TEMP/slha-layer-localization"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$MODEL_URL" \
+            -o "$RUNNER_TEMP/slha-layer-localization/stories15M-q8_0.gguf"
+          echo "$MODEL_SHA256  $RUNNER_TEMP/slha-layer-localization/stories15M-q8_0.gguf" | sha256sum --check -
+
+      - name: Prove diagnostic corpus is not the protected holdout
+        run: |
+          test -s integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt
+          test -s integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt
+          test "$(sha256sum integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt | awk '{print $1}')" != \
+               "$(sha256sum integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt | awk '{print $1}')"
+
+      - name: Prepare calibration-only text
+        run: |
+          python3 - "$RUNNER_TEMP/slha-layer-localization/calibration.txt" <<'PY'
+          import sys
+          text = (
+              "A small fox walked beside a quiet river and watched the morning sky. "
+              "Later the fox found a wooden box, carried it home, and shared it with a friend.\n"
+          )
+          with open(sys.argv[1], "w", encoding="utf-8") as f:
+              f.write(text * 160)
+          PY
+          test -s "$RUNNER_TEMP/slha-layer-localization/calibration.txt"
+          test "$(sha256sum "$RUNNER_TEMP/slha-layer-localization/calibration.txt" | awk '{print $1}')" != \
+               "$(sha256sum integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt | awk '{print $1}')"
+
+      - name: Collect real K activations
+        env:
+          WORK: ${{ runner.temp }}/slha-layer-localization/collect-work
+          CALIB_DIR: ${{ runner.temp }}/slha-layer-localization/calibration
+          DATA_FILE: ${{ runner.temp }}/slha-layer-localization/calibration.txt
+          MODEL_REPO: ggml-org/tiny-llamas
+          MODEL_FILE: ${{ runner.temp }}/slha-layer-localization/stories15M-q8_0.gguf
+          CHUNKS: "1"
+          THREADS: "2"
+          SLHA_CALIBRATION_MIN_ROWS: "16"
+        run: |
+          mkdir -p "$WORK"
+          git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$WORK/llama.cpp"
+          normalize_patch() {
+            awk '
+              /^diff --git / { in_hunk = 0 }
+              /^@@ / { in_hunk = 1 }
+              { if (in_hunk && length($0) == 0) print " "; else print $0 }
+            ' "$1" > "$2"
+          }
+          for patch_id in 0001-slha-k-passthrough 0002-slha-external-k 0003-slha-external-k-hardening; do
+            normalize_patch \
+              "integration/llama.cpp/patches/$patch_id.patch" \
+              "$WORK/$patch_id.normalized.patch"
+            git -C "$WORK/llama.cpp" apply --recount --check "$WORK/$patch_id.normalized.patch"
+            git -C "$WORK/llama.cpp" apply --recount "$WORK/$patch_id.normalized.patch"
+          done
+          cp integration/llama.cpp/shim/slha_external_k.hpp "$WORK/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_external_k.cpp "$WORK/llama.cpp/src/"
+          bash integration/llama.cpp/build_and_roundtrip.sh collect
+          python3 - "$CALIB_DIR/calibration_manifest.json" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          assert data.get("valid") is True, data
+          assert int(data.get("num_layers", 0)) == 6, data
+          assert int(data.get("observed_dim", 0)) == 288, data
+          PY
+
+      - name: Train six layer projection artifacts
+        env:
+          WORK: ${{ runner.temp }}/slha-layer-localization/collect-work
+          CALIB_DIR: ${{ runner.temp }}/slha-layer-localization/calibration
+          WEIGHTS_DIR: ${{ runner.temp }}/slha-layer-localization/weights
+          MODEL_REPO: ggml-org/tiny-llamas
+          MODEL_FILE: stories15M-q8_0.gguf
+          EXPECT_LAYERS: "6"
+          SLHA_CALIBRATION_MIN_ROWS: "16"
+        run: |
+          bash integration/llama.cpp/scripts/train_layer_weights.sh mixed
+          test "$(find "$WEIGHTS_DIR" -maxdepth 1 -name 'layer-*.slhw' -type f | wc -l)" -eq 6
+          python3 -m json.tool "$WEIGHTS_DIR/manifest.json" >/dev/null
+
+      - name: Build paired llama worktree and exercise ordinary plus external paths
+        env:
+          WORK: ${{ runner.temp }}/slha-layer-localization/pair-work
+        run: |
+          bash integration/llama.cpp/run_real_pair.sh \
+            --model "$RUNNER_TEMP/slha-layer-localization/stories15M-q8_0.gguf" \
+            --weights-dir "$RUNNER_TEMP/slha-layer-localization/weights" \
+            --prompt "Once upon a time," \
+            --max-tokens 2 \
+            --context-size 128 \
+            --threads 2 \
+            --gpu-layers 0 \
+            --codec mixed \
+            --output-dir "$RUNNER_TEMP/slha-layer-localization/pair-bootstrap"
+
+      - name: Run fixed paired layer localization matrix on separate corpus
+        env:
+          WORK: ${{ runner.temp }}/slha-layer-localization/pair-work
+        run: |
+          bash integration/llama.cpp/run_layer_localization_diagnostic.sh \
+            --model "$RUNNER_TEMP/slha-layer-localization/stories15M-q8_0.gguf" \
+            --weights-dir "$RUNNER_TEMP/slha-layer-localization/weights" \
+            --corpus integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt \
+            --output-dir "$RUNNER_TEMP/slha-layer-localization/interventions" \
+            --pair-work "$RUNNER_TEMP/slha-layer-localization/pair-work" \
+            --context-size 128 \
+            --chunks 1 \
+            --threads 2 \
+            --gpu-layers 0 \
+            --codec mixed
+
+      - name: Validate and retain diagnostic-only localization evidence
+        run: |
+          REPORT="$RUNNER_TEMP/slha-layer-localization/interventions/layer-localization-diagnostic.json"
+          python3 -m json.tool "$REPORT" >/dev/null
+          python3 - "$REPORT" <<'PY'
+          import json, math, sys
+          r = json.load(open(sys.argv[1]))
+          assert r["schema"] == "slha_layer_localization_diagnostic_v1", r
+          assert r["status"] == "DIAGNOSTIC_ONLY_NOT_QUALITY_PROMOTION", r
+          assert r["execution_mode"] == "historical_tilestore_replace_with_layer_masked_baseline_qk_passthrough", r
+          assert r["external_k"] is False and r["ccos"] is False and r["score_oracle"] is False, r
+          assert r["corpus"]["is_protected_holdout"] is False, r
+          assert r["corpus"]["sha256"] != r["corpus"]["protected_holdout_sha256"], r
+          assert r["identity_controls"]["ordinary_baseline_equals_none_mask"] is True, r
+          assert r["identity_controls"]["strict_all_equals_strict_repeat"] is True, r
+          assert len(r["fixed_matrix"]) == 19, r
+          assert set(r["single_layer_replacement"]) == {"0", "1", "2", "3", "4", "5"}, r
+          assert set(r["leave_one_layer_baseline_rescue"]) == {"0", "1", "2", "3", "4", "5"}, r
+          for case in r["cases"].values():
+              assert math.isfinite(float(case["ppl"])), case
+          compact = {
+              "schema": r["schema"],
+              "status": r["status"],
+              "corpus_sha256": r["corpus"]["sha256"],
+              "baseline_ppl": r["endpoints"]["baseline_ppl"],
+              "strict_ppl": r["endpoints"]["strict_all_ppl"],
+              "gap": r["endpoints"]["strict_minus_baseline_gap"],
+              "single_layer_replacement": r["single_layer_replacement"],
+              "leave_one_layer_baseline_rescue": r["leave_one_layer_baseline_rescue"],
+              "two_layer_baseline_rescue": r["two_layer_baseline_rescue"],
+          }
+          print("SLHA_LAYER_LOCALIZATION_VALIDATED=" + json.dumps(compact, sort_keys=True, separators=(",", ":")))
+          PY
