@@ -113,6 +113,28 @@ SciRustSlhaTile make_tile() {
     return tile;
 }
 
+SciRustSlhaTile make_score_equivalence_tile(size_t index) {
+    SciRustSlhaTile tile = make_tile();
+    for (size_t i = 0; i < sizeof(tile.latent_kv); ++i) {
+        const unsigned value = 0x21u + static_cast<unsigned>((17u * index + 13u * i) % 0xbcu);
+        tile.latent_kv[i] = static_cast<uint8_t>(value);
+    }
+    tile.scale = 0.5f + static_cast<float>(index) * 0.125f;
+    tile.dynamic_lambda = 0.0625f + static_cast<float>(index) * 0.03125f;
+    return tile;
+}
+
+void score_equivalence_query(float * q_coarse, uint64_t * q_sign) {
+    for (size_t i = 0; i < SLHA_D_C; ++i) {
+        const int centered = static_cast<int>(i % 11u) - 5;
+        q_coarse[i] = static_cast<float>(centered) * 0.03125f;
+    }
+    for (size_t i = 0; i < SLHA_RESIDUAL_WORDS; ++i) {
+        q_sign[i] = UINT64_C(0x9e3779b97f4a7c15) ^
+                    (UINT64_C(0x0101010101010101) * static_cast<uint64_t>(i + 1u));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -144,6 +166,44 @@ int main() {
     assert(stats.logical_tile_bytes == 3u * 4096u * 128u);
     assert(stats.tile_backing_capacity_bytes >= stats.logical_tile_bytes);
     assert(stats.validity_backing_capacity_bytes >= 3u * 4096u);
+
+    // Score semantics must not depend on whether a tile is owned by the legacy
+    // C++ vector store or by the physical Rust CCOS cache. This is the contract
+    // that allows diagnostic-only ranking measurements on the instrumentable
+    // vector path to describe the same compressed score function used by CCOS.
+    constexpr size_t equivalence_count = 4;
+    SciRustSlhaTile equivalence_tiles[equivalence_count];
+    for (size_t i = 0; i < equivalence_count; ++i) {
+        equivalence_tiles[i] = make_score_equivalence_tile(i);
+    }
+    float equivalence_q_coarse[SLHA_D_C] = {};
+    uint64_t equivalence_q_sign[SLHA_RESIDUAL_WORDS] = {};
+    score_equivalence_query(equivalence_q_coarse, equivalence_q_sign);
+    float vector_scores[equivalence_count] = {};
+    for (size_t i = 0; i < equivalence_count; ++i) {
+        assert(slha_external_k_write_tile(1, i, &equivalence_tiles[i]));
+    }
+    assert(slha_external_k_score_tiles(
+               nullptr, 1, 0, equivalence_count,
+               equivalence_q_coarse, equivalence_q_sign, vector_scores) == SLHA_OK);
+    for (float score : vector_scores) {
+        assert(std::isfinite(score));
+    }
+
+    set_valid_ccos_env();
+    assert(slha_external_k_validate_environment(&error));
+    assert(slha_external_k_prepare_store(8));
+    float ccos_scores[equivalence_count] = {};
+    for (size_t i = 0; i < equivalence_count; ++i) {
+        assert(slha_external_k_write_tile(1, i, &equivalence_tiles[i]));
+    }
+    assert(slha_external_k_score_tiles(
+               nullptr, 1, 0, equivalence_count,
+               equivalence_q_coarse, equivalence_q_sign, ccos_scores) == SLHA_OK);
+    for (size_t i = 0; i < equivalence_count; ++i) {
+        assert(std::isfinite(ccos_scores[i]));
+        assert(std::memcmp(&vector_scores[i], &ccos_scores[i], sizeof(float)) == 0);
+    }
 
     // CCOS with no explicit pressure owns the physical tiles in Rust and does
     // not allocate the context-sized C++ tile/validity vectors.
