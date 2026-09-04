@@ -1,0 +1,177 @@
+name: llama.cpp real-model ranking diagnostic
+
+on:
+  pull_request:
+    paths:
+      - "integration/llama.cpp/run_rank_diagnostic.sh"
+      - "integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt"
+      - "integration/llama.cpp/shim/**"
+      - "integration/llama.cpp/patches/**"
+      - "integration/llama.cpp/build_and_roundtrip.sh"
+      - "integration/llama.cpp/scripts/train_layer_weights.sh"
+      - "slha-c/**"
+      - "scirust/**"
+      - ".github/workflows/llama-rank-diagnostic.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llama-rank-diagnostic-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  rank-diagnostic:
+    name: TinyStories 15M paired ranking diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Download pinned real GGUF and verify SHA-256
+        env:
+          MODEL_URL: https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q8_0.gguf?download=true
+          MODEL_SHA256: 2eda49203f2f044f3dddf29a7dd7cc861ef5a0340f518a19613d73ba6d9c06b6
+        run: |
+          mkdir -p "$RUNNER_TEMP/slha-rank-diagnostic"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$MODEL_URL" \
+            -o "$RUNNER_TEMP/slha-rank-diagnostic/stories15M-q8_0.gguf"
+          echo "$MODEL_SHA256  $RUNNER_TEMP/slha-rank-diagnostic/stories15M-q8_0.gguf" | sha256sum --check -
+
+      - name: Prove diagnostic corpus is not the protected holdout
+        run: |
+          test -s integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt
+          test -s integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt
+          test "$(sha256sum integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt | awk '{print $1}')" != \
+               "$(sha256sum integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt | awk '{print $1}')"
+
+      - name: Prepare calibration-only text
+        run: |
+          python3 - "$RUNNER_TEMP/slha-rank-diagnostic/calibration.txt" <<'PY'
+          import sys
+          text = (
+              "A small fox walked beside a quiet river and watched the morning sky. "
+              "Later the fox found a wooden box, carried it home, and shared it with a friend.\n"
+          )
+          with open(sys.argv[1], "w", encoding="utf-8") as f:
+              f.write(text * 160)
+          PY
+          test -s "$RUNNER_TEMP/slha-rank-diagnostic/calibration.txt"
+          test "$(sha256sum "$RUNNER_TEMP/slha-rank-diagnostic/calibration.txt" | awk '{print $1}')" != \
+               "$(sha256sum integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt | awk '{print $1}')"
+
+      - name: Collect real K activations
+        env:
+          WORK: ${{ runner.temp }}/slha-rank-diagnostic/collect-work
+          CALIB_DIR: ${{ runner.temp }}/slha-rank-diagnostic/calibration
+          DATA_FILE: ${{ runner.temp }}/slha-rank-diagnostic/calibration.txt
+          MODEL_REPO: ggml-org/tiny-llamas
+          MODEL_FILE: ${{ runner.temp }}/slha-rank-diagnostic/stories15M-q8_0.gguf
+          CHUNKS: "1"
+          THREADS: "2"
+          SLHA_CALIBRATION_MIN_ROWS: "16"
+        run: |
+          mkdir -p "$WORK"
+          git clone --depth 1 --branch b9860 https://github.com/ggml-org/llama.cpp "$WORK/llama.cpp"
+          normalize_patch() {
+            awk '
+              /^diff --git / { in_hunk = 0 }
+              /^@@ / { in_hunk = 1 }
+              { if (in_hunk && length($0) == 0) print " "; else print $0 }
+            ' "$1" > "$2"
+          }
+          for patch_id in 0001-slha-k-passthrough 0002-slha-external-k 0003-slha-external-k-hardening; do
+            normalize_patch \
+              "integration/llama.cpp/patches/$patch_id.patch" \
+              "$WORK/$patch_id.normalized.patch"
+            git -C "$WORK/llama.cpp" apply --recount --check "$WORK/$patch_id.normalized.patch"
+            git -C "$WORK/llama.cpp" apply --recount "$WORK/$patch_id.normalized.patch"
+          done
+          cp integration/llama.cpp/shim/slha_external_k.hpp "$WORK/llama.cpp/src/"
+          cp integration/llama.cpp/shim/slha_external_k.cpp "$WORK/llama.cpp/src/"
+          bash integration/llama.cpp/build_and_roundtrip.sh collect
+          python3 - "$CALIB_DIR/calibration_manifest.json" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          assert data.get("valid") is True, data
+          assert int(data.get("num_layers", 0)) == 6, data
+          assert int(data.get("observed_dim", 0)) == 288, data
+          PY
+
+      - name: Train six layer projection artifacts
+        env:
+          WORK: ${{ runner.temp }}/slha-rank-diagnostic/collect-work
+          CALIB_DIR: ${{ runner.temp }}/slha-rank-diagnostic/calibration
+          WEIGHTS_DIR: ${{ runner.temp }}/slha-rank-diagnostic/weights
+          MODEL_REPO: ggml-org/tiny-llamas
+          MODEL_FILE: stories15M-q8_0.gguf
+          EXPECT_LAYERS: "6"
+          SLHA_CALIBRATION_MIN_ROWS: "16"
+        run: |
+          bash integration/llama.cpp/scripts/train_layer_weights.sh mixed
+          test "$(find "$WEIGHTS_DIR" -maxdepth 1 -name 'layer-*.slhw' -type f | wc -l)" -eq 6
+          python3 -m json.tool "$WEIGHTS_DIR/manifest.json" >/dev/null
+
+      - name: Build paired llama worktree and exercise both ordinary and external paths
+        env:
+          WORK: ${{ runner.temp }}/slha-rank-diagnostic/pair-work
+        run: |
+          bash integration/llama.cpp/run_real_pair.sh \
+            --model "$RUNNER_TEMP/slha-rank-diagnostic/stories15M-q8_0.gguf" \
+            --weights-dir "$RUNNER_TEMP/slha-rank-diagnostic/weights" \
+            --prompt "Once upon a time," \
+            --max-tokens 2 \
+            --context-size 128 \
+            --threads 2 \
+            --gpu-layers 0 \
+            --codec mixed \
+            --output-dir "$RUNNER_TEMP/slha-rank-diagnostic/pair-bootstrap"
+
+      - name: Run paired-baseline ranking diagnostic on separate corpus
+        run: |
+          bash integration/llama.cpp/run_rank_diagnostic.sh \
+            --model "$RUNNER_TEMP/slha-rank-diagnostic/stories15M-q8_0.gguf" \
+            --weights-dir "$RUNNER_TEMP/slha-rank-diagnostic/weights" \
+            --corpus integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt \
+            --output-dir "$RUNNER_TEMP/slha-rank-diagnostic/ranking" \
+            --pair-work "$RUNNER_TEMP/slha-rank-diagnostic/pair-work" \
+            --context-size 128 \
+            --chunks 1 \
+            --threads 2 \
+            --gpu-layers 0 \
+            --codec mixed
+
+      - name: Validate diagnostic-only ranking evidence
+        run: |
+          REPORT="$RUNNER_TEMP/slha-rank-diagnostic/ranking/ranking-diagnostic.json"
+          python3 -m json.tool "$REPORT" >/dev/null
+          python3 - "$REPORT" <<'PY'
+          import json, math, sys
+          r = json.load(open(sys.argv[1]))
+          assert r["schema"] == "slha_rank_diagnostic_v1", r
+          assert r["status"] == "DIAGNOSTIC_ONLY_NOT_QUALITY_PROMOTION", r
+          assert r["execution_mode"] == "historical_tilestore_replace_with_paired_baseline_qk", r
+          assert r["external_k"] is False and r["ccos"] is False, r
+          assert r["paired_baseline_logits"] is True, r
+          assert r["corpus"]["is_protected_holdout"] is False, r
+          assert r["corpus"]["sha256"] != r["corpus"]["protected_holdout_sha256"], r
+          assert int(r["sampled_rows"]) > 0, r
+          layers = r["metrics"]["layers"]
+          assert layers, r
+          for layer_id, layer in layers.items():
+              assert int(layer["rows"]) > 0, (layer_id, layer)
+              assert int(layer["active_accounting_failures"]) == 0, (layer_id, layer)
+              assert layer["acct_identity_holds"] is True, (layer_id, layer)
+              assert math.isfinite(float(layer["spearman"])), (layer_id, layer)
+              assert math.isfinite(float(layer["kendall_tau_b"])), (layer_id, layer)
+          print(json.dumps({
+              "sampled_rows": r["sampled_rows"],
+              "layers": len(layers),
+              "corpus_sha256": r["corpus"]["sha256"],
+          }, sort_keys=True))
+          PY
