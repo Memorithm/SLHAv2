@@ -198,13 +198,15 @@ cases = {
 ppl_re = re.compile(r"Final estimate:\s*PPL\s*=\s*([0-9eE+.-]+)")
 
 def parse_oracle_summary(text):
-    start = text.rfind("SLHA_SCORE_ORACLE_SUMMARY\n")
-    end = text.rfind("END_SLHA_SCORE_ORACLE_SUMMARY")
-    if start < 0 or end < start:
+    blocks = re.findall(
+        r"SLHA_SCORE_ORACLE_SUMMARY[^\n]*\n(.*?)END_SLHA_SCORE_ORACLE_SUMMARY",
+        text,
+        flags=re.DOTALL,
+    )
+    if not blocks:
         return None
-    block = text[start + len("SLHA_SCORE_ORACLE_SUMMARY\n"):end]
     out = {}
-    for line in block.splitlines():
+    for line in blocks[-1].splitlines():
         if "=" in line:
             key, value = line.split("=", 1)
             out[key.strip()] = value.strip()
