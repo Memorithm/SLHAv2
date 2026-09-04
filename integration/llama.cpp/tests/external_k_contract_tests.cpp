@@ -168,9 +168,11 @@ int main() {
     assert(stats.validity_backing_capacity_bytes >= 3u * 4096u);
 
     // Score semantics must not depend on whether a tile is owned by the legacy
-    // C++ vector store or by the physical Rust CCOS cache. This is the contract
-    // that allows diagnostic-only ranking measurements on the instrumentable
-    // vector path to describe the same compressed score function used by CCOS.
+    // C++ vector store or by the physical Rust CCOS cache. The public stateless
+    // slha_process_tile entry point is the direct scalar oracle for a prepared
+    // query; slha_score_tile documents itself as equivalent except for an extra
+    // model-handle check. We first prove that the vector store preserves the
+    // exact tile bytes, then compare CCOS batch scoring against that oracle.
     constexpr size_t equivalence_count = 4;
     SciRustSlhaTile equivalence_tiles[equivalence_count];
     for (size_t i = 0; i < equivalence_count; ++i) {
@@ -179,15 +181,19 @@ int main() {
     float equivalence_q_coarse[SLHA_D_C] = {};
     uint64_t equivalence_q_sign[SLHA_RESIDUAL_WORDS] = {};
     score_equivalence_query(equivalence_q_coarse, equivalence_q_sign);
-    float vector_scores[equivalence_count] = {};
     for (size_t i = 0; i < equivalence_count; ++i) {
         assert(slha_external_k_write_tile(1, i, &equivalence_tiles[i]));
     }
-    assert(slha_external_k_score_tiles(
-               nullptr, 1, 0, equivalence_count,
-               equivalence_q_coarse, equivalence_q_sign, vector_scores) == SLHA_OK);
-    for (float score : vector_scores) {
-        assert(std::isfinite(score));
+    const auto * vector_tiles = static_cast<const SciRustSlhaTile *>(
+        g_slha_tile_store.read_range(1, 0, equivalence_count));
+    assert(vector_tiles != nullptr);
+    float vector_scores[equivalence_count] = {};
+    for (size_t i = 0; i < equivalence_count; ++i) {
+        assert(std::memcmp(&vector_tiles[i], &equivalence_tiles[i], sizeof(SciRustSlhaTile)) == 0);
+        assert(slha_process_tile(
+                   &vector_tiles[i], equivalence_q_coarse,
+                   equivalence_q_sign, &vector_scores[i]) == SLHA_OK);
+        assert(std::isfinite(vector_scores[i]));
     }
 
     set_valid_ccos_env();
