@@ -123,6 +123,12 @@ fn validate_args(args: &Args) {
             args.training_manifest
         ));
     }
+    let startup_manifest = format!("{}.startup.json", args.training_manifest);
+    if Path::new(&startup_manifest).exists() {
+        fail(format!(
+            "startup evidence {startup_manifest:?} already exists; refusing to overwrite a prior failed or incomplete attempt"
+        ));
+    }
 }
 
 fn sha256_file(path: &str) -> Result<String, String> {
