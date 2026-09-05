@@ -146,6 +146,12 @@ fn validate_args(args: &Args) {
             args.weights_dir
         ));
     }
+    if Path::new(&args.output).exists() {
+        fail(format!(
+            "--output {:?} already exists; refusing to overwrite prior validation evidence",
+            args.output
+        ));
+    }
     let dataset_manifest = format!("{}/rank_dataset_manifest.json", args.dataset);
     let weights_manifest = format!("{}/manifest.json", args.weights_dir);
     for path in [
