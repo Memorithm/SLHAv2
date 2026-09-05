@@ -5,8 +5,7 @@
 
 use scirust::lr1_contract::{self, TRAINING_CHUNKS, VALIDATION_CHUNKS};
 
-const REPOSITORY_CONTRACT: &str =
-    include_str!("../../integration/llama.cpp/lr1_contract_v1.json");
+const REPOSITORY_CONTRACT: &str = include_str!("../../integration/llama.cpp/lr1_contract_v1.json");
 
 #[test]
 fn repository_lr1_contract_matches_runtime_semantics() {
