@@ -96,11 +96,13 @@ fn validate_args(args: &Args) {
             fail(format!("required directory does not exist: {dir}"));
         }
     }
+    let dataset_manifest = format!("{}/rank_dataset_manifest.json", args.dataset);
+    let initial_manifest = format!("{}/manifest.json", args.initial_weights);
     for file in [
-        &args.contract,
-        &args.source_manifest,
-        &format!("{}/rank_dataset_manifest.json", args.dataset),
-        &format!("{}/manifest.json", args.initial_weights),
+        args.contract.as_str(),
+        args.source_manifest.as_str(),
+        dataset_manifest.as_str(),
+        initial_manifest.as_str(),
     ] {
         if !Path::new(file).is_file() {
             fail(format!("required input file does not exist: {file}"));
@@ -215,6 +217,12 @@ fn main() {
         }
         initial_layer_hashes.push(sha256_file(&path).unwrap_or_else(|e| fail(e)));
     }
+    let initial_hash_json = initial_layer_hashes
+        .iter()
+        .enumerate()
+        .map(|(layer, hash)| format!("    {{\"layer\":{layer},\"sha256\":\"{hash}\"}}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
 
     let stage = format!("{}.stage.{}", args.output, std::process::id());
     if Path::new(&stage).exists() {
@@ -223,6 +231,13 @@ fn main() {
     }
     std::fs::create_dir_all(&stage)
         .unwrap_or_else(|e| fail(format!("cannot create stage directory: {e}")));
+
+    if let Some(parent) = Path::new(&args.training_manifest).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|e| fail(format!("cannot create evidence directory: {e}")));
+        }
+    }
 
     // Publish immutable input lineage before the first optimiser call.
     let startup = format!(
@@ -235,6 +250,7 @@ fn main() {
             "  \"source_manifest_sha256\":\"{}\",\n",
             "  \"rank_dataset_manifest_sha256\":\"{}\",\n",
             "  \"initial_weights_manifest_sha256\":\"{}\",\n",
+            "  \"initial_weights_per_layer\":[\n{}\n  ],\n",
             "  \"training_chunks\":[0,1,2,3,4,5,6,7,8,9,10,11],\n",
             "  \"objective\":\"pairwise-topk\",\n",
             "  \"top_k\":16,\n",
@@ -256,6 +272,7 @@ fn main() {
         source_manifest_sha,
         dataset_manifest_sha,
         initial_manifest_sha,
+        initial_hash_json,
     );
     std::fs::write(format!("{stage}/startup_lineage.json"), startup.as_bytes())
         .unwrap_or_else(|e| fail(format!("cannot write startup lineage: {e}")));
@@ -279,7 +296,7 @@ fn main() {
         let dataset_path = format!("{}/rank-layer-{layer:03}.bin", args.dataset);
         let initial_path = format!("{}/layer-{layer:03}.slhw", args.initial_weights);
         let data = read_layer(&dataset_path).unwrap_or_else(|e| fail(e));
-        if usize::try_from(data.layer).ok() != Some(layer) {
+        if data.layer != layer as u32 {
             fail(format!(
                 "dataset layer mismatch: file {layer}, header {}",
                 data.layer
@@ -332,7 +349,9 @@ fn main() {
         if projection.iter().any(|value| !value.is_finite())
             || history.epoch_loss.iter().any(|value| !value.is_finite())
         {
-            fail(format!("layer {layer}: training produced non-finite values"));
+            fail(format!(
+                "layer {layer}: training produced non-finite values"
+            ));
         }
 
         let (weight_seed, rht) = weight_seed_rht(&initial_path).unwrap_or_else(|e| fail(e));
