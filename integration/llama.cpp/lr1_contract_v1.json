@@ -46,9 +46,17 @@
       "truncate_to_last_newline": true,
       "encoding": "utf-8"
     },
-    "rank_dataset_chunks": 16,
-    "training_chunks": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-    "validation_chunks": [12, 13, 14, 15]
+    "rank_dataset_evaluation_chunks": 16,
+    "rank_dataset_storage_slots": 17,
+    "chunk_indexing": {
+      "initial_storage_slot": 0,
+      "initial_storage_slot_must_be_empty": true,
+      "first_populated_chunk": 1,
+      "last_populated_chunk": 16,
+      "reason": "Pinned llama.cpp perplexity clears memory before each evaluation chunk; the SLHA clear hook increments the collector chunk before the first decode."
+    },
+    "training_chunks": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "validation_chunks": [13, 14, 15, 16]
   },
   "diagnostic_corpus": {
     "path": "integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt",
@@ -74,6 +82,9 @@
     "protected_holdout_allowed": false,
     "required_comparison": "unchanged current mixed/L2 control versus frozen LR1 candidate",
     "required_ranking_metric": "top16_set_recall_or_overlap",
+    "training_short_context_policy": "retain_existing_pairwise_topk_geometry_semantics",
+    "ranking_metric_row_rule": "n_visible > top_k",
+    "ranking_metric_short_rows": "excluded_from_topk_metrics_only",
     "required_task_metric": "non_protected_diagnostic_perplexity",
     "required_execution_checks": [
       "full active replacement coverage",
