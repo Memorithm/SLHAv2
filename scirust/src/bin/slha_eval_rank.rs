@@ -10,7 +10,6 @@ use scirust::metrics::spearman;
 use scirust::rank_dataset::read_layer;
 use scirust::weights;
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::Path;
 
 const EXPECTED_TOP_K: usize = 16;
@@ -77,8 +76,11 @@ fn parse_args() -> Args {
     };
     let parse_usize = |key: &str, default: &str| -> usize {
         let text = get(key, Some(default));
-        text.parse::<usize>()
-            .unwrap_or_else(|_| fail(format!("{key}: expected non-negative integer, got {text:?}")))
+        text.parse::<usize>().unwrap_or_else(|_| {
+            fail(format!(
+                "{key}: expected non-negative integer, got {text:?}"
+            ))
+        })
     };
 
     let split_text = get("--split-chunks", Some("12,13,14,15"));
@@ -141,10 +143,12 @@ fn validate_args(args: &Args) {
             args.weights_dir
         ));
     }
+    let dataset_manifest = format!("{}/rank_dataset_manifest.json", args.dataset);
+    let weights_manifest = format!("{}/manifest.json", args.weights_dir);
     for path in [
         args.contract.as_str(),
-        &format!("{}/rank_dataset_manifest.json", args.dataset),
-        &format!("{}/manifest.json", args.weights_dir),
+        dataset_manifest.as_str(),
+        weights_manifest.as_str(),
     ] {
         if !Path::new(path).is_file() {
             fail(format!("required manifest/file is missing: {path}"));
@@ -259,7 +263,11 @@ impl Summary {
             }
         }
 
-        self.spearman_sum += f64::from(spearman(scores, baseline));
+        let row_spearman = spearman(scores, baseline);
+        if !row_spearman.is_finite() {
+            return Err("metric row produced non-finite Spearman correlation".into());
+        }
+        self.spearman_sum += f64::from(row_spearman);
         let base_std = stddev(baseline);
         let score_std = stddev(scores);
         if base_std > 0.0 && score_std > 0.0 {
@@ -345,7 +353,7 @@ fn main() {
         }
 
         let rows = read_layer(&dataset_path).unwrap_or_else(|e| fail(e));
-        if usize::try_from(rows.layer).ok() != Some(layer) {
+        if rows.layer != layer as u32 {
             fail(format!(
                 "dataset layer header mismatch: file layer {layer}, header {}",
                 rows.layer
@@ -382,7 +390,8 @@ fn main() {
             if scores.len() != row.n_visible {
                 fail(format!(
                     "layer {layer} row {index}: candidate scored {} keys, expected {}",
-                    scores.len(), row.n_visible
+                    scores.len(),
+                    row.n_visible
                 ));
             }
             candidate
@@ -410,9 +419,7 @@ fn main() {
     let per_layer_json = per_layer_rows
         .iter()
         .map(|(layer, rows, sha)| {
-            format!(
-                "    {{\"layer\":{layer},\"rows\":{rows},\"weights_sha256\":\"{sha}\"}}"
-            )
+            format!("    {{\"layer\":{layer},\"rows\":{rows},\"weights_sha256\":\"{sha}\"}}")
         })
         .collect::<Vec<_>>()
         .join(",\n");
