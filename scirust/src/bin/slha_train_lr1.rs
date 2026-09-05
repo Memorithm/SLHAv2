@@ -268,6 +268,7 @@ fn main() {
             "  \"batch\":16,\n",
             "  \"max_keys\":256,\n",
             "  \"geometry_weight\":0.25,\n",
+            "  \"short_context_policy\":\"retain_existing_objective_semantics\",\n",
             "  \"input_frozen_before_optimizer\":true\n",
             "}}\n"
         ),
@@ -316,23 +317,19 @@ fn main() {
             ));
         }
 
-        let mut rows = Vec::<Row<'_>>::new();
-        for index in data.indices_for_chunks(&TRAINING_CHUNKS) {
-            let row = data.row(index).unwrap_or_else(|e| fail(e));
-            if row.n_visible < TOP_K {
-                fail(format!(
-                    "layer {layer} row {index}: n_visible={} is smaller than frozen top_k={TOP_K}",
-                    row.n_visible
-                ));
-            }
-            rows.push(Row {
-                q: row.q,
-                keys: row.keys,
-                baseline: row.baseline,
-                n_visible: row.n_visible,
-                d: row.key_dim,
-            });
-        }
+        let rows = data
+            .indices_for_chunks(&TRAINING_CHUNKS)
+            .map(|index| {
+                let row = data.row(index).unwrap_or_else(|e| fail(e));
+                Row {
+                    q: row.q,
+                    keys: row.keys,
+                    baseline: row.baseline,
+                    n_visible: row.n_visible,
+                    d: row.key_dim,
+                }
+            })
+            .collect::<Vec<_>>();
         if rows.is_empty() {
             fail(format!(
                 "layer {layer}: frozen training chunks contain no rows"
@@ -430,6 +427,7 @@ fn main() {
             "  \"rank_dataset_storage_slots\":17,\n",
             "  \"populated_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],\n",
             "  \"training_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12],\n",
+            "  \"short_context_policy\":\"retain_existing_objective_semantics\",\n",
             "  \"per_layer\":[\n{}\n  ],\n",
             "  \"loss_history\":{{\n{}\n  }},\n",
             "  \"aggregate_sha256\":\"{}\",\n",
