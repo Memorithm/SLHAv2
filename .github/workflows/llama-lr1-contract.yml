@@ -1,0 +1,35 @@
+name: llama.cpp LR1 frozen contract
+
+on:
+  push:
+    paths:
+      - "integration/llama.cpp/lr1_contract_v1.json"
+      - "integration/llama.cpp/check_lr1_contract.sh"
+      - "integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt"
+      - "integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt"
+      - "integration/llama.cpp/shim/slha_external_k.cpp"
+      - "scirust/src/bin/slha_train_rank.rs"
+      - ".github/workflows/llama-lr1-contract.yml"
+  pull_request:
+    paths:
+      - "integration/llama.cpp/lr1_contract_v1.json"
+      - "integration/llama.cpp/check_lr1_contract.sh"
+      - "integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt"
+      - "integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt"
+      - "integration/llama.cpp/shim/slha_external_k.cpp"
+      - "scirust/src/bin/slha_train_rank.rs"
+      - ".github/workflows/llama-lr1-contract.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: LR1 contract is frozen and holdout-safe
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: JSON syntax
+        run: python3 -m json.tool integration/llama.cpp/lr1_contract_v1.json >/dev/null
+      - name: Frozen candidate and leakage guards
+        run: bash integration/llama.cpp/check_lr1_contract.sh
