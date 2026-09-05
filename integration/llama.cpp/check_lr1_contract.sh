@@ -148,23 +148,13 @@ for key in required_true:
     if invariants.get(key) is not True:
         raise SystemExit(f"LR1_INVARIANT_DISABLED:{key}")
 
-# Pin the collector lifecycle that makes the storage ids one-based for the
-# pinned perplexity loop: state starts at 0 and clear increments before rows in
-# the next evaluation chunk are collected.
 collector = (root / "integration/llama.cpp/shim/slha_rank_dataset.cpp").read_text(encoding="utf-8")
-for needle in [
-    "int chunk = 0;",
-    "if (s.on) ++s.chunk;",
-]:
+for needle in ["int chunk = 0;", "if (s.on) ++s.chunk;"]:
     if needle not in collector:
         raise SystemExit(f"LR1_COLLECTOR_INDEXING_GUARD_MISSING:{needle}")
 
 shim = (root / "integration/llama.cpp/shim/slha_llama.cpp").read_text(encoding="utf-8")
-for needle in [
-    "void slha_k_clear_all()",
-    "slha_rank_dataset::add_keys",
-    "slha_rank_dataset::begin_chunk();",
-]:
+for needle in ["void slha_k_clear_all()", "slha_rank_dataset::add_keys", "slha_rank_dataset::begin_chunk();"]:
     if needle not in shim:
         raise SystemExit(f"LR1_CLEAR_LIFECYCLE_GUARD_MISSING:{needle}")
 
@@ -203,8 +193,8 @@ for needle in [
     "Objective::PairwiseTopK",
     "validate_chunk_layout(STORAGE_SLOTS, &POPULATED_CHUNKS)",
     "lr1_contract::validate_file(&args.contract)",
-    '"contract_semantically_validated":true',
-    '"short_context_policy":\"retain_existing_objective_semantics\"',
+    '\"contract_semantically_validated\":true',
+    '\"short_context_policy\":\"retain_existing_objective_semantics\"',
 ]:
     if needle not in trainer:
         raise SystemExit(f"LR1_FROZEN_TRAINER_GUARD_MISSING:{needle}")
@@ -228,13 +218,13 @@ for needle in [
     "validate_chunk_layout(EXPECTED_STORAGE_SLOTS, &EXPECTED_POPULATED)",
     "LatentCodec::Mixed",
     "lr1_contract::validate_file(&args.contract)",
-    '"semantically_validated":true',
+    '\"semantically_validated\":true',
     "ranking_rows: u64",
     "if baseline.len() > k",
-    '"ranking_rows"',
-    '"spearman_rows"',
-    '"geometry_rows"',
-    '"ranking_row_rule":\"n_visible > top_k\"',
+    '\"ranking_rows\"',
+    '\"spearman_rows\"',
+    '\"geometry_rows\"',
+    '\"ranking_row_rule\":\"n_visible > top_k\"',
 ]:
     if needle not in evaluator:
         raise SystemExit(f"LR1_FROZEN_EVALUATOR_GUARD_MISSING:{needle}")
