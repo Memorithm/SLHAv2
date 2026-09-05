@@ -115,8 +115,19 @@ if rank_diag.get("sha256") == holdout.get("sha256"):
     raise SystemExit("LR1_DIAGNOSTIC_EQUALS_HOLDOUT")
 if holdout.get("stage_a_access") != "FORBIDDEN":
     raise SystemExit("LR1_HOLDOUT_STAGE_A_NOT_FORBIDDEN")
-if (c.get("stage_a") or {}).get("protected_holdout_allowed") is not False:
+
+stage_a = c.get("stage_a") or {}
+if stage_a.get("protected_holdout_allowed") is not False:
     raise SystemExit("LR1_STAGE_A_HOLDOUT_ENABLED")
+expected_short_context = {
+    "training_short_context_policy": "retain_existing_pairwise_topk_geometry_semantics",
+    "ranking_metric_row_rule": "n_visible > top_k",
+    "ranking_metric_short_rows": "excluded_from_topk_metrics_only",
+}
+for key, value in expected_short_context.items():
+    if stage_a.get(key) != value:
+        raise SystemExit(f"LR1_SHORT_CONTEXT_CONTRACT_DRIFT:{key}")
+
 if (c.get("stage_b") or {}).get("enabled_by_this_contract") is not False:
     raise SystemExit("LR1_STAGE_B_PREMATURELY_ENABLED")
 if (c.get("stage_b") or {}).get("require_separate_pre_holdout_freeze") is not True:
@@ -173,12 +184,15 @@ for needle in [
     "const TRAINING_CHUNKS: [usize; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];",
     "Objective::PairwiseTopK",
     "validate_chunk_layout(STORAGE_SLOTS, &POPULATED_CHUNKS)",
+    '"short_context_policy":\"retain_existing_objective_semantics\"',
 ]:
     if needle not in trainer:
         raise SystemExit(f"LR1_FROZEN_TRAINER_GUARD_MISSING:{needle}")
 for forbidden in ["--top-k", "--layers", "--objective", "--learning-rate", "--epochs"]:
     if f'"{forbidden}"' in trainer:
         raise SystemExit(f"LR1_FROZEN_TRAINER_EXPOSES_TUNING:{forbidden}")
+if "n_visible < TOP_K" in trainer or "n_visible <= TOP_K" in trainer:
+    raise SystemExit("LR1_TRAINER_FILTERS_SHORT_CONTEXT_ROWS")
 
 evaluator = (root / "scirust/src/bin/slha_eval_rank.rs").read_text(encoding="utf-8")
 for needle in [
@@ -188,6 +202,12 @@ for needle in [
     "const EXPECTED_SPLIT: [usize; 4] = [13, 14, 15, 16];",
     "validate_chunk_layout(EXPECTED_STORAGE_SLOTS, &EXPECTED_POPULATED)",
     "LatentCodec::Mixed",
+    "ranking_rows: u64",
+    "if baseline.len() > k",
+    '"ranking_rows"',
+    '"spearman_rows"',
+    '"geometry_rows"',
+    '"ranking_row_rule":\"n_visible > top_k\"',
 ]:
     if needle not in evaluator:
         raise SystemExit(f"LR1_FROZEN_EVALUATOR_GUARD_MISSING:{needle}")
@@ -209,6 +229,7 @@ compact = {
     "storage_slots": source["rank_dataset_storage_slots"],
     "training_chunks": train,
     "validation_chunks": valid,
+    "ranking_metric_row_rule": stage_a["ranking_metric_row_rule"],
     "diagnostic_sha256": rank_diag["sha256"],
     "protected_holdout_sha256": holdout["sha256"],
     "stage_b_enabled": c["stage_b"]["enabled_by_this_contract"],
