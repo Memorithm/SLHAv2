@@ -141,9 +141,11 @@ impl<'a> Cursor<'a> {
             .checked_mul(4)
             .ok_or_else(|| format!("rank dataset: {what} byte count overflow"))?;
         let raw = self.take(bytes, what)?;
+        let (chunks, remainder) = raw.as_chunks::<4>();
+        debug_assert!(remainder.is_empty());
         let mut out = Vec::with_capacity(count);
-        for (index, chunk) in raw.chunks_exact(4).enumerate() {
-            let value = f32::from_le_bytes(chunk.try_into().expect("exact f32 width"));
+        for (index, chunk) in chunks.iter().enumerate() {
+            let value = f32::from_le_bytes(*chunk);
             if !value.is_finite() {
                 return Err(format!(
                     "rank dataset: non-finite {what} value at element {index}"
