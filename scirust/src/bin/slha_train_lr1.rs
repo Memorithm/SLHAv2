@@ -23,7 +23,9 @@ const EPOCHS: usize = 2;
 const BATCH: usize = 16;
 const MAX_KEYS: usize = 256;
 const GEOMETRY_WEIGHT: f32 = 0.25;
-const TRAINING_CHUNKS: [usize; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+const STORAGE_SLOTS: usize = 17;
+const POPULATED_CHUNKS: [usize; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+const TRAINING_CHUNKS: [usize; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 struct Args {
     dataset: String,
@@ -251,7 +253,9 @@ fn main() {
             "  \"rank_dataset_manifest_sha256\":\"{}\",\n",
             "  \"initial_weights_manifest_sha256\":\"{}\",\n",
             "  \"initial_weights_per_layer\":[\n{}\n  ],\n",
-            "  \"training_chunks\":[0,1,2,3,4,5,6,7,8,9,10,11],\n",
+            "  \"rank_dataset_storage_slots\":17,\n",
+            "  \"populated_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],\n",
+            "  \"training_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12],\n",
             "  \"objective\":\"pairwise-topk\",\n",
             "  \"top_k\":16,\n",
             "  \"layers\":\"all\",\n",
@@ -302,6 +306,8 @@ fn main() {
                 data.layer
             ));
         }
+        data.validate_chunk_layout(STORAGE_SLOTS, &POPULATED_CHUNKS)
+            .unwrap_or_else(|e| fail(format!("layer {layer}: {e}")));
         let initial = weights::load(&initial_path).unwrap_or_else(|e| fail(e));
         if initial.d != data.q_dim || initial.d != data.key_dim {
             fail(format!(
@@ -421,7 +427,9 @@ fn main() {
             "  \"batch\":16,\n",
             "  \"max_keys\":256,\n",
             "  \"geometry_weight\":0.25,\n",
-            "  \"training_chunks\":[0,1,2,3,4,5,6,7,8,9,10,11],\n",
+            "  \"rank_dataset_storage_slots\":17,\n",
+            "  \"populated_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],\n",
+            "  \"training_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12],\n",
             "  \"per_layer\":[\n{}\n  ],\n",
             "  \"loss_history\":{{\n{}\n  }},\n",
             "  \"aggregate_sha256\":\"{}\",\n",
