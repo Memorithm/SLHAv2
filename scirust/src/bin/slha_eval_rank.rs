@@ -6,6 +6,7 @@
 //! Baseline logits remain offline labels only.
 
 use scirust::attention::slha_v2::LatentCodec;
+use scirust::lr1_contract;
 use scirust::metrics::spearman;
 use scirust::rank_dataset::read_layer;
 use scirust::weights;
@@ -346,6 +347,8 @@ fn json_escape(value: &str) -> String {
 
 fn main() {
     let args = parse_args();
+    lr1_contract::validate_file(&args.contract)
+        .unwrap_or_else(|e| fail(format!("LR1 contract semantic validation failed: {e}")));
     let commit = git_head().unwrap_or_else(|e| fail(e));
     let contract_sha = sha256_file(&args.contract).unwrap_or_else(|e| fail(e));
     let dataset_manifest = format!("{}/rank_dataset_manifest.json", args.dataset);
@@ -460,7 +463,7 @@ fn main() {
             "  \"status\":\"MECHANISTIC_VALIDATION_ONLY_NOT_QUALITY_PROMOTION\",\n",
             "  \"candidate_id\":\"slha-lr1-pairwise-top16-all-layers-v1\",\n",
             "  \"slhav2_commit\":\"{}\",\n",
-            "  \"contract\":{{\"path\":\"{}\",\"sha256\":\"{}\"}},\n",
+            "  \"contract\":{{\"path\":\"{}\",\"sha256\":\"{}\",\"semantically_validated\":true}},\n",
             "  \"dataset\":{{\"path\":\"{}\",\"manifest_sha256\":\"{}\",\"storage_slots\":17,\"populated_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],\"validation_chunks\":[{}]}},\n",
             "  \"candidate_weights\":{{\"path\":\"{}\",\"manifest_sha256\":\"{}\"}},\n",
             "  \"configuration\":{{\"top_k\":{},\"layers\":{},\"codec\":\"mixed\",\"ranking_row_rule\":\"n_visible > top_k\"}},\n",
