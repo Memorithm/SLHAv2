@@ -102,7 +102,11 @@ fn usize_array(value: &Json, key: &str) -> Result<Vec<usize>, String> {
         let number = item
             .as_f64()
             .ok_or_else(|| format!("LR1_CONTRACT_TYPE_MISMATCH:{key}[{index}]:number"))?;
-        if !number.is_finite() || number < 0.0 || number.fract() != 0.0 || number > usize::MAX as f64 {
+        if !number.is_finite()
+            || number < 0.0
+            || number.fract() != 0.0
+            || number > usize::MAX as f64
+        {
             return Err(format!("LR1_CONTRACT_INVALID_INTEGER:{key}[{index}]"));
         }
         out.push(number as usize);
