@@ -154,7 +154,11 @@ for needle in ["int chunk = 0;", "if (s.on) ++s.chunk;"]:
         raise SystemExit(f"LR1_COLLECTOR_INDEXING_GUARD_MISSING:{needle}")
 
 shim = (root / "integration/llama.cpp/shim/slha_llama.cpp").read_text(encoding="utf-8")
-for needle in ["void slha_k_clear_all()", "slha_rank_dataset::add_keys", "slha_rank_dataset::begin_chunk();"]:
+for needle in [
+    "void slha_k_clear_all()",
+    "slha_rank_dataset::add_keys",
+    "slha_rank_dataset::begin_chunk();",
+]:
     if needle not in shim:
         raise SystemExit(f"LR1_CLEAR_LIFECYCLE_GUARD_MISSING:{needle}")
 
