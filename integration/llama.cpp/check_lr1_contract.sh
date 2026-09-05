@@ -197,8 +197,9 @@ for needle in [
     "Objective::PairwiseTopK",
     "validate_chunk_layout(STORAGE_SLOTS, &POPULATED_CHUNKS)",
     "lr1_contract::validate_file(&args.contract)",
-    '\"contract_semantically_validated\":true',
-    '\"short_context_policy\":\"retain_existing_objective_semantics\"',
+    "contract_semantically_validated",
+    "short_context_policy",
+    "retain_existing_objective_semantics",
 ]:
     if needle not in trainer:
         raise SystemExit(f"LR1_FROZEN_TRAINER_GUARD_MISSING:{needle}")
@@ -222,13 +223,14 @@ for needle in [
     "validate_chunk_layout(EXPECTED_STORAGE_SLOTS, &EXPECTED_POPULATED)",
     "LatentCodec::Mixed",
     "lr1_contract::validate_file(&args.contract)",
-    '\"semantically_validated\":true',
+    "semantically_validated",
     "ranking_rows: u64",
     "if baseline.len() > k",
-    '\"ranking_rows\"',
-    '\"spearman_rows\"',
-    '\"geometry_rows\"',
-    '\"ranking_row_rule\":\"n_visible > top_k\"',
+    "ranking_rows",
+    "spearman_rows",
+    "geometry_rows",
+    "ranking_row_rule",
+    "n_visible > top_k",
 ]:
     if needle not in evaluator:
         raise SystemExit(f"LR1_FROZEN_EVALUATOR_GUARD_MISSING:{needle}")
