@@ -172,6 +172,24 @@ patch = (root / "integration/llama.cpp/patches/0001-slha-k-passthrough.patch").r
 if "llama_memory_clear" not in patch or "slha_k_clear_all();" not in patch:
     raise SystemExit("LR1_LLAMA_CLEAR_HOOK_GUARD_MISSING")
 
+lib = (root / "scirust/src/lib.rs").read_text(encoding="utf-8")
+if "pub mod lr1_contract;" not in lib:
+    raise SystemExit("LR1_RUNTIME_CONTRACT_MODULE_NOT_EXPOSED")
+
+runtime_contract = (root / "scirust/src/lr1_contract.rs").read_text(encoding="utf-8")
+for needle in [
+    'pub const CANDIDATE_ID: &str = "slha-lr1-pairwise-top16-all-layers-v1";',
+    'pub const MODEL_SHA256: &str = "2eda49203f2f044f3dddf29a7dd7cc861ef5a0340f518a19613d73ba6d9c06b6";',
+    'pub const LLAMA_COMMIT: &str = "fdb1db877c526ec90f668eca1b858da5dba85560";',
+    'pub const TRAINING_CHUNKS: [usize; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];',
+    'pub const VALIDATION_CHUNKS: [usize; 4] = [13, 14, 15, 16];',
+    'pub fn validate_file(path: &str) -> Result<ValidatedContract, String>',
+    'exact_string(stage_a, "ranking_metric_row_rule", "n_visible > top_k")',
+    'exact_bool(stage_b, "enabled_by_this_contract", false)',
+]:
+    if needle not in runtime_contract:
+        raise SystemExit(f"LR1_RUNTIME_CONTRACT_GUARD_MISSING:{needle}")
+
 reader = (root / "scirust/src/rank_dataset.rs").read_text(encoding="utf-8")
 if "validate_chunk_layout" not in reader:
     raise SystemExit("LR1_DATASET_LAYOUT_VALIDATOR_MISSING")
@@ -184,6 +202,8 @@ for needle in [
     "const TRAINING_CHUNKS: [usize; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];",
     "Objective::PairwiseTopK",
     "validate_chunk_layout(STORAGE_SLOTS, &POPULATED_CHUNKS)",
+    "lr1_contract::validate_file(&args.contract)",
+    '"contract_semantically_validated":true',
     '"short_context_policy":\"retain_existing_objective_semantics\"',
 ]:
     if needle not in trainer:
@@ -193,6 +213,11 @@ for forbidden in ["--top-k", "--layers", "--objective", "--learning-rate", "--ep
         raise SystemExit(f"LR1_FROZEN_TRAINER_EXPOSES_TUNING:{forbidden}")
 if "n_visible < TOP_K" in trainer or "n_visible <= TOP_K" in trainer:
     raise SystemExit("LR1_TRAINER_FILTERS_SHORT_CONTEXT_ROWS")
+trainer_main = trainer.index("fn main()")
+trainer_validate = trainer.index("lr1_contract::validate_file(&args.contract)", trainer_main)
+trainer_optimizer = trainer.index("train_ranking(&rows", trainer_main)
+if not trainer_main < trainer_validate < trainer_optimizer:
+    raise SystemExit("LR1_TRAINER_CONTRACT_VALIDATION_ORDER_INVALID")
 
 evaluator = (root / "scirust/src/bin/slha_eval_rank.rs").read_text(encoding="utf-8")
 for needle in [
@@ -202,6 +227,8 @@ for needle in [
     "const EXPECTED_SPLIT: [usize; 4] = [13, 14, 15, 16];",
     "validate_chunk_layout(EXPECTED_STORAGE_SLOTS, &EXPECTED_POPULATED)",
     "LatentCodec::Mixed",
+    "lr1_contract::validate_file(&args.contract)",
+    '"semantically_validated":true',
     "ranking_rows: u64",
     "if baseline.len() > k",
     '"ranking_rows"',
@@ -211,6 +238,11 @@ for needle in [
 ]:
     if needle not in evaluator:
         raise SystemExit(f"LR1_FROZEN_EVALUATOR_GUARD_MISSING:{needle}")
+evaluator_main = evaluator.index("fn main()")
+evaluator_validate = evaluator.index("lr1_contract::validate_file(&args.contract)", evaluator_main)
+evaluator_dataset_read = evaluator.index("let rows = read_layer", evaluator_main)
+if not evaluator_main < evaluator_validate < evaluator_dataset_read:
+    raise SystemExit("LR1_EVALUATOR_CONTRACT_VALIDATION_ORDER_INVALID")
 
 external_k = (root / "integration/llama.cpp/shim/slha_external_k.cpp").read_text(encoding="utf-8")
 for needle in [
@@ -230,6 +262,7 @@ compact = {
     "training_chunks": train,
     "validation_chunks": valid,
     "ranking_metric_row_rule": stage_a["ranking_metric_row_rule"],
+    "runtime_contract_validation": True,
     "diagnostic_sha256": rank_diag["sha256"],
     "protected_holdout_sha256": holdout["sha256"],
     "stage_b_enabled": c["stage_b"]["enabled_by_this_contract"],
