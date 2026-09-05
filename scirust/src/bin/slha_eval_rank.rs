@@ -14,7 +14,9 @@ use std::path::Path;
 
 const EXPECTED_TOP_K: usize = 16;
 const EXPECTED_LAYERS: usize = 6;
-const EXPECTED_SPLIT: [usize; 4] = [12, 13, 14, 15];
+const EXPECTED_STORAGE_SLOTS: usize = 17;
+const EXPECTED_POPULATED: [usize; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+const EXPECTED_SPLIT: [usize; 4] = [13, 14, 15, 16];
 
 struct Args {
     dataset: String,
@@ -83,7 +85,7 @@ fn parse_args() -> Args {
         })
     };
 
-    let split_text = get("--split-chunks", Some("12,13,14,15"));
+    let split_text = get("--split-chunks", Some("13,14,15,16"));
     let split = split_text
         .split(',')
         .map(|value| {
@@ -359,6 +361,8 @@ fn main() {
                 rows.layer
             ));
         }
+        rows.validate_chunk_layout(EXPECTED_STORAGE_SLOTS, &EXPECTED_POPULATED)
+            .unwrap_or_else(|e| fail(format!("layer {layer}: {e}")));
         let model = weights::load(&weight_path).unwrap_or_else(|e| fail(e));
         if model.d != rows.q_dim || model.d != rows.key_dim {
             fail(format!(
@@ -438,7 +442,7 @@ fn main() {
             "  \"candidate_id\":\"slha-lr1-pairwise-top16-all-layers-v1\",\n",
             "  \"slhav2_commit\":\"{}\",\n",
             "  \"contract\":{{\"path\":\"{}\",\"sha256\":\"{}\"}},\n",
-            "  \"dataset\":{{\"path\":\"{}\",\"manifest_sha256\":\"{}\",\"validation_chunks\":[{}]}},\n",
+            "  \"dataset\":{{\"path\":\"{}\",\"manifest_sha256\":\"{}\",\"storage_slots\":17,\"populated_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],\"validation_chunks\":[{}]}},\n",
             "  \"candidate_weights\":{{\"path\":\"{}\",\"manifest_sha256\":\"{}\"}},\n",
             "  \"configuration\":{{\"top_k\":{},\"layers\":{},\"codec\":\"mixed\"}},\n",
             "  \"rows\":{},\n",
