@@ -6,6 +6,7 @@
 //! executed without weakening historical dataset/binding invariants.
 
 use scirust::learned::LearnedModel;
+use scirust::lr1_contract;
 use scirust::rank_dataset::read_layer;
 use scirust::ranking::{train_ranking, Geometry, Objective, Row, TrainConfig};
 use scirust::weights;
@@ -203,6 +204,8 @@ fn weight_seed_rht(path: &str) -> Result<(u64, bool), String> {
 
 fn main() {
     let args = parse_args();
+    lr1_contract::validate_file(&args.contract)
+        .unwrap_or_else(|e| fail(format!("LR1 contract semantic validation failed: {e}")));
     let commit = git_head().unwrap_or_else(|e| fail(e));
     let contract_sha = sha256_file(&args.contract).unwrap_or_else(|e| fail(e));
     let source_manifest_sha = sha256_file(&args.source_manifest).unwrap_or_else(|e| fail(e));
@@ -249,6 +252,7 @@ fn main() {
             "  \"candidate_id\":\"slha-lr1-pairwise-top16-all-layers-v1\",\n",
             "  \"slhav2_commit\":\"{}\",\n",
             "  \"contract_sha256\":\"{}\",\n",
+            "  \"contract_semantically_validated\":true,\n",
             "  \"source_manifest_sha256\":\"{}\",\n",
             "  \"rank_dataset_manifest_sha256\":\"{}\",\n",
             "  \"initial_weights_manifest_sha256\":\"{}\",\n",
@@ -408,6 +412,7 @@ fn main() {
             "  \"candidate_id\":\"slha-lr1-pairwise-top16-all-layers-v1\",\n",
             "  \"slhav2_commit\":\"{}\",\n",
             "  \"contract_sha256\":\"{}\",\n",
+            "  \"contract_semantically_validated\":true,\n",
             "  \"source_manifest_sha256\":\"{}\",\n",
             "  \"rank_dataset_manifest_sha256\":\"{}\",\n",
             "  \"initial_weights_manifest_sha256\":\"{}\",\n",
