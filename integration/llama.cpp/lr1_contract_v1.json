@@ -82,6 +82,9 @@
     "protected_holdout_allowed": false,
     "required_comparison": "unchanged current mixed/L2 control versus frozen LR1 candidate",
     "required_ranking_metric": "top16_set_recall_or_overlap",
+    "training_short_context_policy": "retain_existing_pairwise_topk_geometry_semantics",
+    "ranking_metric_row_rule": "n_visible > top_k",
+    "ranking_metric_short_rows": "excluded_from_topk_metrics_only",
     "required_task_metric": "non_protected_diagnostic_perplexity",
     "required_execution_checks": [
       "full active replacement coverage",
