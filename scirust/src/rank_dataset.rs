@@ -89,6 +89,54 @@ impl LayerRows {
             .filter(move |(_, chunk)| selected.contains(chunk))
             .map(|(index, _)| index)
     }
+
+    /// Verify the collector's storage layout without interpreting metrics.
+    ///
+    /// `populated` names every chunk id allowed to carry rows/keys. Every other
+    /// storage slot must be empty. This is used by frozen experiment protocols
+    /// to fail closed on an off-by-one or lifecycle change in the collector.
+    pub fn validate_chunk_layout(
+        &self,
+        storage_slots: usize,
+        populated: &[usize],
+    ) -> Result<(), String> {
+        if self.keys.len() != storage_slots {
+            return Err(format!(
+                "rank dataset: expected {storage_slots} storage slots, found {}",
+                self.keys.len()
+            ));
+        }
+        if populated.is_empty() {
+            return Err("rank dataset: populated chunk set must not be empty".into());
+        }
+        let mut expected = populated.to_vec();
+        expected.sort_unstable();
+        expected.dedup();
+        if expected.len() != populated.len() || expected.iter().any(|&c| c >= storage_slots) {
+            return Err("rank dataset: invalid expected populated chunk set".into());
+        }
+
+        let mut observed = self.chunks.clone();
+        observed.sort_unstable();
+        observed.dedup();
+        if observed != expected {
+            return Err(format!(
+                "rank dataset: populated row chunks {:?} do not match expected {:?}",
+                observed, expected
+            ));
+        }
+
+        for slot in 0..storage_slots {
+            let should_be_populated = expected.binary_search(&slot).is_ok();
+            let is_populated = !self.keys[slot].is_empty();
+            if should_be_populated != is_populated {
+                return Err(format!(
+                    "rank dataset: storage slot {slot} populated={is_populated}, expected={should_be_populated}"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 struct Cursor<'a> {
@@ -375,6 +423,15 @@ mod tests {
         assert_eq!(row.baseline, [4.0, 1.0]);
         assert_eq!(row.control_scores, [3.5, 1.5]);
         assert_eq!(row.keys.len(), 6);
+    }
+
+    #[test]
+    fn validates_expected_chunk_layout() {
+        let parsed = parse_layer(&fixture(), "fixture").expect("valid fixture");
+        parsed
+            .validate_chunk_layout(1, &[0])
+            .expect("fixture has one populated slot");
+        assert!(parsed.validate_chunk_layout(2, &[1]).is_err());
     }
 
     #[test]
