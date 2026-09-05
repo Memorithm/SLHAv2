@@ -218,10 +218,12 @@ fn stddev(values: &[f32]) -> f64 {
 #[derive(Default)]
 struct Summary {
     rows: u64,
+    ranking_rows: u64,
     topk_overlap_sum: f64,
     pair_score_sum: f64,
     pair_count: u64,
     spearman_sum: f64,
+    spearman_rows: u64,
     geometry_ratio_sum: f64,
     geometry_log_error_sum: f64,
     geometry_rows: u64,
@@ -235,83 +237,94 @@ impl Summary {
         if baseline.iter().chain(scores).any(|v| !v.is_finite()) {
             return Err("metric row contains non-finite score".into());
         }
+        self.rows += 1;
 
-        let base_top = topk_indices(baseline, k);
-        let score_top = topk_indices(scores, k);
-        let k_eff = base_top.len();
-        let overlap = base_top
-            .iter()
-            .filter(|index| score_top.contains(index))
-            .count();
-        self.topk_overlap_sum += overlap as f64 / k_eff as f64;
+        // Top-k preservation is informative only when at least one key lies
+        // outside the top-k boundary. Otherwise overlap is trivially 1.0 and
+        // there are no pairwise comparisons to measure.
+        if baseline.len() > k {
+            let base_top = topk_indices(baseline, k);
+            let score_top = topk_indices(scores, k);
+            let overlap = base_top
+                .iter()
+                .filter(|index| score_top.contains(index))
+                .count();
+            self.topk_overlap_sum += overlap as f64 / k as f64;
+            self.ranking_rows += 1;
 
-        let mut is_top = vec![false; baseline.len()];
-        for &index in &base_top {
-            is_top[index] = true;
-        }
-        for &top in &base_top {
-            for other in 0..scores.len() {
-                if is_top[other] {
-                    continue;
+            let mut is_top = vec![false; baseline.len()];
+            for &index in &base_top {
+                is_top[index] = true;
+            }
+            for &top in &base_top {
+                for other in 0..scores.len() {
+                    if is_top[other] {
+                        continue;
+                    }
+                    self.pair_count += 1;
+                    self.pair_score_sum += if scores[top] > scores[other] {
+                        1.0
+                    } else if scores[top] == scores[other] {
+                        0.5
+                    } else {
+                        0.0
+                    };
                 }
-                self.pair_count += 1;
-                self.pair_score_sum += if scores[top] > scores[other] {
-                    1.0
-                } else if scores[top] == scores[other] {
-                    0.5
-                } else {
-                    0.0
-                };
             }
         }
 
-        let row_spearman = spearman(scores, baseline);
-        if !row_spearman.is_finite() {
-            return Err("metric row produced non-finite Spearman correlation".into());
+        if baseline.len() >= 2 {
+            let row_spearman = spearman(scores, baseline);
+            if row_spearman.is_finite() {
+                self.spearman_sum += f64::from(row_spearman);
+                self.spearman_rows += 1;
+            }
+            let base_std = stddev(baseline);
+            let score_std = stddev(scores);
+            if base_std > 0.0 && score_std > 0.0 {
+                let ratio = score_std / base_std;
+                self.geometry_ratio_sum += ratio;
+                self.geometry_log_error_sum += ratio.ln().abs();
+                self.geometry_rows += 1;
+            }
         }
-        self.spearman_sum += f64::from(row_spearman);
-        let base_std = stddev(baseline);
-        let score_std = stddev(scores);
-        if base_std > 0.0 && score_std > 0.0 {
-            let ratio = score_std / base_std;
-            self.geometry_ratio_sum += ratio;
-            self.geometry_log_error_sum += ratio.ln().abs();
-            self.geometry_rows += 1;
+        Ok(())
+    }
+
+    fn validate_non_degenerate(&self, label: &str) -> Result<(), String> {
+        if self.rows == 0 {
+            return Err(format!("{label}: no validation rows"));
         }
-        self.rows += 1;
+        if self.ranking_rows == 0 || self.pair_count == 0 {
+            return Err(format!("{label}: no rows cross the frozen top-k boundary"));
+        }
+        if self.spearman_rows == 0 {
+            return Err(format!("{label}: no finite Spearman rows"));
+        }
+        if self.geometry_rows == 0 {
+            return Err(format!("{label}: no non-degenerate geometry rows"));
+        }
         Ok(())
     }
 
     fn topk_overlap(&self) -> f64 {
-        self.topk_overlap_sum / self.rows as f64
+        self.topk_overlap_sum / self.ranking_rows as f64
     }
 
     fn pair_accuracy(&self) -> f64 {
-        if self.pair_count == 0 {
-            0.0
-        } else {
-            self.pair_score_sum / self.pair_count as f64
-        }
+        self.pair_score_sum / self.pair_count as f64
     }
 
     fn mean_spearman(&self) -> f64 {
-        self.spearman_sum / self.rows as f64
+        self.spearman_sum / self.spearman_rows as f64
     }
 
     fn mean_stddev_ratio(&self) -> f64 {
-        if self.geometry_rows == 0 {
-            0.0
-        } else {
-            self.geometry_ratio_sum / self.geometry_rows as f64
-        }
+        self.geometry_ratio_sum / self.geometry_rows as f64
     }
 
     fn mean_abs_log_stddev_ratio(&self) -> f64 {
-        if self.geometry_rows == 0 {
-            0.0
-        } else {
-            self.geometry_log_error_sum / self.geometry_rows as f64
-        }
+        self.geometry_log_error_sum / self.geometry_rows as f64
     }
 }
 
@@ -374,12 +387,6 @@ fn main() {
         let mut layer_rows = 0u64;
         for index in rows.indices_for_chunks(&args.split) {
             let row = rows.row(index).unwrap_or_else(|e| fail(e));
-            if row.n_visible < args.top_k {
-                fail(format!(
-                    "layer {layer} row {index}: n_visible={} is smaller than frozen top_k={}",
-                    row.n_visible, args.top_k
-                ));
-            }
             control
                 .observe(row.baseline, row.control_scores, args.top_k)
                 .unwrap_or_else(|e| fail(format!("layer {layer} row {index} control: {e}")));
@@ -419,6 +426,18 @@ fn main() {
             control.rows, candidate.rows
         ));
     }
+    control
+        .validate_non_degenerate("control")
+        .unwrap_or_else(|e| fail(e));
+    candidate
+        .validate_non_degenerate("candidate")
+        .unwrap_or_else(|e| fail(e));
+    if control.ranking_rows != candidate.ranking_rows
+        || control.spearman_rows != candidate.spearman_rows
+        || control.geometry_rows != candidate.geometry_rows
+    {
+        fail("control/candidate metric denominator mismatch");
+    }
 
     let per_layer_json = per_layer_rows
         .iter()
@@ -444,13 +463,16 @@ fn main() {
             "  \"contract\":{{\"path\":\"{}\",\"sha256\":\"{}\"}},\n",
             "  \"dataset\":{{\"path\":\"{}\",\"manifest_sha256\":\"{}\",\"storage_slots\":17,\"populated_chunks\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],\"validation_chunks\":[{}]}},\n",
             "  \"candidate_weights\":{{\"path\":\"{}\",\"manifest_sha256\":\"{}\"}},\n",
-            "  \"configuration\":{{\"top_k\":{},\"layers\":{},\"codec\":\"mixed\"}},\n",
+            "  \"configuration\":{{\"top_k\":{},\"layers\":{},\"codec\":\"mixed\",\"ranking_row_rule\":\"n_visible > top_k\"}},\n",
             "  \"rows\":{},\n",
+            "  \"ranking_rows\":{},\n",
+            "  \"spearman_rows\":{},\n",
+            "  \"geometry_rows\":{},\n",
             "  \"control\":{{\"source\":\"recorded_dataset_control_scores\",\"mean_topk_set_recall\":{:.12},\"topk_vs_rest_pair_accuracy\":{:.12},\"mean_spearman\":{:.12},\"mean_score_stddev_ratio\":{:.12},\"mean_abs_log_score_stddev_ratio\":{:.12}}},\n",
             "  \"candidate\":{{\"source\":\"frozen_weights_rescored_with_deployable_mixed_codec_math\",\"mean_topk_set_recall\":{:.12},\"topk_vs_rest_pair_accuracy\":{:.12},\"mean_spearman\":{:.12},\"mean_score_stddev_ratio\":{:.12},\"mean_abs_log_score_stddev_ratio\":{:.12}}},\n",
             "  \"delta_candidate_minus_control\":{{\"mean_topk_set_recall\":{:.12},\"topk_vs_rest_pair_accuracy\":{:.12},\"mean_spearman\":{:.12}}},\n",
             "  \"per_layer\":[\n{}\n  ],\n",
-            "  \"limitations\":[\"Offline mechanistic validation only; not perplexity or end-to-end quality evidence.\",\"Baseline logits are offline labels and are not available to deployable external-K inference.\",\"No hyperparameter, top-k, layer, objective, codec, or split search is performed by this binary.\"]\n",
+            "  \"limitations\":[\"Offline mechanistic validation only; not perplexity or end-to-end quality evidence.\",\"Baseline logits are offline labels and are not available to deployable external-K inference.\",\"Rows with n_visible <= top_k remain in the frozen training objective but do not contribute trivial top-k validation overlap.\",\"No hyperparameter, top-k, layer, objective, codec, or split search is performed by this binary.\"]\n",
             "}}\n"
         ),
         commit,
@@ -464,6 +486,9 @@ fn main() {
         args.top_k,
         args.n_layers,
         control.rows,
+        control.ranking_rows,
+        control.spearman_rows,
+        control.geometry_rows,
         control.topk_overlap(),
         control.pair_accuracy(),
         control.mean_spearman(),
@@ -493,8 +518,9 @@ fn main() {
         .unwrap_or_else(|e| fail(format!("cannot publish report atomically: {e}")));
 
     println!(
-        "LR1_VALIDATION rows={} top16_control={:.6} top16_candidate={:.6} delta={:+.6} output={}",
+        "LR1_VALIDATION rows={} ranking_rows={} top16_control={:.6} top16_candidate={:.6} delta={:+.6} output={}",
         control.rows,
+        control.ranking_rows,
         control.topk_overlap(),
         candidate.topk_overlap(),
         candidate.topk_overlap() - control.topk_overlap(),
