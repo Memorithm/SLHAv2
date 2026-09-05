@@ -65,13 +65,30 @@ if source.get("derivation") != {
 }:
     raise SystemExit("LR1_DEVELOPMENT_DERIVATION_DRIFT")
 
+if source.get("rank_dataset_evaluation_chunks") != 16:
+    raise SystemExit("LR1_EVALUATION_CHUNK_COUNT_DRIFT")
+if source.get("rank_dataset_storage_slots") != 17:
+    raise SystemExit("LR1_STORAGE_SLOT_COUNT_DRIFT")
+expected_indexing = {
+    "initial_storage_slot": 0,
+    "initial_storage_slot_must_be_empty": True,
+    "first_populated_chunk": 1,
+    "last_populated_chunk": 16,
+    "reason": "Pinned llama.cpp perplexity clears memory before each evaluation chunk; the SLHA clear hook increments the collector chunk before the first decode.",
+}
+if source.get("chunk_indexing") != expected_indexing:
+    raise SystemExit("LR1_CHUNK_INDEXING_DRIFT")
+
 train = source.get("training_chunks")
 valid = source.get("validation_chunks")
-if train != list(range(12)) or valid != list(range(12, 16)):
+expected_train = list(range(1, 13))
+expected_valid = list(range(13, 17))
+expected_populated = list(range(1, 17))
+if train != expected_train or valid != expected_valid:
     raise SystemExit("LR1_SPLIT_DRIFT")
 if set(train) & set(valid):
     raise SystemExit("LR1_SPLIT_OVERLAP")
-if sorted(train + valid) != list(range(source.get("rank_dataset_chunks", -1))):
+if sorted(train + valid) != expected_populated:
     raise SystemExit("LR1_SPLIT_COVERAGE_INVALID")
 
 hex64 = re.compile(r"^[0-9a-f]{64}$")
@@ -120,18 +137,60 @@ for key in required_true:
     if invariants.get(key) is not True:
         raise SystemExit(f"LR1_INVARIANT_DISABLED:{key}")
 
-trainer = (root / "scirust/src/bin/slha_train_rank.rs").read_text(encoding="utf-8")
+# Pin the collector lifecycle that makes the storage ids one-based for the
+# pinned perplexity loop: state starts at 0 and clear increments before rows in
+# the next evaluation chunk are collected.
+collector = (root / "integration/llama.cpp/shim/slha_rank_dataset.cpp").read_text(encoding="utf-8")
 for needle in [
-    '"pairwise-topk"',
-    'const MAX_TOPK: usize = 64;',
-    '"--top-k"',
-    '"--layers"',
-    '"--split-chunks"',
-    '"--execution-binding"',
-    '"--normalisation-manifest"',
+    "int chunk = 0;",
+    "if (s.on) ++s.chunk;",
+]:
+    if needle not in collector:
+        raise SystemExit(f"LR1_COLLECTOR_INDEXING_GUARD_MISSING:{needle}")
+
+shim = (root / "integration/llama.cpp/shim/slha_llama.cpp").read_text(encoding="utf-8")
+for needle in [
+    "void slha_k_clear_all()",
+    "slha_rank_dataset::add_keys",
+    "slha_rank_dataset::begin_chunk();",
+]:
+    if needle not in shim:
+        raise SystemExit(f"LR1_CLEAR_LIFECYCLE_GUARD_MISSING:{needle}")
+
+patch = (root / "integration/llama.cpp/patches/0001-slha-k-passthrough.patch").read_text(encoding="utf-8")
+if "llama_memory_clear" not in patch or "slha_k_clear_all();" not in patch:
+    raise SystemExit("LR1_LLAMA_CLEAR_HOOK_GUARD_MISSING")
+
+reader = (root / "scirust/src/rank_dataset.rs").read_text(encoding="utf-8")
+if "validate_chunk_layout" not in reader:
+    raise SystemExit("LR1_DATASET_LAYOUT_VALIDATOR_MISSING")
+
+trainer = (root / "scirust/src/bin/slha_train_lr1.rs").read_text(encoding="utf-8")
+for needle in [
+    "const TOP_K: usize = 16;",
+    "const STORAGE_SLOTS: usize = 17;",
+    "const POPULATED_CHUNKS: [usize; 16]",
+    "const TRAINING_CHUNKS: [usize; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];",
+    "Objective::PairwiseTopK",
+    "validate_chunk_layout(STORAGE_SLOTS, &POPULATED_CHUNKS)",
 ]:
     if needle not in trainer:
-        raise SystemExit(f"LR1_TRAINER_CAPABILITY_MISSING:{needle}")
+        raise SystemExit(f"LR1_FROZEN_TRAINER_GUARD_MISSING:{needle}")
+for forbidden in ["--top-k", "--layers", "--objective", "--learning-rate", "--epochs"]:
+    if f'"{forbidden}"' in trainer:
+        raise SystemExit(f"LR1_FROZEN_TRAINER_EXPOSES_TUNING:{forbidden}")
+
+evaluator = (root / "scirust/src/bin/slha_eval_rank.rs").read_text(encoding="utf-8")
+for needle in [
+    "const EXPECTED_TOP_K: usize = 16;",
+    "const EXPECTED_STORAGE_SLOTS: usize = 17;",
+    "const EXPECTED_POPULATED: [usize; 16]",
+    "const EXPECTED_SPLIT: [usize; 4] = [13, 14, 15, 16];",
+    "validate_chunk_layout(EXPECTED_STORAGE_SLOTS, &EXPECTED_POPULATED)",
+    "LatentCodec::Mixed",
+]:
+    if needle not in evaluator:
+        raise SystemExit(f"LR1_FROZEN_EVALUATOR_GUARD_MISSING:{needle}")
 
 external_k = (root / "integration/llama.cpp/shim/slha_external_k.cpp").read_text(encoding="utf-8")
 for needle in [
@@ -147,6 +206,7 @@ compact = {
     "objective": c["candidate"]["objective"],
     "top_k": c["candidate"]["top_k"],
     "layers": c["candidate"]["layers"],
+    "storage_slots": source["rank_dataset_storage_slots"],
     "training_chunks": train,
     "validation_chunks": valid,
     "diagnostic_sha256": rank_diag["sha256"],
