@@ -1,0 +1,89 @@
+{
+  "schema": "slha_lr1_contract_v1",
+  "candidate_id": "slha-lr1-pairwise-top16-all-layers-v1",
+  "status": "PREREGISTERED_NON_PROTECTED_DEVELOPMENT_ONLY",
+  "basis": {
+    "rank_intervention_pr": 105,
+    "layer_localization_pr": 106,
+    "ranking_trainer_pr": 64,
+    "interpretation": "Requalify the existing deployable-compatible pairwise top-k training path. Do not infer an additive bad-layer policy from the layer-localization diagnostic."
+  },
+  "model": {
+    "name": "ggml-org/tiny-llamas/stories15M-q8_0.gguf",
+    "sha256": "2eda49203f2f044f3dddf29a7dd7cc861ef5a0340f518a19613d73ba6d9c06b6"
+  },
+  "llama_cpp": {
+    "tag": "b9860",
+    "commit": "fdb1db877c526ec90f668eca1b858da5dba85560"
+  },
+  "candidate": {
+    "objective": "pairwise-topk",
+    "top_k": 16,
+    "layers": "all",
+    "margin": 1.0,
+    "max_negatives": 8,
+    "negative_policy": "boundary-then-seeded",
+    "seed": 7,
+    "learning_rate": 1e-9,
+    "epochs": 2,
+    "steps": 0,
+    "batch": 16,
+    "max_keys": 256,
+    "geometry_weight": 0.25,
+    "codec": "mixed",
+    "allow_hyperparameter_sweep": false,
+    "allow_layer_subset_sweep": false,
+    "allow_objective_sweep": false
+  },
+  "development_source": {
+    "repository": "roneneldan/TinyStories",
+    "revision": "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64",
+    "file": "TinyStories-valid.txt",
+    "source_sha256": "94e431816c4cce81ff71e4408ff8d3bda9a42e8d2663986697c3954288cb38b4",
+    "license": "cdla-sharing-1.0",
+    "derivation": {
+      "prefix_bytes": 262144,
+      "truncate_to_last_newline": true,
+      "encoding": "utf-8"
+    },
+    "rank_dataset_chunks": 16,
+    "training_chunks": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    "validation_chunks": [12, 13, 14, 15]
+  },
+  "diagnostic_corpus": {
+    "path": "integration/llama.cpp/fixtures/tinystories_rank_diagnostic_v1.txt",
+    "sha256": "ff502dfe94da711cc52d23a98b4cdee8bb82d03eb7cac45ff17b16a6e0ab35e1",
+    "role": "NON_PROTECTED_POST_TRAINING_DIAGNOSTIC"
+  },
+  "protected_holdout": {
+    "path": "integration/llama.cpp/fixtures/tinystories_synthetic_holdout.txt",
+    "sha256": "eed5a2cebe9a23a12475fc86e0a3e23e0178adecd6d57aff443a58af599e4a11",
+    "stage_a_access": "FORBIDDEN"
+  },
+  "invariants": {
+    "baseline_logits_training_only": true,
+    "baseline_logits_inference_forbidden": true,
+    "external_k_oracle_knobs_forbidden": true,
+    "initial_weights_must_be_hash_frozen_before_optimizer": true,
+    "derived_development_corpus_must_be_hash_frozen_before_optimizer": true,
+    "candidate_weights_must_be_hash_frozen_before_diagnostic_ppl": true,
+    "protected_holdout_must_not_select_or_tune_candidate": true,
+    "negative_result_must_be_retained": true
+  },
+  "stage_a": {
+    "protected_holdout_allowed": false,
+    "required_comparison": "unchanged current mixed/L2 control versus frozen LR1 candidate",
+    "required_ranking_metric": "top16_set_recall_or_overlap",
+    "required_task_metric": "non_protected_diagnostic_perplexity",
+    "required_execution_checks": [
+      "full active replacement coverage",
+      "zero fallback vectors",
+      "zero failed vectors",
+      "no baseline-oracle knob in inference"
+    ]
+  },
+  "stage_b": {
+    "enabled_by_this_contract": false,
+    "require_separate_pre_holdout_freeze": true
+  }
+}
