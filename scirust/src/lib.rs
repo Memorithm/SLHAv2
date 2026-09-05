@@ -35,6 +35,7 @@ pub mod incoherence;
 pub mod json;
 pub mod learned;
 pub mod linalg;
+pub mod lr1_contract;
 pub mod metrics;
 pub mod norm_manifest;
 pub mod numa;
