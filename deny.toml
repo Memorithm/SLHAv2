@@ -35,3 +35,8 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# Reviewed cross-repository BE14d contract. Cargo.toml additionally pins both
+# the compatible package version and exact revision; other Git sources remain denied.
+allow-git = [
+    "https://github.com/Memorithm/ElasticXxx.git",
+]
