@@ -435,6 +435,48 @@ impl ElasticKvCache {
         self.slots.get(slot)?.as_ref().map(|state| state.tier)
     }
 
+    /// Monotonic materialization generation assigned when this physical slot
+    /// receives a new logical KV value. Residency transitions do not change it.
+    ///
+    /// This lets external transactional adapters distinguish a recycled slot
+    /// from the logical page that was originally validated without exposing
+    /// mutable slot internals.
+    pub fn slot_generation(&self, slot: usize) -> Option<u64> {
+        self.slots.get(slot)?.as_ref().map(|state| state.seq)
+    }
+
+    /// Bytes held outside the resident budget for reversible restoration of one slot.
+    pub fn slot_backing_bytes(&self, slot: usize) -> Option<usize> {
+        self.slots
+            .get(slot)?
+            .as_ref()
+            .map(PhysicalSlot::offloaded_bytes)
+    }
+
+    /// Reconstruct the exact full HOT materialization when the current physical
+    /// state retains enough backing to do so, without mutating the cache.
+    ///
+    /// HOT/PINNED return their exact bytes. WARM reinserts the retained residual
+    /// plane and clears `FLAG_WARM`. COLD returns `None` because its backing may
+    /// itself be the packed WARM form and requires the normal restore path to
+    /// recover which resident tier it represents.
+    pub fn restorable_hot_tile(&self, slot: usize) -> Option<[u8; codec::TILE_BYTES]> {
+        let state = self.slots.get(slot)?.as_ref()?;
+        match state.tier {
+            PhysicalTier::Hot | PhysicalTier::Pinned => state.bytes.as_slice().try_into().ok(),
+            PhysicalTier::Warm => {
+                let packed: &[u8; WARM_PACKED_BYTES] = state.bytes.as_slice().try_into().ok()?;
+                let residual = state.warm_residual.as_ref()?;
+                let mut full = codec::unpack_warm(packed);
+                full[codec::RESIDUAL_OFFSET..codec::RESIDUAL_OFFSET + RESIDUAL_BYTES]
+                    .copy_from_slice(residual);
+                Self::set_warm_flag(&mut full, false);
+                Some(full)
+            }
+            PhysicalTier::Cold => None,
+        }
+    }
+
     /// Copy the representation that is currently resident and scoreable.
     ///
     /// HOT/PINNED return the full tile. WARM expands its 96 resident bytes
