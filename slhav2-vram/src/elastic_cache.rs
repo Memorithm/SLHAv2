@@ -172,6 +172,14 @@ impl ElasticKvCache {
         self.resident_bytes
     }
 
+    /// Stable logical resource identity owned by this physical cache.
+    ///
+    /// External resource adapters must reuse this identity rather than inventing
+    /// a second name for the same resident-budget and mutation boundary.
+    pub fn resource_id(&self) -> &str {
+        self.controller.resource().resource_id()
+    }
+
     /// Current reversible backing bytes outside the resident budget.
     pub fn offloaded_bytes(&self) -> usize {
         self.slots
