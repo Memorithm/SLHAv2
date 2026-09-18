@@ -13,6 +13,8 @@ path = "src/lib.rs"
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
 elastic-core = { version = "0.1.0", path = "../elastic/elastic-core" }
+elasticxxx-core = { package = "elastic-core", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "107123123fd4e3430e1ee7ed2f74fdd91268f3a2", optional = true }
+elasticxxx-kv = { package = "elastic-kv", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "107123123fd4e3430e1ee7ed2f74fdd91268f3a2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
@@ -20,6 +22,7 @@ libc = { version = "0.2", optional = true }
 [features]
 default = []
 cuda = ["libc"]
+elasticxxx-kv-bridge = ["dep:elasticxxx-core", "dep:elasticxxx-kv"]
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
