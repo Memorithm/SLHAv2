@@ -4,12 +4,18 @@ Status: **optional real-consumer integration; no performance or quality claim**.
 
 `slhav2-vram` owns the physical SLHA tile cache and codec semantics. ElasticXxx
 owns the generic `OBSERVE → PLAN → VALIDATE → ACT → VERIFY → COMMIT/ROLLBACK`
-transaction. The optional Cargo feature `elasticxxx` depends only on the public `elastic` facade and binds the bridge to exact
-ElasticXxx revision `baf9e8bfb333a1dcdb0967f40700d2704ffe4a1f`.
+transaction. The optional Cargo feature `elasticxxx` depends only on the public
+`elastic` facade and binds the bridge to exact ElasticXxx revision
+`b05c1906ee39bf3373fc541feedfa25520fbe433`.
 
 ## Physical transition
 
-The v1 bridge deliberately supports one narrow transition only:
+The v1 bridge exposes the physical cache's own logical resource identity and
+resident-budget headroom as source-bound ElasticXxx capacity observation evidence.
+That observation flows through the ElasticXxx V2 current-state forecast boundary
+(zero horizon, no calibrated confidence claim) before Boolean eligibility.
+
+The v1 physical actuator deliberately supports one narrow transition only:
 
 ```text
 SLHAv2 HOT tile (128 resident bytes)
@@ -31,6 +37,8 @@ monotonic slot generation rather than the recyclable physical slot index.
 
 `SlhaKvTransitionBackendV1` implements ElasticXxx `KvTransitionBackendV1` and:
 
+- reuses the exact resource identity owned by `ElasticKvCache`;
+- observes current `free_bytes()` through the same shared cache handle;
 - derives page identity from SLHAv2's monotonic slot generation;
 - rejects non-HOT sources, missing/recycled slots, codec drift and byte drift;
 - checks the exact source under the same mutex that performs HOT→WARM;
@@ -41,9 +49,10 @@ monotonic slot generation rather than the recyclable physical slot index.
 - rejects external `UpholdContract` invariants it does not implement.
 
 The BE14d Boolean capacity preflight remains planning evidence only. Tests cover
-fresh sufficient (`True`), explicit insufficient (`False`) and unavailable
-(`Unknown`) capacity evidence. Only `True` reaches the existing ElasticXxx
-structural validator and transactional runtime.
+fresh sufficient (`True`) and explicit insufficient (`False`) evidence from the
+real physical cache observer plus an explicit unavailable (`Unknown`) provider.
+The `True` path records `current-state` forecast metadata before it reaches the
+existing ElasticXxx structural validator and transactional runtime.
 
 ## Scope limits
 

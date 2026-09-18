@@ -9,14 +9,16 @@
 //! is pinned to the exact ElasticXxx revision reviewed for this contract.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
+use elasticxxx::kv::boolean_admission::KvCapacityObservationV1;
 use elasticxxx::kv::{
     CapabilitySet, KeyEncodingPipeline, KeyTransformScope, KvPageDescriptor, KvPageId, KvPrecision,
     KvRecoverySource, KvResidency, KvTargetMaterialization, KvTransitionBackendV1,
     KvTransitionPlan, RepresentationEpoch, RepresentationId, RepresentationState,
     TransactionalKvPageV1, TransitionAttestations,
 };
-use elasticxxx::resource::{DimensionId, InvariantKind};
+use elasticxxx::resource::{DimensionId, InvariantKind, LogicalResourceId};
 use elasticxxx::{
     EirResource, InvariantCheck, Plan, RuntimeError, TransitionMechanism, VerificationResult,
 };
@@ -28,7 +30,7 @@ use crate::elastic_cache::{ElasticKvCache, PhysicalTier};
 pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V1: u16 = 1;
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "baf9e8bfb333a1dcdb0967f40700d2704ffe4a1f";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "b05c1906ee39bf3373fc541feedfa25520fbe433";
 
 const REPRESENTATION_SCHEMA_V1: u32 = 1;
 const BACKEND_NAME: &str = "slhav2-elastic-kv-cache-v1";
@@ -94,6 +96,27 @@ impl SlhaKvCacheHandleV1 {
     pub fn with_cache_mut<R>(&self, f: impl FnOnce(&mut ElasticKvCache) -> R) -> Result<R, String> {
         let mut cache = self.lock()?;
         Ok(f(&mut cache))
+    }
+
+    /// Publish current physical resident-budget headroom as source-bound
+    /// ElasticXxx BE14d observation evidence.
+    ///
+    /// The observation reuses the exact resource identity owned by the physical
+    /// cache. It does not predict future capacity or authorize a transition.
+    pub fn capacity_observation(
+        &self,
+        observed_at: Instant,
+    ) -> Result<KvCapacityObservationV1, String> {
+        let cache = self.lock()?;
+        let resource = LogicalResourceId::new(cache.resource_id())
+            .map_err(|error| format!("invalid SLHAv2 KV resource id for ElasticXxx: {error}"))?;
+        let free_capacity_bytes = u64::try_from(cache.free_bytes())
+            .map_err(|_| "SLHAv2 free KV capacity does not fit u64".to_owned())?;
+        Ok(KvCapacityObservationV1::measured(
+            resource,
+            free_capacity_bytes,
+            observed_at,
+        ))
     }
 }
 
@@ -514,7 +537,7 @@ fn codec_name(tile: &[u8; codec::TILE_BYTES]) -> Result<&'static str, String> {
 mod tests {
     use super::*;
     use elasticxxx::kv::boolean_admission::{
-        BooleanKvCapacityPreflightControllerV1, BooleanKvTransitionPreflightV1,
+        BooleanKvCapacityPreflightControllerV1, BooleanKvTransitionPreflightV2,
         KvCapacityObservationV1,
     };
     use elasticxxx::resource::{
@@ -572,14 +595,14 @@ mod tests {
         spec: ResourceSpec,
         observation: &KvCapacityObservationV1,
         now: Instant,
-    ) -> BooleanKvTransitionPreflightV1 {
+    ) -> BooleanKvTransitionPreflightV2 {
         let mut gate = BooleanKvCapacityPreflightControllerV1::new(
             spec,
             TransitionMechanism::Reencode,
             Duration::from_secs(1),
         )
         .unwrap();
-        gate.validate_candidate(
+        gate.validate_candidate_v2(
             backend.source(),
             backend.target().representation.clone(),
             &backend.capabilities(),
@@ -612,18 +635,27 @@ mod tests {
         .unwrap();
         let (spec, eir) = resource();
         let now = Instant::now();
-        let free = handle
-            .with_cache(|cache| cache.free_bytes() as u64)
-            .unwrap();
-        let observation = KvCapacityObservationV1::measured(spec.resource_id().clone(), free, now);
+        let observation = handle.capacity_observation(now).unwrap();
+        assert_eq!(
+            observation
+                .observations()
+                .get(ObservationSignalId::FREE_CAPACITY)
+                .unwrap()
+                .source()
+                .to_string(),
+            "resource:slhav2-real-kv"
+        );
         let gated = gated_plan(&backend, spec.clone(), &observation, now);
         let plan = match gated {
-            BooleanKvTransitionPreflightV1::Candidate { report, plan } => {
+            BooleanKvTransitionPreflightV2::Candidate { report, plan } => {
                 assert_eq!(report.evidence.truth, "true");
+                assert_eq!(report.evidence.forecast_method, "current-state");
+                assert_eq!(report.evidence.forecast_horizon_milliseconds, 0);
+                assert!(!report.evidence.forecast_confidence_claimed);
                 assert_eq!(plan, backend.transition_plan().unwrap());
                 plan
             }
-            BooleanKvTransitionPreflightV1::Blocked(report) => {
+            BooleanKvTransitionPreflightV2::Blocked(report) => {
                 panic!("fresh sufficient physical capacity was blocked: {report:?}")
             }
         };
@@ -667,9 +699,15 @@ mod tests {
         .unwrap();
         let (spec, _) = resource();
         let now = Instant::now();
-        let observation = KvCapacityObservationV1::measured(spec.resource_id().clone(), 0, now);
+        let observation = handle.capacity_observation(now).unwrap();
+        assert_eq!(
+            observation
+                .planning_context()
+                .get(ObservationSignalId::FREE_CAPACITY),
+            Some(0.0)
+        );
         let gated = gated_plan(&backend, spec, &observation, now);
-        let BooleanKvTransitionPreflightV1::Blocked(report) = gated else {
+        let BooleanKvTransitionPreflightV2::Blocked(report) = gated else {
             panic!("zero free capacity must block conservative WARM materialization");
         };
         assert_eq!(report.evidence.truth, "false");
@@ -706,7 +744,7 @@ mod tests {
             "capacity sensor unavailable",
         );
         let gated = gated_plan(&backend, spec, &observation, now);
-        let BooleanKvTransitionPreflightV1::Blocked(report) = gated else {
+        let BooleanKvTransitionPreflightV2::Blocked(report) = gated else {
             panic!("unsupported capacity evidence must fail closed");
         };
         assert_eq!(report.evidence.truth, "unknown");
@@ -720,6 +758,15 @@ mod tests {
                 .unwrap(),
             Some(original)
         );
+    }
+
+    #[test]
+    fn physical_capacity_observation_rejects_invalid_cache_identity() {
+        let handle = SlhaKvCacheHandleV1::new(ElasticKvCache::new(4096, ""));
+        let error = handle
+            .capacity_observation(Instant::now())
+            .expect_err("invalid physical cache identity must fail closed");
+        assert!(error.contains("invalid SLHAv2 KV resource id"));
     }
 
     #[test]
