@@ -10,18 +10,16 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use elasticxxx_core::resource::{DimensionId, InvariantKind};
-use elasticxxx_core::{
-    CapabilitySet, RepresentationEpoch, RepresentationId, RepresentationState,
-    TransitionAttestations, TransitionMechanism,
-};
-use elasticxxx_eir::EirResource;
-use elasticxxx_kv::{
-    KeyEncodingPipeline, KeyTransformScope, KvPageDescriptor, KvPageId, KvPrecision,
+use elasticxxx::kv::{
+    CapabilitySet, KeyEncodingPipeline, KeyTransformScope, KvPageDescriptor, KvPageId, KvPrecision,
     KvRecoverySource, KvResidency, KvTargetMaterialization, KvTransitionBackendV1,
-    KvTransitionPlan, TransactionalKvPageV1,
+    KvTransitionPlan, RepresentationEpoch, RepresentationId, RepresentationState,
+    TransactionalKvPageV1, TransitionAttestations,
 };
-use elasticxxx_runtime::{InvariantCheck, Plan, RuntimeError, VerificationResult};
+use elasticxxx::resource::{DimensionId, InvariantKind};
+use elasticxxx::{
+    EirResource, InvariantCheck, Plan, RuntimeError, TransitionMechanism, VerificationResult,
+};
 
 use crate::codec;
 use crate::elastic_cache::{ElasticKvCache, PhysicalTier};
@@ -30,7 +28,7 @@ use crate::elastic_cache::{ElasticKvCache, PhysicalTier};
 pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V1: u16 = 1;
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "70aff3e993239037466a784b2a643c630f151e49";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "baf9e8bfb333a1dcdb0967f40700d2704ffe4a1f";
 
 const REPRESENTATION_SCHEMA_V1: u32 = 1;
 const BACKEND_NAME: &str = "slhav2-elastic-kv-cache-v1";
@@ -515,16 +513,15 @@ fn codec_name(tile: &[u8; codec::TILE_BYTES]) -> Result<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elasticxxx_core::resource::{
-        AdmissibleTransition, CapabilityRequirement, Invariant, ObservationSignalId,
-        ResourceClassId, ResourceSpec,
-    };
-    use elasticxxx_eir::{lower, FirstGroundedPlanner};
-    use elasticxxx_kv::boolean_admission::{
+    use elasticxxx::kv::boolean_admission::{
         BooleanKvCapacityPreflightControllerV1, BooleanKvTransitionPreflightV1,
         KvCapacityObservationV1,
     };
-    use elasticxxx_runtime::{Runtime, RuntimeConfig, RuntimeMode};
+    use elasticxxx::resource::{
+        AdmissibleTransition, CapabilityRequirement, Invariant, LogicalResourceId,
+        ObservationSignalId, ResourceClassId, ResourceSpec,
+    };
+    use elasticxxx::{lower, FirstGroundedPlanner, Runtime, RuntimeConfig, RuntimeMode};
     use std::time::{Duration, Instant};
 
     fn tile(seed: u8) -> [u8; codec::TILE_BYTES] {
@@ -539,7 +536,7 @@ mod tests {
     fn resource() -> (ResourceSpec, EirResource) {
         let spec = ResourceSpec::builder(
             ResourceClassId::REPRESENTATIONAL,
-            elasticxxx_core::resource::LogicalResourceId::new("slhav2-real-kv").unwrap(),
+            LogicalResourceId::new("slhav2-real-kv").unwrap(),
         )
         .allow(DimensionId::REPRESENTATION)
         .preserve(Invariant::new(InvariantKind::PreserveContents))

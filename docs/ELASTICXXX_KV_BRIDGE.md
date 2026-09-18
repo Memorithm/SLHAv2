@@ -4,8 +4,8 @@ Status: **optional real-consumer integration; no performance or quality claim**.
 
 `slhav2-vram` owns the physical SLHA tile cache and codec semantics. ElasticXxx
 owns the generic `OBSERVE → PLAN → VALIDATE → ACT → VERIFY → COMMIT/ROLLBACK`
-transaction. The optional Cargo feature `elasticxxx` binds the bridge to exact
-ElasticXxx revision `70aff3e993239037466a784b2a643c630f151e49`.
+transaction. The optional Cargo feature `elasticxxx` depends only on the public `elastic` facade and binds the bridge to exact
+ElasticXxx revision `baf9e8bfb333a1dcdb0967f40700d2704ffe4a1f`.
 
 ## Physical transition
 
