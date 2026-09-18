@@ -13,10 +13,10 @@ path = "src/lib.rs"
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
 elastic-core = { version = "0.1.0", path = "../elastic/elastic-core" }
-elasticxxx-core = { package = "elastic-core", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "70aff3e993239037466a784b2a643c630f151e49", optional = true }
-elasticxxx-eir = { package = "elastic-eir", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "70aff3e993239037466a784b2a643c630f151e49", optional = true }
-elasticxxx-kv = { package = "elastic-kv", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "70aff3e993239037466a784b2a643c630f151e49", optional = true }
-elasticxxx-runtime = { package = "elastic-runtime", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "70aff3e993239037466a784b2a643c630f151e49", optional = true }
+elasticxxx-core = { package = "elastic-core", version = "0.1.0", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "70aff3e993239037466a784b2a643c630f151e49", optional = true }
+elasticxxx-eir = { package = "elastic-eir", version = "0.1.0", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "70aff3e993239037466a784b2a643c630f151e49", optional = true }
+elasticxxx-kv = { package = "elastic-kv", version = "0.1.0", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "70aff3e993239037466a784b2a643c630f151e49", optional = true }
+elasticxxx-runtime = { package = "elastic-runtime", version = "0.1.0", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "70aff3e993239037466a784b2a643c630f151e49", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }

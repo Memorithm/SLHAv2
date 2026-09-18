@@ -476,6 +476,18 @@ fn precision_for_codec(codec_name: &str) -> KvPrecision {
 
 fn codec_name(tile: &[u8; codec::TILE_BYTES]) -> Result<&'static str, String> {
     let flags = codec::read_u16_le(tile, codec::FLAGS_OFFSET).map_err(str::to_owned)?;
+    const ALLOWED_FLAGS: u16 = codec::FLAG_WARM
+        | codec::FLAG_NF4
+        | codec::FLAG_MIXED
+        | codec::FLAG_TQ3
+        | codec::FLAG_TQ3_NOCORR
+        | codec::FLAG_MIX3;
+    let unknown = flags & !ALLOWED_FLAGS;
+    if unknown != 0 {
+        return Err(format!(
+            "SLHAv2 tile carries unsupported flag bits 0x{unknown:04x}"
+        ));
+    }
     codec::validate_codec(flags).map_err(|error| error.to_string())?;
     let no_corr = codec::has_flag(flags, codec::FLAG_TQ3_NOCORR);
     let name = if codec::has_flag(flags, codec::FLAG_MIXED) {
@@ -711,6 +723,28 @@ mod tests {
                 .unwrap(),
             Some(original)
         );
+    }
+
+    #[test]
+    fn unknown_flag_bits_fail_closed_before_binding() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-real-kv");
+        let mut unsupported = tile(5);
+        unsupported[codec::FLAGS_OFFSET..codec::FLAGS_OFFSET + 2]
+            .copy_from_slice(&(1_u16 << 6).to_le_bytes());
+        let slot = physical.insert(unsupported);
+        let handle = SlhaKvCacheHandleV1::new(physical);
+
+        let error = match SlhaKvTransitionBackendV1::bind_hot_slot(
+            handle,
+            slot,
+            RepresentationEpoch::new(1),
+            SlhaKvSemanticContractV1::token_stable(),
+        ) {
+            Ok(_) => panic!("unknown SLHA flag bits must not be labeled as INT4"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("unsupported flag bits 0x0040"));
     }
 
     #[test]
