@@ -254,7 +254,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "memorithm-elastic"
 version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6#36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6"
 dependencies = [
  "memorithm-elastic-adapters",
  "memorithm-elastic-core",
@@ -267,7 +267,7 @@ dependencies = [
 [[package]]
 name = "memorithm-elastic-adapters"
 version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6#36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6"
 dependencies = [
  "memorithm-elastic-core",
  "memorithm-elastic-eir",
@@ -277,12 +277,12 @@ dependencies = [
 [[package]]
 name = "memorithm-elastic-core"
 version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6#36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6"
 
 [[package]]
 name = "memorithm-elastic-eir"
 version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6#36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6"
 dependencies = [
  "memorithm-elastic-core",
 ]
@@ -290,7 +290,7 @@ dependencies = [
 [[package]]
 name = "memorithm-elastic-kv"
 version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6#36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6"
 dependencies = [
  "memorithm-elastic-core",
  "memorithm-elastic-eir",
@@ -302,7 +302,7 @@ dependencies = [
 [[package]]
 name = "memorithm-elastic-language-syntax"
 version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6#36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -312,7 +312,7 @@ dependencies = [
 [[package]]
 name = "memorithm-elastic-macros"
 version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6#36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6"
 dependencies = [
  "memorithm-elastic-language-syntax",
 ]
@@ -320,7 +320,7 @@ dependencies = [
 [[package]]
 name = "memorithm-elastic-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6#36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6"
 dependencies = [
  "log",
  "memorithm-elastic-adapters",

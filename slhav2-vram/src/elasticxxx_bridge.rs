@@ -30,7 +30,7 @@ use crate::elastic_cache::{ElasticKvCache, PhysicalTier};
 pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V1: u16 = 1;
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "6a62519c2f18f0e0ad8428c390c4acb11f909ec4";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6";
 
 const REPRESENTATION_SCHEMA_V1: u32 = 1;
 const BACKEND_NAME: &str = "slhav2-elastic-kv-cache-v1";

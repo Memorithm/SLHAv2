@@ -6,7 +6,7 @@ Status: **optional real-consumer integration; no performance or quality claim**.
 owns the generic `OBSERVE → PLAN → VALIDATE → ACT → VERIFY → COMMIT/ROLLBACK`
 transaction. The optional Cargo feature `elasticxxx` depends only on the public
 `elastic` facade and binds the bridge to exact ElasticXxx revision
-`6a62519c2f18f0e0ad8428c390c4acb11f909ec4`.
+`36e1b73022d6bf3f0bc4cd6ae40ee1bc95e468b6`.
 
 ## Physical transition
 
