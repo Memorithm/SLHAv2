@@ -167,82 +167,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
-name = "elastic"
-version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433#b05c1906ee39bf3373fc541feedfa25520fbe433"
-dependencies = [
- "elastic-adapters",
- "elastic-core 0.1.0 (git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433)",
- "elastic-eir",
- "elastic-kv",
- "elastic-macros",
- "elastic-runtime",
-]
-
-[[package]]
-name = "elastic-adapters"
-version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433#b05c1906ee39bf3373fc541feedfa25520fbe433"
-dependencies = [
- "elastic-core 0.1.0 (git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433)",
- "elastic-eir",
- "serde",
-]
-
-[[package]]
 name = "elastic-core"
 version = "0.1.0"
-
-[[package]]
-name = "elastic-core"
-version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433#b05c1906ee39bf3373fc541feedfa25520fbe433"
-
-[[package]]
-name = "elastic-eir"
-version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433#b05c1906ee39bf3373fc541feedfa25520fbe433"
-dependencies = [
- "elastic-core 0.1.0 (git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433)",
-]
-
-[[package]]
-name = "elastic-kv"
-version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433#b05c1906ee39bf3373fc541feedfa25520fbe433"
-dependencies = [
- "elastic-core 0.1.0 (git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433)",
- "elastic-eir",
- "elastic-runtime",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "elastic-macros"
-version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433#b05c1906ee39bf3373fc541feedfa25520fbe433"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "elastic-runtime"
-version = "0.1.0"
-source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433#b05c1906ee39bf3373fc541feedfa25520fbe433"
-dependencies = [
- "elastic-adapters",
- "elastic-core 0.1.0 (git+https://github.com/Memorithm/ElasticXxx.git?rev=b05c1906ee39bf3373fc541feedfa25520fbe433)",
- "elastic-eir",
- "log",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "find-msvc-tools"
@@ -324,6 +250,88 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memorithm-elastic"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+dependencies = [
+ "memorithm-elastic-adapters",
+ "memorithm-elastic-core",
+ "memorithm-elastic-eir",
+ "memorithm-elastic-kv",
+ "memorithm-elastic-macros",
+ "memorithm-elastic-runtime",
+]
+
+[[package]]
+name = "memorithm-elastic-adapters"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+dependencies = [
+ "memorithm-elastic-core",
+ "memorithm-elastic-eir",
+ "serde",
+]
+
+[[package]]
+name = "memorithm-elastic-core"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+
+[[package]]
+name = "memorithm-elastic-eir"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+dependencies = [
+ "memorithm-elastic-core",
+]
+
+[[package]]
+name = "memorithm-elastic-kv"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+dependencies = [
+ "memorithm-elastic-core",
+ "memorithm-elastic-eir",
+ "memorithm-elastic-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "memorithm-elastic-language-syntax"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "memorithm-elastic-macros"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+dependencies = [
+ "memorithm-elastic-language-syntax",
+]
+
+[[package]]
+name = "memorithm-elastic-runtime"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/ElasticXxx.git?rev=6a62519c2f18f0e0ad8428c390c4acb11f909ec4#6a62519c2f18f0e0ad8428c390c4acb11f909ec4"
+dependencies = [
+ "log",
+ "memorithm-elastic-adapters",
+ "memorithm-elastic-core",
+ "memorithm-elastic-eir",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "nu-ansi-term"
@@ -588,9 +596,9 @@ name = "slhav2-vram"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "elastic",
- "elastic-core 0.1.0",
+ "elastic-core",
  "libc",
+ "memorithm-elastic",
  "scirust",
 ]
 
