@@ -15,22 +15,32 @@ use elasticxxx::kv::boolean_admission::KvCapacityObservationV1;
 use elasticxxx::kv::{
     CapabilitySet, KeyEncodingPipeline, KeyTransformScope, KvPageDescriptor, KvPageId, KvPrecision,
     KvRecoverySource, KvResidency, KvTargetMaterialization, KvTransitionBackendV1,
-    KvTransitionPlan, RepresentationEpoch, RepresentationId, RepresentationState,
-    TransactionalKvPageV1, TransitionAttestations,
+    KvTransitionPlan, RepresentationEpoch, RepresentationId, RepresentationPrecisionKvBindingV1,
+    RepresentationState, TransactionalKvPageV1, TransitionAttestations,
 };
-use elasticxxx::resource::{DimensionId, InvariantKind, LogicalResourceId};
+use elasticxxx::resource::{
+    AdmissibleTransition, CapabilityRequirement, DimensionId, Invariant, InvariantKind,
+    LogicalResourceId, RepresentationalDeclaration, ResourceClassId, ResourceSpec,
+};
 use elasticxxx::{
-    EirResource, InvariantCheck, Plan, RuntimeError, TransitionMechanism, VerificationResult,
+    representation_precision_floor_signal, BooleanRepresentationPrecisionPreplannerV1,
+    BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, Plan,
+    RepresentationPrecisionCandidateV1, RuntimeError, TransitionMechanism, VerificationResult,
 };
 
 use crate::codec;
 use crate::elastic_cache::{ElasticKvCache, PhysicalTier};
 
-/// Version of the SLHAv2 -> ElasticXxx KV consumer contract.
+/// Legacy version of the SLHAv2 -> ElasticXxx capacity/transaction consumer contract.
 pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V1: u16 = 1;
+/// Additive ELANG8a bridge version: current Elastic facade + fixed-width
+/// representation/precision evidence composed with the physical KV plan.
+pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V2: u16 = 2;
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "b05c1906ee39bf3373fc541feedfa25520fbe433";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "26cbcdc73cfd08121593cf1a034720ee93816fe9";
+/// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
+pub const ELASTICXXX_ELANG8A_CONTRACT_REVISION: &str = ELASTICXXX_BE14D_CONTRACT_REVISION;
 
 const REPRESENTATION_SCHEMA_V1: u32 = 1;
 const BACKEND_NAME: &str = "slhav2-elastic-kv-cache-v1";
@@ -236,6 +246,93 @@ impl SlhaKvTransitionBackendV1 {
                     self.target.recovery_source,
                 ),
             )
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the fixed-width representation/precision candidate exposed by
+    /// this physical transition, when the codec semantics support that contract.
+    ///
+    /// Today only uniform signed INT4 is represented by ElasticXxx's fixed-width
+    /// `declared-bits-per-scalar` contract. NF4/MIXED/TQ3/MIX3 remain explicit
+    /// custom precisions and therefore return `None` rather than receiving a
+    /// fabricated bit width.
+    pub fn fixed_width_precision_candidate(
+        &self,
+    ) -> Result<Option<RepresentationPrecisionCandidateV1>, String> {
+        if self.target.precision != KvPrecision::Int4 {
+            return Ok(None);
+        }
+        RepresentationPrecisionCandidateV1::new(
+            "slhav2-int4-warm-rank-0",
+            0,
+            self.target.representation.id.clone(),
+            self.target.representation.schema_version,
+            TransitionMechanism::Reencode,
+            4,
+        )
+        .map(Some)
+    }
+
+    /// Build the BE14e preplanner for this exact fixed-width physical transition.
+    ///
+    /// The declaration reuses the cache's real logical resource identity and
+    /// exact source/target representation contracts. It adds only the precision
+    /// floor observation required by the generic ElasticXxx preplanner.
+    pub fn fixed_width_precision_preplanner(
+        &self,
+    ) -> Result<Option<BooleanRepresentationPrecisionPreplannerV1>, String> {
+        let Some(candidate) = self.fixed_width_precision_candidate()? else {
+            return Ok(None);
+        };
+        let resource_id = {
+            let cache = self.cache.lock()?;
+            LogicalResourceId::new(cache.resource_id())
+                .map_err(|error| format!("invalid SLHAv2 KV resource id for ElasticXxx: {error}"))?
+        };
+        let spec = ResourceSpec::builder(ResourceClassId::REPRESENTATIONAL, resource_id)
+            .allow(DimensionId::REPRESENTATION)
+            .observe(representation_precision_floor_signal())
+            .preserve(Invariant::new(InvariantKind::PreserveContents))
+            .preserve(Invariant::new(InvariantKind::PreserveIdentity))
+            .admit(AdmissibleTransition::new(
+                TransitionMechanism::Reencode,
+                DimensionId::REPRESENTATION,
+            ))
+            .require_capability(CapabilityRequirement::new(
+                TransitionMechanism::Reencode,
+                DimensionId::REPRESENTATION,
+            ))
+            .build()
+            .map_err(|error| error.to_string())?;
+        let declaration = RepresentationalDeclaration::new(
+            spec,
+            [
+                (
+                    self.source.representation.id.clone(),
+                    self.source.representation.schema_version,
+                ),
+                (
+                    self.target.representation.id.clone(),
+                    self.target.representation.schema_version,
+                ),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        BooleanRepresentationPrecisionPreplannerV1::new(declaration, vec![candidate]).map(Some)
+    }
+
+    /// Compose one actual BE14e fixed-width selection with this exact physical
+    /// KV transition. This does not actuate the cache and does not replace the
+    /// capacity guard or trusted transaction validation.
+    pub fn bind_fixed_width_precision_report(
+        &self,
+        report: BooleanRepresentationPrecisionReportV2,
+    ) -> Result<Option<RepresentationPrecisionKvBindingV1>, String> {
+        let Some(candidate) = self.fixed_width_precision_candidate()? else {
+            return Ok(None);
+        };
+        RepresentationPrecisionKvBindingV1::new(candidate, report, self.transition_plan()?)
+            .map(Some)
             .map_err(|error| error.to_string())
     }
 
@@ -544,7 +641,11 @@ mod tests {
         AdmissibleTransition, CapabilityRequirement, Invariant, LogicalResourceId,
         ObservationSignalId, ResourceClassId, ResourceSpec,
     };
-    use elasticxxx::{lower, FirstGroundedPlanner, Runtime, RuntimeConfig, RuntimeMode};
+    use elasticxxx::{
+        lower, representation_precision_floor_signal, FirstGroundedPlanner, Observation,
+        ObservationEpoch, ObservationSnapshot, ObservationSource, PlanningContext,
+        ResourceGeneration, Runtime, RuntimeConfig, RuntimeMode,
+    };
     use std::time::{Duration, Instant};
 
     fn tile(seed: u8) -> [u8; codec::TILE_BYTES] {
@@ -847,6 +948,245 @@ mod tests {
         assert_eq!(
             handle.with_cache(|cache| cache.tier(slot)).unwrap(),
             Some(PhysicalTier::Hot)
+        );
+        assert_eq!(
+            handle
+                .with_cache(|cache| cache.restorable_hot_tile(slot))
+                .unwrap(),
+            Some(original)
+        );
+    }
+
+    #[test]
+    fn int4_consumer_binds_selected_precision_evidence_to_exact_physical_kv_plan() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-real-kv");
+        let slot = physical.insert(tile(17));
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let backend = SlhaKvTransitionBackendV1::bind_hot_slot(
+            handle,
+            slot,
+            RepresentationEpoch::new(3),
+            SlhaKvSemanticContractV1::token_stable(),
+        )
+        .unwrap();
+
+        let candidate = backend
+            .fixed_width_precision_candidate()
+            .unwrap()
+            .expect("uniform INT4 has an honest fixed-width precision contract");
+        assert_eq!(candidate.declared_precision_bits(), 4);
+        assert_eq!(candidate.target(), &backend.target().representation.id);
+        assert_eq!(
+            candidate.target_schema_version(),
+            backend.target().representation.schema_version
+        );
+
+        let preplanner = backend
+            .fixed_width_precision_preplanner()
+            .unwrap()
+            .expect("INT4 should expose BE14e preplanning");
+        let now = Instant::now();
+        let signal = representation_precision_floor_signal();
+        let context = PlanningContext::new().observe(signal.clone(), 4.0);
+        let observations = ObservationSnapshot::new(
+            now,
+            vec![Observation::from_source(
+                ObservationSource::runtime("slhav2-elang8a-int4"),
+                signal,
+                4.0,
+                now,
+            )],
+        );
+        let report = preplanner
+            .screen_with_trace(
+                &backend.source().representation,
+                &backend.capabilities(),
+                &context,
+                &observations,
+                now,
+                ObservationEpoch::new(1),
+                ResourceGeneration::new(1),
+            )
+            .unwrap();
+        let binding = backend
+            .bind_fixed_width_precision_report(report)
+            .unwrap()
+            .expect("selected INT4 precision evidence should compose with KV plan");
+
+        assert_eq!(binding.candidate().declared_precision_bits(), 4);
+        assert_eq!(binding.kv_plan(), &backend.transition_plan().unwrap());
+        assert_eq!(
+            binding.kv_plan().representation.to,
+            backend.target().representation
+        );
+    }
+
+    #[test]
+    fn int4_precision_floor_above_four_bits_does_not_bind_to_kv_transition() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-real-kv");
+        let slot = physical.insert(tile(19));
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let backend = SlhaKvTransitionBackendV1::bind_hot_slot(
+            handle,
+            slot,
+            RepresentationEpoch::new(1),
+            SlhaKvSemanticContractV1::token_stable(),
+        )
+        .unwrap();
+        let preplanner = backend.fixed_width_precision_preplanner().unwrap().unwrap();
+        let now = Instant::now();
+        let signal = representation_precision_floor_signal();
+        let context = PlanningContext::new().observe(signal.clone(), 8.0);
+        let observations = ObservationSnapshot::new(
+            now,
+            vec![Observation::from_source(
+                ObservationSource::runtime("slhav2-elang8a-int4"),
+                signal,
+                8.0,
+                now,
+            )],
+        );
+        let report = preplanner
+            .screen_with_trace(
+                &backend.source().representation,
+                &backend.capabilities(),
+                &context,
+                &observations,
+                now,
+                ObservationEpoch::new(1),
+                ResourceGeneration::new(1),
+            )
+            .unwrap();
+        let error = backend
+            .bind_fixed_width_precision_report(report)
+            .expect_err("8-bit floor must not authorize a 4-bit candidate");
+        assert!(error.contains("was not selected"));
+    }
+
+    #[test]
+    fn non_uniform_slha_codecs_do_not_fabricate_fixed_width_precision_candidates() {
+        for (index, flag) in [
+            codec::FLAG_NF4,
+            codec::FLAG_MIXED,
+            codec::FLAG_TQ3,
+            codec::FLAG_MIX3,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut encoded = tile(23 + index as u8);
+            encoded[codec::FLAGS_OFFSET..codec::FLAGS_OFFSET + 2]
+                .copy_from_slice(&flag.to_le_bytes());
+            let mut physical = ElasticKvCache::new(4096, "slhav2-real-kv");
+            let slot = physical.insert(encoded);
+            let backend = SlhaKvTransitionBackendV1::bind_hot_slot(
+                SlhaKvCacheHandleV1::new(physical),
+                slot,
+                RepresentationEpoch::new(1),
+                SlhaKvSemanticContractV1::token_stable(),
+            )
+            .unwrap();
+            assert!(backend.fixed_width_precision_candidate().unwrap().is_none());
+            assert!(backend
+                .fixed_width_precision_preplanner()
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn elasticxxx_manifest_pin_and_bridge_revision_cannot_silently_drift() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(manifest.contains("package = \"memorithm-elastic\""));
+        assert!(manifest.contains(ELASTICXXX_ELANG8A_CONTRACT_REVISION));
+        assert_eq!(
+            ELASTICXXX_BE14D_CONTRACT_REVISION,
+            ELASTICXXX_ELANG8A_CONTRACT_REVISION
+        );
+        assert_eq!(SLHAV2_ELASTICXXX_KV_BRIDGE_V1, 1);
+        assert_eq!(SLHAV2_ELASTICXXX_KV_BRIDGE_V2, 2);
+    }
+
+    #[test]
+    fn int4_capacity_and_precision_guards_converge_on_one_physical_transaction() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-real-kv");
+        let original = tile(31);
+        let slot = physical.insert(original);
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let backend = SlhaKvTransitionBackendV1::bind_hot_slot(
+            handle.clone(),
+            slot,
+            RepresentationEpoch::new(5),
+            SlhaKvSemanticContractV1::token_stable(),
+        )
+        .unwrap();
+        let (spec, eir) = resource();
+        let now = Instant::now();
+
+        let capacity = handle.capacity_observation(now).unwrap();
+        let capacity_gated = gated_plan(&backend, spec.clone(), &capacity, now);
+        let capacity_plan = match capacity_gated {
+            BooleanKvTransitionPreflightV2::Candidate { report, plan } => {
+                assert_eq!(report.evidence.truth, "true");
+                plan
+            }
+            BooleanKvTransitionPreflightV2::Blocked(report) => {
+                panic!("sufficient source-bound capacity unexpectedly blocked: {report:?}")
+            }
+        };
+
+        let precision_preplanner = backend
+            .fixed_width_precision_preplanner()
+            .unwrap()
+            .expect("INT4 should expose the fixed-width precision contract");
+        let precision_signal = representation_precision_floor_signal();
+        let precision_context = PlanningContext::new().observe(precision_signal.clone(), 4.0);
+        let precision_observations = ObservationSnapshot::new(
+            now,
+            vec![Observation::from_source(
+                ObservationSource::runtime("slhav2-elang8a-composed"),
+                precision_signal,
+                4.0,
+                now,
+            )],
+        );
+        let precision_report = precision_preplanner
+            .screen_with_trace(
+                &backend.source().representation,
+                &backend.capabilities(),
+                &precision_context,
+                &precision_observations,
+                now,
+                ObservationEpoch::new(7),
+                ResourceGeneration::new(11),
+            )
+            .unwrap();
+        let precision_binding = backend
+            .bind_fixed_width_precision_report(precision_report)
+            .unwrap()
+            .unwrap();
+        assert_eq!(precision_binding.kv_plan(), &capacity_plan);
+
+        let source = backend.source().clone();
+        let capabilities = backend.capabilities();
+        let attestations = backend.attestations();
+        let mut actuator = TransactionalKvPageV1::new(
+            backend,
+            &eir,
+            source,
+            capacity_plan,
+            &capabilities,
+            attestations,
+        )
+        .unwrap();
+        let result = runtime(spec, eir.clone())
+            .cycle(&eir, &FirstGroundedPlanner, &(), &mut actuator)
+            .unwrap();
+        assert!(result.commit.is_some());
+        assert!(result.rollback.is_none());
+        assert_eq!(
+            handle.with_cache(|cache| cache.tier(slot)).unwrap(),
+            Some(PhysicalTier::Warm)
         );
         assert_eq!(
             handle
