@@ -304,3 +304,25 @@ agent_operating_protocol:
     a major model-integration, KV-format, quality-promotion, performance-promotion,
     cross-repository integration, or merge decision. Read-only diagnosis is
     allowed.
+
+elasticxxx_convergence_2026_09_20:
+  status: merged_public_facade_and_precision_kv_composition
+  elasticxxx_contract:
+    pull_request: https://github.com/Memorithm/ElasticXxx/pull/202
+    merge_revision: 354cfb372f568338b29a357b0671bf9315097b1d
+    package: memorithm-elastic
+  slhav2_facade_convergence:
+    pull_request: https://github.com/Memorithm/SLHAv2/pull/115
+    merge_revision: da0ca865f6d2174e1471549e29e7eef8301ca117
+  slhav2_elang8a:
+    pull_request: https://github.com/Memorithm/SLHAv2/pull/114
+    qualified_head: accc8355bb3e3ef5631169645b4a580f87815ebd
+    merge_revision: 5fb53928ce2219d7659446a68f41a008eaa1124d
+    scope:
+      - source_bound_physical_capacity_evidence
+      - fixed_width_INT4_precision_candidate_at_4_declared_bits_per_scalar
+      - representation_precision_and_KV_plan_binding
+      - verified_HOT_to_WARM_commit_with_exact_reconstructable_HOT_rollback
+  exclusions:
+    - NF4_MIXED_TQ3_MIX3_do_not_fabricate_fixed_width_precision
+    - no_GPU_residency_performance_memory_product_quality_or_cost_claim
