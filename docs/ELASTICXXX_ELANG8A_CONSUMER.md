@@ -4,7 +4,7 @@ Status: cross-repository consumer qualification.
 
 Source/target boundary for this revision:
 
-- ElasticXxx source: `26cbcdc73cfd08121593cf1a034720ee93816fe9`;
+- ElasticXxx source: `354cfb372f568338b29a357b0671bf9315097b1d`;
 - SLHAv2 target baseline: `4a7cbeb871430301b101dc4ee4291b6db2a84d53`.
 
 SLHAv2 remains the owner of tile layout, codecs, HOT/WARM/COLD residency,

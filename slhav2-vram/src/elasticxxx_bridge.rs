@@ -38,7 +38,7 @@ pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V1: u16 = 1;
 pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V2: u16 = 2;
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "26cbcdc73cfd08121593cf1a034720ee93816fe9";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "354cfb372f568338b29a357b0671bf9315097b1d";
 /// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
 pub const ELASTICXXX_ELANG8A_CONTRACT_REVISION: &str = ELASTICXXX_BE14D_CONTRACT_REVISION;
 
