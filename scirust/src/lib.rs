@@ -42,6 +42,7 @@ pub mod numa;
 pub mod rank_dataset;
 pub mod ranking;
 pub mod representation_contract;
+pub mod replay_contract;
 pub mod residual;
 pub mod rng;
 pub mod rope;
