@@ -182,3 +182,33 @@ Durée : ~2–4 semaines.
   l'intégration.
 - **Le bon ordre** : offline pas cher → projection apprise → perplexité réelle →
   puis densification/portabilité/packaging.
+
+## Extension 2026-09-24 — stockage versus recomputation bornée
+
+Source de recherche : DeepSeek-AI, *DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression*. Les mécanismes et chiffres du rapport sont des hypothèses externes à reproduire ou réfuter; ils ne constituent pas des résultats SLHAv2.
+
+Le nouvel axe ne remplace pas HOT/WARM/COLD. Il ajoute une quatrième famille de décisions : **ne pas conserver un état court si sa reconstruction bornée coûte moins cher que sa résidence ou son transfert**, sous réserve d'un contrôle qualité explicite.
+
+### RPL-0 — contrat d'état rejouable
+- identifier précisément quels états SLHAv2 sont reconstruisibles à partir d'une fenêtre récente;
+- versionner source, position logique, représentation, epoch, fenêtre et dépendances;
+- distinguer reconstruction exacte et reconstruction approximative;
+- ne pas appeler ce mécanisme « SWA Bounded Replay » si le chemin n'implémente pas la même sémantique SWA.
+
+### RPL-1 — oracle de replay borné
+- chemin Rust de référence déterministe;
+- replay des `W` derniers éléments déclarés plutôt que conservation implicite;
+- comparaison paire avec l'état complet;
+- échec fermé sur source/lineage/epoch incompatibles.
+
+### RPL-2 — qualification qualité sur modèle réel
+Mesurer, à configuration identique, logits/NLL/perplexité ou métrique tâche, divergence de sortie, TTFT, TPOT, débit, octets résidents, octets transférés et coût total de recomputation. Les chemins approximatifs doivent disposer d'un seuil qualité pré-enregistré.
+
+### RPL-3 — arbitrage ElasticXxx
+Exposer quatre actions seulement après qualification de leurs sémantiques : `KEEP`, `COMPRESS`, `OFFLOAD`, `DROP_AND_REPLAY`. ElasticXxx choisit sous budget; SLHAv2 reste propriétaire du format, de la reconstruction et de la vérification qualité.
+
+### RPL-4 — baseline FP4 indépendante
+Ajouter via KVLab/SciRust une baseline portable FP4 E2M1 avec échelle groupée explicitement versionnée. Elle est comparée aux codecs SLHAv2 existants; elle ne les remplace pas par défaut et aucun résultat DeepSeek n'est transféré.
+
+### RPL-5 — runtime
+Après le gate portable, qualifier l'intégration runtime via NNIS avec comptabilité physique et sans confondre compaction logique, réservation d'allocateur et mémoire effectivement libérée.
