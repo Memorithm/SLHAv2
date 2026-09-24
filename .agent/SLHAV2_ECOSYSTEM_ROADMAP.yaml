@@ -326,3 +326,30 @@ elasticxxx_convergence_2026_09_20:
   exclusions:
     - NF4_MIXED_TQ3_MIX3_do_not_fabricate_fixed_width_precision
     - no_GPU_residency_performance_memory_product_quality_or_cost_claim
+deepseek_v41_storage_recompute_program_2026_09_24:
+  status: active_research_extension
+  source:
+    title: "DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression"
+    organization: DeepSeek-AI
+    reviewed_on: 2026-09-24
+    evidence_rule: external_report_is_hypothesis_input_not_SLHAv2_evidence
+  objective: >-
+    Add recomputation as an explicit alternative to retaining or offloading
+    short-horizon KV-derived state, without assuming that SLHAv2 already has the
+    exact sliding-window architecture used by the source report.
+  ordered_sequence:
+    - RPL_0_define_versioned_replayable_state_and_window_contract
+    - RPL_1_host_reference_for_bounded_recent_window_reconstruction
+    - RPL_2_pair_full_state_and_bounded_replay_on_real_model_quality_metrics
+    - RPL_3_bind_keep_compress_offload_drop_and_replay_choices_to_ElasticXxx
+    - RPL_4_measure_memory_transfer_recompute_TTFT_TPOT_and_tokens_per_second
+    - RPL_5_optional_NNIS_runtime_qualification_after_portable_reference_gate
+  precision_baseline:
+    - add_portable_FP4_E2M1_plus_group_scale_as_a_KVLab_SciRust_comparator_before_any_product_promotion
+    - keep_INT4_NF4_MIXED_TQ3_MIX3_results_separate_from_FP4
+  invariants:
+    - approximate_replay_must_be_labeled_approximate_and_quality_gated
+    - replay_window_cost_must_include_all_recomputation
+    - storage_savings_must_use_physical_bytes_when_physical_savings_are_claimed
+    - no_source_report_ratio_is_reused_as_a_SLHAv2_result
+
