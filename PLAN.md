@@ -212,3 +212,14 @@ Ajouter via KVLab/SciRust une baseline portable FP4 E2M1 avec échelle groupée 
 
 ### RPL-5 — runtime
 Après le gate portable, qualifier l'intégration runtime via NNIS avec comptabilité physique et sans confondre compaction logique, réservation d'allocateur et mémoire effectivement libérée.
+
+
+#### RPL-0 implementation
+
+The structural contract is implemented in `scirust::replay_contract`. It binds
+derived-state id, source id, representation/schema, materialization epoch,
+logical replay end position, bounded recent-window length, exact dependency
+generations, and exact-versus-approximate reconstruction. Approximate contracts
+must name a domain quality verifier. The implementation performs no
+reconstruction and therefore adds no quality, memory, latency, or equivalence
+claim; RPL-1 remains the first execution gate.
