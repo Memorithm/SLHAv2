@@ -171,12 +171,12 @@ impl ReplayableStateContract {
             .logical_end_position
             .checked_add(1)
             .ok_or(ReplayContractError::PositionOverflow)?;
-        available
-            .checked_sub(u64::from(self.window_items))
-            .ok_or(ReplayContractError::WindowBeforeOrigin {
+        available.checked_sub(u64::from(self.window_items)).ok_or(
+            ReplayContractError::WindowBeforeOrigin {
                 end_position: self.logical_end_position,
                 window_items: self.window_items,
-            })
+            },
+        )
     }
 
     /// Inclusive logical end position of the replay window.
@@ -201,7 +201,10 @@ impl ReplayableStateContract {
 
     /// Validate that an observed source snapshot is exactly the one this
     /// contract permits. No best-effort lineage substitution is allowed.
-    pub fn validate_source(&self, observed: &ReplaySourceSnapshot) -> Result<(), ReplayContractError> {
+    pub fn validate_source(
+        &self,
+        observed: &ReplaySourceSnapshot,
+    ) -> Result<(), ReplayContractError> {
         if observed.source_id != self.source_id {
             return Err(ReplayContractError::SourceIdMismatch);
         }
@@ -304,7 +307,10 @@ impl fmt::Display for ReplayContractError {
         match self {
             Self::EmptyId { field } => write!(output, "{field} must not be empty"),
             Self::IdTooLong { field, bytes } => {
-                write!(output, "{field} uses {bytes} bytes, maximum is {MAX_REPLAY_ID_BYTES}")
+                write!(
+                    output,
+                    "{field} uses {bytes} bytes, maximum is {MAX_REPLAY_ID_BYTES}"
+                )
             }
             Self::ZeroRepresentationSchemaVersion => {
                 write!(output, "representation schema version must be non-zero")
@@ -397,43 +403,31 @@ mod tests {
             ),
             Err(ReplayContractError::ApproximateMissingVerifier)
         );
-        assert!(
-            ReplayableStateContract::new(
-                "state",
-                "source",
-                representation(),
-                1,
-                63,
-                32,
-                ReplayReconstruction::Approximate,
-                Some("slha.replay-quality.v1".into()),
-                dependencies(),
-            )
-            .is_ok()
-        );
+        assert!(ReplayableStateContract::new(
+            "state",
+            "source",
+            representation(),
+            1,
+            63,
+            32,
+            ReplayReconstruction::Approximate,
+            Some("slha.replay-quality.v1".into()),
+            dependencies(),
+        )
+        .is_ok());
     }
 
     #[test]
     fn source_snapshot_must_match_epoch_position_and_dependencies_exactly() {
         let contract = contract();
-        let exact = ReplaySourceSnapshot::new(
-            "session-42",
-            representation(),
-            3,
-            255,
-            dependencies(),
-        )
-        .unwrap();
+        let exact =
+            ReplaySourceSnapshot::new("session-42", representation(), 3, 255, dependencies())
+                .unwrap();
         contract.validate_source(&exact).unwrap();
 
-        let stale = ReplaySourceSnapshot::new(
-            "session-42",
-            representation(),
-            2,
-            255,
-            dependencies(),
-        )
-        .unwrap();
+        let stale =
+            ReplaySourceSnapshot::new("session-42", representation(), 2, 255, dependencies())
+                .unwrap();
         assert_eq!(
             contract.validate_source(&stale),
             Err(ReplayContractError::EpochMismatch {
