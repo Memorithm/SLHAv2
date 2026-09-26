@@ -1,0 +1,52 @@
+name: Paper PDF
+
+on:
+  push:
+    branches:
+      - 'docs/**'
+    paths:
+      - 'paper/slhav2.tex'
+      - 'paper/README.md'
+      - '.github/workflows/paper-pdf.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: paper-pdf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-paper:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: true
+      - name: Install LaTeX and PDF validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends latexmk texlive-latex-base texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended lmodern poppler-utils
+      - name: Build paper
+        run: |
+          cd paper
+          latexmk -pdf -interaction=nonstopmode -halt-on-error slhav2.tex
+      - name: Validate and render PDF
+        run: |
+          pdfinfo paper/slhav2.pdf
+          pdftotext paper/slhav2.pdf "$RUNNER_TEMP/slhav2.txt"
+          grep -F 'Revision legend: blue = additions/corrections' "$RUNNER_TEMP/slhav2.txt"
+          mkdir -p "$RUNNER_TEMP/slhav2-render"
+          pdftoppm -png -r 96 paper/slhav2.pdf "$RUNNER_TEMP/slhav2-render/page" >/dev/null
+          test "$(find "$RUNNER_TEMP/slhav2-render" -name 'page-*.png' | wc -l)" -gt 0
+      - name: Commit rebuilt PDF
+        run: |
+          if git diff --quiet -- paper/slhav2.pdf; then
+            echo 'paper/slhav2.pdf already matches the source'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add paper/slhav2.pdf
+          git commit -m 'docs(paper): rebuild revised PDF'
+          git push
