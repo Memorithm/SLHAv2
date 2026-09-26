@@ -121,6 +121,22 @@ When applicable:
 - Forge/ADA: bounded algorithm/policy search after evaluator freeze.
 - SciRust: reusable primitives only after evidence supports promotion.
 
+## First retained upstream evidence — KVLab SKV-1
+
+Producer revision: `90a94e0165a38926835c766a45b4803bc0540317`.
+
+The synthetic SKV-1 panel deliberately holds candidate density constant at
+25%. On its controlled dominant-head row, two survivor sets both have top-2
+recall = 0.5:
+
+- dropping the strongest key retains softmax mass **0.000638**;
+- keeping the strongest key but replacing the weaker top-2 boundary key retains
+  mass **0.998532**.
+
+This is not model-quality evidence. It is accepted here only as mechanistic
+evidence that set-level top-k recall is insufficient for SLHAv2 routing gates
+and that mass-weighted misses must be retained as a separate diagnostic.
+
 ## Stop rules
 
 Stop or retain a negative result when:
