@@ -416,3 +416,27 @@ adaptive_kv_program_2026_09_26:
     - ROADMAP.md
     - docs/KVLAB_FEEDBACK_CONTRACT.md
     - PLAN.md
+
+elastic_word_control_plane_2026_09_26:
+  status: active_read_only_qualification
+  generic_contract:
+    repository: Memorithm/ElasticXxx
+    revision: 1206b431d6cc05f85e2d16d17d0239d1200650c5
+    ownership: dependency_free_ElasticWord_width_and_lane_semantics
+  slhav2_boundary:
+    - SLHAv2_retains_HOT_WARM_COLD_PINNED_codec_residency_eviction_and_quality_authority
+    - external_ElasticWord_projection_is_read_only_until_destination_requalification
+    - no_second_generic_Elastic_runtime_is_created
+  active:
+    - SLHAv2_PR_121_lossless_W512_present_slot_projection_slot_generation_tier_resident_bytes_backing_bytes
+  next:
+    - qualify_PR_121_exact_head_CI
+    - test_dense_slot_index_implicit_identity_before_removing_explicit_slot_lane
+    - prove_which_resident_and_backing_byte_counts_are_derivable_from_tier_and_codec_invariants
+    - only_then_evaluate_W128_or_W64_control_words
+  claims_not_authorized:
+    - memory_saving
+    - bandwidth_reduction
+    - latency_or_throughput_gain
+    - model_quality_preservation
+    - live_control_plane_replacement
