@@ -1,4 +1,4 @@
-# SLHA v2 — arXiv preprint
+# SLHA v2 - research paper
 
 LaTeX source for the research paper:
 
@@ -6,37 +6,50 @@ LaTeX source for the research paper:
 > Sign-LSH Residuals for Memory-Bandwidth-Bound LLM Inference**
 > *Tarek Zekriti (ZEKRITI TAREK)*
 
-The paper documents the **measured** state of the reference implementation
-(`scirust/`): the mechanism, the 128-byte cache-aware tile, CCOS Soft-Paging,
-and the full §7 evaluation (throughput, output fidelity, λ calibration, the
-quantization-is-not-the-bottleneck ablation). Every number is taken verbatim
-from the repository's reproducible (seeded) benchmarks — including **measured
-throughput on a Jetson Thor AGX 128** (AArch64/Neoverse-V3AE) alongside the x86
-baseline — and the limitations are stated explicitly (synthetic data, random
-projections, no real-model perplexity, no hardware cache counters, a single ARM
-device).
+## September 2026 revision
+
+The paper is maintained as an evidence ledger rather than silently rewriting
+earlier claims:
+
+- **blue** text is added or corrected in the September 2026 review;
+- **red** text is superseded/deleted material retained visibly for audit.
+
+The revision preserves the original seeded synthetic mechanism studies while
+adding the repository's later evidence: real GPT-2 activation codec
+requalification, Qwen2.5-1.5B-Instruct/WikiText-2 perplexity gates, the
+TinyStories physical external-K CCOS experiment, rank-transplant diagnostics,
+durable EventLog-backed COLD eviction, the fixed-slot physical cache,
+ElasticXxx source-bound capacity/precision contracts, and the RPL-0 replayable
+state contract.
+
+The paper explicitly records negative results. In particular, the tested
+direct compressed-score replacement configurations currently fail real-model
+quality gates, and the validated physical llama.cpp experiment is **K-only**
+(V remains in the ordinary engine cache). Cache-owned residency counters are
+not presented as total process/GPU memory savings.
 
 ## Build
 
-Self-contained — only standard LaTeX packages, no external `.bib`, no custom
+Self-contained -- only standard LaTeX packages, no external `.bib`, no custom
 `.sty`. Two passes resolve cross-references and the bibliography.
 
 ```sh
-pdflatex slhav2.tex
-pdflatex slhav2.tex
+pdflatex -interaction=nonstopmode -halt-on-error slhav2.tex
+pdflatex -interaction=nonstopmode -halt-on-error slhav2.tex
 ```
 
-or, if you have it:
+or:
 
 ```sh
-latexmk -pdf slhav2.tex
+latexmk -pdf -interaction=nonstopmode -halt-on-error slhav2.tex
 ```
 
-Builds on Overleaf and on the arXiv submission system as-is. Produces a
-13-page PDF.
+The repository CI rebuilds and render-checks the committed PDF when the paper
+source changes.
 
 ## arXiv submission
 
-Upload `slhav2.tex` alone (the bibliography is embedded via
-`thebibliography`). Suggested primary category: `cs.LG`; cross-list `cs.AR`,
-`cs.PF`.
+For a publication-clean version, remove the revision wrappers (`\added`,
+`\deleted`, `addedblock`, `deletedblock`) after the review is accepted. The
+bibliography remains embedded via `thebibliography`. Suggested primary category:
+`cs.LG`; cross-list `cs.AR`, `cs.PF`.
