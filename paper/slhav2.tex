@@ -270,6 +270,23 @@ entries by heuristics; PagedAttention/vLLM~\cite{vllm} manages KV memory
 in pages. SLHA~v2's Soft-Paging adds an intermediate, near-lossless
 \textsc{warm} state---freeing only the 1-bit residual---\emph{before}
 resorting to eviction, and chooses what to free by residual energy.
+\begin{addedblock}
+\paragraph{Recent adaptive KV compression and sparse retrieval.}
+The 2025 literature makes three directions particularly relevant to the
+post-diagnostic SLHA programme. Palu~\cite{palu} compresses KV state through
+low-rank projections integrated into the attention computation; AQUA-KV
+\cite{aquakv} and KVTuner~\cite{kvtuner} emphasize adaptive or layer-wise
+mixed precision rather than one uniform bit width; and CommVQ~\cite{commvq}
+uses a learned vector-quantized representation designed to commute with RoPE.
+A complementary systems line reduces the amount of KV that must be read:
+RocketKV~\cite{rocketkv} combines coarse eviction with fine-grained top-$k$
+sparse attention, while KVzip~\cite{kvzip} estimates query-agnostic KV
+importance through context reconstruction. These works motivate comparisons
+against adaptive precision, low-rank and selective-reading baselines rather
+than treating the original 128-byte SLHA tile as the only admissible endpoint.
+They do not establish that the SLHA mechanisms below inherit any of their
+quality or performance results.
+\end{addedblock}
 
 \section{The SLHA v2 Mechanism}
 \label{sec:method}
@@ -1050,6 +1067,60 @@ trainer/evaluator. This is research plumbing, not a protected-holdout success:
 no protected result may be used to retune that frozen candidate.
 \end{addedblock}
 
+\subsection{Adaptive importance-preserving KV programme}
+\label{sec:adaptive-kv}
+\begin{addedblock}
+The ranking intervention changes the optimization objective. The immediate
+question is no longer simply how many bits each key can be compressed to, but
+which information must remain sufficiently accurate for the model to select
+the right context, and what is the cheapest representation that preserves it.
+We therefore preregister a cross-repository research programme in which KVLab
+is the primary upstream falsification bench and SLHA remains the destination
+owner of compressed-KV semantics.
+
+The programme separates four quantities that earlier drafts risked conflating:
+(i) score approximation error, (ii) top-set/ranking preservation,
+(iii) retained softmax probability mass, and (iv) physical numerical KV work.
+A candidate may improve any one of these while worsening another. In
+particular, the Qwen rank oracle says that ordering matters strongly, while
+independent FLAT-ATTENTION experiments in the Memorithm ecosystem have shown
+that retaining a small top set alone need not preserve softmax-quality
+diagnostics. Retained mass is therefore added as a co-primary mechanistic
+metric, while real-model perplexity remains the promotion authority.
+
+The target architecture is a quality-constrained representation ladder rather
+than a single immutable tile policy:
+\begin{center}
+\small
+\textsc{critical} $\rightarrow$ highest qualified fidelity,\quad
+\textsc{important} $\rightarrow$ mixed precision $+$ residual,\quad
+\textsc{ordinary} $\rightarrow$ compact SLHA,\quad
+\textsc{low} $\rightarrow$ index-assisted sparse access when qualified,\quad
+\textsc{cold} $\rightarrow$ eviction/offload/replay.
+\end{center}
+These labels are research states, not a stable ABI. Candidate importance
+signals include ranking evidence, sign/Hamming signatures, key/query norms,
+age/position/frequency, layer/head identity, and residual energy. KVLab also
+preregisters elastic packed control/index widths from 64 to 2048 bits; a wider
+word is treated as a representation state with transition cost, not as an
+assumed one-instruction hardware primitive.
+
+Generic adaptation is delegated to ElasticXxx's
+\textsc{observe}$\rightarrow$\textsc{forecast}$\rightarrow$\textsc{plan}
+$\rightarrow$\textsc{validate}$\rightarrow$\textsc{act}
+$\rightarrow$\textsc{verify}$\rightarrow$\textsc{commit}/\textsc{rollback}
+lifecycle. FLAT-ATTENTION is the execution surface for testing whether Boolean
+or sparse routing actually avoids numerical attention work, and NNIS is the
+native NVIDIA qualification surface for physical residency and CUDA-event
+timing. BooleanLab, Forge, ADA and TDI may generate or search policies only
+after the evaluator is frozen; none of their candidates acquire SLHA runtime
+authority without destination-owned requalification.
+
+This programme is a consequence of the measured failures and diagnostics in
+\S\ref{sec:realmodel}--\S\ref{sec:rankdiag}; it is not itself a positive
+performance or quality result.
+\end{addedblock}
+
 \section{Discussion: real levers and false levers}
 \label{sec:discussion}
 Synthesizing the evaluation:
@@ -1233,6 +1304,17 @@ evidence into performance claims; and (vi) implement and evaluate bounded replay
 only after the RPL-0 identity contract can reconstruct state reproducibly.
 Larger $\ds$ and joint model/projection training remain open mechanisms, but
 ranking preservation is the immediate quality target.
+
+The adaptive-KV extension in \S\ref{sec:adaptive-kv} adds a second ordered
+track: (a) KVLab ranking/mass/Boolean/width/tiering experiments under matched
+controls; (b) Boolean-indexed numerical attention before any native-Boolean KV
+claim; (c) ElasticXxx-managed representation transitions only after static
+baselines and transition costs are measured; (d) monotonic adaptive repair
+using deployable confidence signals, with exact softmax mass retained only as
+an evaluation oracle; and (e) complete physical K+V and NNIS/Thor
+qualification only after the real-model quality gate clears. Logical candidate
+density or packed-bit width is never promoted as physical bandwidth, memory or
+latency evidence.
 \end{addedblock}
 
 \section{Conclusion}
@@ -1255,8 +1337,11 @@ bit-width. \deleted{What remains is real-hardware and real-model validation.}
 tested direct score-replacement configurations. The main empirical target has
 shifted to deployable ranking preservation, followed by renewed physical
 memory/performance validation only after quality clears its preregistered
-gates.} We release the reference implementation, benchmarks, and tests to make
-every claim reproducible.
+gates. The next research phase broadens that target into importance-preserving
+adaptive KV: ranking and retained softmax mass guide which state deserves
+precision, residency or numerical attention, while real-model quality remains
+the authority for promotion.} We release the reference implementation,
+benchmarks, and tests to make every claim reproducible.
 
 \paragraph{Reproducibility.}
 The reference crate (\textsc{SciRust}), committed experiment harnesses,
@@ -1331,6 +1416,39 @@ Large Language Models.
 \bibitem{streamingllm} G.~Xiao, Y.~Tian, B.~Chen, S.~Han, and M.~Lewis.
 \newblock Efficient Streaming Language Models with Attention Sinks.
 \newblock In \emph{ICLR}, 2024.
+
+\bibitem{palu} C.-C.~Chang, W.-C.~Lin, C.-Y.~Lin, C.-Y.~Chen, Y.-F.~Hu,
+P.-S.~Wang, N.-C.~Huang, L.~Ceze, and M.~S.~Abdelfattah.
+\newblock Palu: KV-Cache Compression with Low-Rank Projection.
+\newblock In \emph{ICLR}, 2025.
+
+\bibitem{commvq} J.~Li, Y.~Zhang, M.~Y.~Hassan, T.~Chafekar, T.~Cai,
+Z.~Ren, P.~Guo, F.~Karimzadeh, C.~Reed, C.~Wang, and C.~Gan.
+\newblock CommVQ: Commutative Vector Quantization for KV Cache Compression.
+\newblock In \emph{ICML}, 2025.
+
+\bibitem{aquakv} A.~Shutova, V.~Malinovskii, V.~Egiazarian, D.~Kuznedelev,
+D.~Mazur, N.~Surkov, I.~Ermakov, and D.~Alistarh.
+\newblock Cache Me If You Must: Adaptive Key-Value Quantization for Large
+Language Models.
+\newblock In \emph{ICML}, 2025.
+
+\bibitem{kvtuner} X.~Li, Z.~Xing, Y.~Li, L.~Qu, H.-L.~Zhen, Y.~Yao,
+W.~Liu, S.~J.~Pan, and M.~Yuan.
+\newblock KVTuner: Sensitivity-Aware Layer-Wise Mixed-Precision KV Cache
+Quantization for Efficient and Nearly Lossless LLM Inference.
+\newblock In \emph{ICML}, 2025.
+
+\bibitem{rocketkv} P.~Behnam, Y.~Fu, R.~Zhao, P.-A.~Tsai, Z.~Yu, and
+A.~Tumanov.
+\newblock RocketKV: Accelerating Long-Context LLM Inference via Two-Stage
+KV Cache Compression.
+\newblock arXiv:2502.14051, 2025.
+
+\bibitem{kvzip} J.-H.~Kim, J.~Kim, S.~Kwon, J.~W.~Lee, S.~Yun, and
+H.~O.~Song.
+\newblock KVzip: Query-Agnostic KV Cache Compression with Context Reconstruction.
+\newblock arXiv:2505.23416, 2025.
 
 \end{thebibliography}
 
