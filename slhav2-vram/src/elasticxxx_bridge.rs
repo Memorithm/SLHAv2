@@ -15,8 +15,9 @@ use elasticxxx::kv::boolean_admission::KvCapacityObservationV1;
 use elasticxxx::kv::{
     CapabilitySet, KeyEncodingPipeline, KeyTransformScope, KvPageDescriptor, KvPageId, KvPrecision,
     KvRecoverySource, KvResidency, KvTargetMaterialization, KvTransitionBackendV1,
-    KvTransitionPlan, RepresentationEpoch, RepresentationId, RepresentationPrecisionKvBindingV1,
-    RepresentationState, TransactionalKvPageV1, TransitionAttestations,
+    ElasticWordPlaneV1, ElasticWordWidthV1, KvTransitionPlan, RepresentationEpoch,
+    RepresentationId, RepresentationPrecisionKvBindingV1, RepresentationState,
+    TransactionalKvPageV1, TransitionAttestations,
 };
 use elasticxxx::resource::{
     AdmissibleTransition, CapabilityRequirement, DimensionId, Invariant, InvariantKind,
@@ -36,6 +37,12 @@ pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V1: u16 = 1;
 /// Additive ELANG8a bridge version: current Elastic facade + fixed-width
 /// representation/precision evidence composed with the physical KV plan.
 pub const SLHAV2_ELASTICXXX_KV_BRIDGE_V2: u16 = 2;
+/// Versioned read-only slot control-plane projection.
+pub const SLHAV2_ELASTIC_WORD_CONTROL_V1: &str = "slhav2.elastic-word-control@1.0.0";
+/// Lossless baseline width for the five independent v1 slot metadata fields.
+pub const SLHAV2_ELASTIC_WORD_CONTROL_BITS_V1: u16 = 512;
+/// Number of u64 lanes in the v1 SLHAv2 control word.
+pub const SLHAV2_ELASTIC_WORD_CONTROL_LANES_V1: usize = 8;
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
 pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "1206b431d6cc05f85e2d16d17d0239d1200650c5";
@@ -106,6 +113,52 @@ impl SlhaKvCacheHandleV1 {
     pub fn with_cache_mut<R>(&self, f: impl FnOnce(&mut ElasticKvCache) -> R) -> Result<R, String> {
         let mut cache = self.lock()?;
         Ok(f(&mut cache))
+    }
+
+    /// Snapshot present SLHAv2 physical-slot control metadata as one flat
+    /// ElasticWord plane.
+    ///
+    /// The v1 lossless baseline uses W512 with eight u64 lanes per present slot:
+    /// `[slot, generation, tier, resident_bytes, backing_bytes, 0, 0, 0]`.
+    /// Width is carried once by the plane. This method is read-only and grants
+    /// no mutation, paging, eviction, codec or residency-transition authority.
+    pub fn elastic_word_control_plane(&self) -> Result<ElasticWordPlaneV1, String> {
+        let cache = self.lock()?;
+        let counts = cache.counts();
+        let present_slots = counts
+            .0
+            .checked_add(counts.1)
+            .and_then(|value| value.checked_add(counts.2))
+            .and_then(|value| value.checked_add(counts.3))
+            .ok_or_else(|| "SLHAv2 present-slot count overflow".to_owned())?;
+        let lane_capacity = present_slots
+            .checked_mul(SLHAV2_ELASTIC_WORD_CONTROL_LANES_V1)
+            .ok_or_else(|| "SLHAv2 ElasticWord lane capacity overflow".to_owned())?;
+        let mut lanes = Vec::with_capacity(lane_capacity);
+
+        for (slot, generation, tier, resident_bytes, backing_bytes) in
+            cache.slot_control_metadata()
+        {
+            lanes.push(
+                u64::try_from(slot)
+                    .map_err(|_| "SLHAv2 slot index does not fit u64".to_owned())?,
+            );
+            lanes.push(generation);
+            lanes.push(physical_tier_code(tier));
+            lanes.push(
+                u64::try_from(resident_bytes)
+                    .map_err(|_| "SLHAv2 resident byte count does not fit u64".to_owned())?,
+            );
+            lanes.push(
+                u64::try_from(backing_bytes)
+                    .map_err(|_| "SLHAv2 backing byte count does not fit u64".to_owned())?,
+            );
+            lanes.extend_from_slice(&[0, 0, 0]);
+        }
+
+        let width = ElasticWordWidthV1::from_bits(SLHAV2_ELASTIC_WORD_CONTROL_BITS_V1)
+            .map_err(|error| error.to_string())?;
+        ElasticWordPlaneV1::new(width, lanes).map_err(|error| error.to_string())
     }
 
     /// Publish current physical resident-budget headroom as source-bound
@@ -585,6 +638,15 @@ fn descriptor(
     })
 }
 
+const fn physical_tier_code(tier: PhysicalTier) -> u64 {
+    match tier {
+        PhysicalTier::Hot => 0,
+        PhysicalTier::Warm => 1,
+        PhysicalTier::Cold => 2,
+        PhysicalTier::Pinned => 3,
+    }
+}
+
 fn precision_for_codec(codec_name: &str) -> KvPrecision {
     match codec_name {
         "int4" => KvPrecision::Int4,
@@ -719,6 +781,74 @@ mod tests {
             now,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn elastic_word_control_plane_preserves_slot_identity_generation_tier_and_bytes() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-control-plane");
+        let slot0 = physical.insert(tile(7));
+        let slot1 = physical.insert(tile(11));
+        physical.demote_slot(slot0).unwrap();
+        let handle = SlhaKvCacheHandleV1::new(physical);
+
+        let plane = handle.elastic_word_control_plane().unwrap();
+        assert_eq!(plane.width().bits(), SLHAV2_ELASTIC_WORD_CONTROL_BITS_V1);
+        assert_eq!(plane.word_count(), 2);
+        assert_eq!(
+            plane.word(0).unwrap(),
+            &[
+                slot0 as u64,
+                0,
+                1,
+                codec::WARM_PACKED_BYTES as u64,
+                (codec::RESIDUAL_WORDS * 8) as u64,
+                0,
+                0,
+                0,
+            ]
+        );
+        assert_eq!(
+            plane.word(1).unwrap(),
+            &[
+                slot1 as u64,
+                1,
+                0,
+                codec::TILE_BYTES as u64,
+                0,
+                0,
+                0,
+                0,
+            ]
+        );
+    }
+
+    #[test]
+    fn elastic_word_control_plane_keeps_sparse_physical_slot_identity() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-control-plane-sparse");
+        let slot0 = physical.insert(tile(1));
+        let slot1 = physical.insert(tile(2));
+        assert!(physical.clear_slot(slot0));
+        let handle = SlhaKvCacheHandleV1::new(physical);
+
+        let plane = handle.elastic_word_control_plane().unwrap();
+        assert_eq!(plane.word_count(), 1);
+        assert_eq!(plane.word(0).unwrap()[0], slot1 as u64);
+        assert_eq!(plane.word(0).unwrap()[1], 1);
+    }
+
+    #[test]
+    fn elastic_word_control_plane_can_expand_without_losing_v1_fields() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-control-plane-expand");
+        physical.insert(tile(3));
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let baseline = handle.elastic_word_control_plane().unwrap();
+
+        let expanded = baseline
+            .reference_repack_zero_extended(ElasticWordWidthV1::from_bits(1024).unwrap())
+            .unwrap();
+        assert_eq!(expanded.width().bits(), 1024);
+        assert_eq!(expanded.word_count(), 1);
+        assert_eq!(&expanded.word(0).unwrap()[..8], baseline.word(0).unwrap());
     }
 
     #[test]
