@@ -85,7 +85,12 @@ Exit: protected gate accepts or rejects the frozen candidate. No rescue sweep
 under the same candidate identity.
 
 ### RK2 — KVLab importance map
-Status: launched.
+Status: active; SKV-0 and SKV-1 first slices merged.
+
+First retained upstream evidence: KVLab `90a94e0165a38926835c766a45b4803bc0540317` shows that at equal
+25% survivor density and equal top-2 recall 0.5, two controlled selections can
+retain 0.000638 versus 0.998532 softmax mass. This does not establish model
+quality, but it falsifies top-k recall as a sufficient routing metric.
 
 KVLab becomes the primary research bench for identifying what SLHA must retain.
 The initial panel evaluates:
