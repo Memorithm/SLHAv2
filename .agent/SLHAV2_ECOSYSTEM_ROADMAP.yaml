@@ -393,6 +393,19 @@ adaptive_kv_program_2026_09_26:
     - mixed_8_4_INT4_MIX3_and_separately_qualified_codecs
     - elastic_control_index_widths_64_128_256_512_1024_2048_bits
     - K_and_V_sensitivity_separately
+  first_retained_upstream_evidence:
+    kvlab_revision: 90a94e0165a38926835c766a45b4803bc0540317
+    experiment: skv1-synthetic-mass-panel-v1
+    scope: synthetic_mechanistic_falsification_only
+    observation:
+      - equal_candidate_density_0_25
+      - equal_top2_recall_0_5
+      - dropping_strongest_key_retained_softmax_mass_0_000638
+      - keeping_strongest_key_and_missing_boundary_key_retained_softmax_mass_0_998532
+    consequence:
+      - top_k_recall_is_not_sufficient_as_a_SLHAv2_routing_metric
+      - mass_weighted_miss_metrics_remain_required
+      - no_real_model_quality_or_performance_promotion
   promotion_rule: >-
     A KVLab/FLAT/BooleanLab/Forge/ADA candidate has no SLHAv2 runtime authority.
     It must be source-bound, compared against matched controls, imported as a
