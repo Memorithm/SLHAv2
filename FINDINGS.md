@@ -305,6 +305,6 @@ contrainte de masse/qualité**, avant toute hypothèse de KV nativement booléen
 ### Prochaine preuve attendue
 
 La prochaine promotion utile nécessite des scores/activations de modèle réel
-(SK​V-2/3), des contrôles à densité égale, puis une mesure dans FLAT-ATTENTION.
+(SKV-2/3), des contrôles à densité égale, puis une mesure dans FLAT-ATTENTION.
 Seule une politique gelée qui conserve la qualité pourra ensuite être testée
 physiquement via NNIS/Thor et proposée à SLHAv2.
