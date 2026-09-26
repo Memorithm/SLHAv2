@@ -45,8 +45,7 @@ pub const SLHAV2_ELASTIC_WORD_CONTROL_BITS_V1: u16 = 512;
 pub const SLHAV2_ELASTIC_WORD_CONTROL_LANES_V1: usize = 8;
 
 /// Versioned dense physical-slot control-plane projection.
-pub const SLHAV2_ELASTIC_WORD_DENSE_CONTROL_V2: &str =
-    "slhav2.elastic-word-dense-control@2.0.0";
+pub const SLHAV2_ELASTIC_WORD_DENSE_CONTROL_V2: &str = "slhav2.elastic-word-dense-control@2.0.0";
 /// Lossless v2 dense width: one generation lane plus one Boolean state bitfield.
 pub const SLHAV2_ELASTIC_WORD_DENSE_CONTROL_BITS_V2: u16 = 128;
 /// Every dense v2 word contains exactly two native u64 lanes.
@@ -881,7 +880,10 @@ mod tests {
         let handle = SlhaKvCacheHandleV1::new(physical);
 
         let plane = handle.elastic_word_dense_control_plane_v2().unwrap();
-        assert_eq!(plane.width().bits(), SLHAV2_ELASTIC_WORD_DENSE_CONTROL_BITS_V2);
+        assert_eq!(
+            plane.width().bits(),
+            SLHAV2_ELASTIC_WORD_DENSE_CONTROL_BITS_V2
+        );
         assert_eq!(plane.word_count(), 3);
         assert_eq!(
             plane.word(slot0).unwrap(),
@@ -969,10 +971,7 @@ mod tests {
 
         let plane = handle.elastic_word_dense_control_plane_v2().unwrap();
         assert_eq!(plane.word(0).unwrap()[0], 0);
-        assert_ne!(
-            plane.word(0).unwrap()[1] & SLHA_SLOT_PRESENT_BIT_V2,
-            0
-        );
+        assert_ne!(plane.word(0).unwrap()[1] & SLHA_SLOT_PRESENT_BIT_V2, 0);
     }
 
     #[test]
@@ -988,7 +987,9 @@ mod tests {
         assert_eq!(expanded.width().bits(), 512);
         assert_eq!(expanded.word_count(), 1);
         assert_eq!(&expanded.word(0).unwrap()[..2], baseline.word(0).unwrap());
-        assert!(expanded.word(0).unwrap()[2..].iter().all(|value| *value == 0));
+        assert!(expanded.word(0).unwrap()[2..]
+            .iter()
+            .all(|value| *value == 0));
     }
 
     #[test]
