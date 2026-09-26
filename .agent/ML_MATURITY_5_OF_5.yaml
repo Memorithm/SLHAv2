@@ -1,7 +1,7 @@
 schema_version: 1
 kind: memorithm_ml_maturity_program
 status: active
-last_updated: "2026-09-26"
+last_updated: "2026-09-27"
 repository: Memorithm/SLHAv2
 objective: >-
   Raise compressed-KV and real-model integration maturity to evidence-backed 5/5.
@@ -62,6 +62,16 @@ priority_program:
           - SLHAv2_PR_121_exact_head_00736ac9bb22521c1f8718a188a20d64f5268606_merge_10564eb50ab056fe51b58a8f45f625b85d129c10
           - W512_preserves_slot_generation_tier_resident_bytes_and_backing_bytes_as_independent_lanes
           - exact_head_CI_MSRV_supply_chain_NUMA_AArch64_and_llama_shim_completed_success
+          - no_live_control_plane_replacement_memory_saving_latency_bandwidth_or_quality_claim
+      - id: SML4b
+        name: Dense W128 Boolean physical-slot projection
+        status: complete_read_only_baseline
+        evidence:
+          - SLHAv2_PR_122_exact_head_e606d4bdb915f308f38233b7bbf6afd8cc2044fc_merge_3d1c9d79d4ed46db685be2b743cadd7c615bc857
+          - word_index_preserves_physical_slot_identity_and_lane_zero_preserves_full_generation
+          - lane_one_is_PRESENT_plus_exactly_one_HOT_WARM_COLD_or_PINNED_bit
+          - destination_tier_invariants_rederive_resident_and_backing_bytes_and_fail_closed_on_drift
+          - exact_head_CI_build_test_MSRV_supply_chain_NUMA_AArch64_and_llama_shim_completed_success
           - no_live_control_plane_replacement_memory_saving_latency_bandwidth_or_quality_claim
     goals:
       - expose_HOT_WARM_COLD_representation_and_cost_capabilities_to_ElasticXxx

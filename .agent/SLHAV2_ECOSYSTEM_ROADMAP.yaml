@@ -1,7 +1,7 @@
 schema_version: 2
 kind: slhav2_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-09-26T22:38+0200"
+last_updated: "2026-09-27T00:10+0200"
 repository: Memorithm/SLHAv2
 intended_consumer: autonomous_coding_agent
 visibility_note: >-
@@ -418,7 +418,7 @@ adaptive_kv_program_2026_09_26:
     - PLAN.md
 
 elastic_word_control_plane_2026_09_26:
-  status: W512_read_only_baseline_qualified
+  status: W128_dense_read_only_baseline_qualified
   generic_contract:
     repository: Memorithm/ElasticXxx
     revision: 1206b431d6cc05f85e2d16d17d0239d1200650c5
@@ -429,10 +429,14 @@ elastic_word_control_plane_2026_09_26:
     - no_second_generic_Elastic_runtime_is_created
   active:
     - SLHAv2_PR_121_exact_head_00736ac9bb22521c1f8718a188a20d64f5268606_merge_10564eb50ab056fe51b58a8f45f625b85d129c10_lossless_W512_present_slot_projection
+    - SLHAv2_PR_122_exact_head_e606d4bdb915f308f38233b7bbf6afd8cc2044fc_merge_3d1c9d79d4ed46db685be2b743cadd7c615bc857_dense_W128_slot_index_generation_and_one_hot_tier_projection
+    - PR_122_derives_resident_and_backing_bytes_from_destination_tier_invariants_and_rejects_accounting_drift
+    - PR_122_exact_head_CI_build_test_MSRV_supply_chain_NUMA_AArch64_and_llama_shim_completed_success
   next:
-    - test_dense_slot_index_implicit_identity_before_removing_explicit_slot_lane
-    - prove_which_resident_and_backing_byte_counts_are_derivable_from_tier_and_codec_invariants
-    - only_then_evaluate_W128_or_W64_control_words
+    - retain_W512_as_the_explicit_field_level_comparator_for_differential_tests
+    - test_snapshot_replay_and_stale_generation_rejection_without_granting_actuation_authority
+    - evaluate_W64_only_if_a_versioned_schema_preserves_full_generation_and_state_semantics_without_truncation
+    - keep_live_control_plane_replacement_blocked_until_destination_owned_transition_verification_and_rollback_exist
   claims_not_authorized:
     - memory_saving
     - bandwidth_reduction
