@@ -33,6 +33,14 @@ jobs:
           latexmk -pdf -interaction=nonstopmode -halt-on-error slhav2.tex
       - name: Validate and render PDF
         run: |
+          if grep -Fq 'Overfull \hbox' paper/slhav2.log; then
+            grep -F 'Overfull \hbox' paper/slhav2.log
+            exit 1
+          fi
+          if grep -Fq 'There were undefined references' paper/slhav2.log; then
+            grep -F 'There were undefined references' paper/slhav2.log
+            exit 1
+          fi
           pdfinfo paper/slhav2.pdf
           pdftotext paper/slhav2.pdf "$RUNNER_TEMP/slhav2.txt"
           grep -F 'Revision legend: blue = additions/corrections' "$RUNNER_TEMP/slhav2.txt"
