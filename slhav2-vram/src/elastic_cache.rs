@@ -453,6 +453,31 @@ impl ElasticKvCache {
         self.slots.get(slot)?.as_ref().map(|state| state.seq)
     }
 
+    /// Iterate present slot control metadata in stable physical-slot order.
+    ///
+    /// The tuple is `(slot_index, generation, tier, resident_bytes, backing_bytes)`.
+    /// It is a read-only, allocation-free view over SLHAv2-owned physical state.
+    /// Consumers may encode it into an external generic representation, but this
+    /// iterator grants no mutation or residency-transition authority.
+    pub fn slot_control_metadata(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (usize, u64, PhysicalTier, usize, usize)> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot_index, state)| {
+                state.as_ref().map(|state| {
+                    (
+                        slot_index,
+                        state.seq,
+                        state.tier,
+                        state.allocated_bytes(),
+                        state.offloaded_bytes(),
+                    )
+                })
+            })
+    }
+
     /// Bytes held outside the resident budget for reversible restoration of one slot.
     pub fn slot_backing_bytes(&self, slot: usize) -> Option<usize> {
         self.slots
