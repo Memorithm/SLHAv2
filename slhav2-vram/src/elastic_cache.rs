@@ -461,7 +461,7 @@ impl ElasticKvCache {
     /// iterator grants no mutation or residency-transition authority.
     pub fn slot_control_metadata(
         &self,
-    ) -> impl ExactSizeIterator<Item = (usize, u64, PhysicalTier, usize, usize)> + '_ {
+    ) -> impl Iterator<Item = (usize, u64, PhysicalTier, usize, usize)> + '_ {
         self.slots
             .iter()
             .enumerate()
