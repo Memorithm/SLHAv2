@@ -1,7 +1,7 @@
 schema_version: 1
 kind: memorithm_ml_maturity_program
 status: active
-last_updated: "2026-08-31"
+last_updated: "2026-09-26"
 repository: Memorithm/SLHAv2
 objective: >-
   Raise compressed-KV and real-model integration maturity to evidence-backed 5/5.
@@ -54,6 +54,15 @@ priority_program:
   - id: SML4
     name: Elastic adaptation integration
     priority: P1
+    completed_slices:
+      - id: SML4a
+        name: Lossless ElasticWord physical-slot control projection
+        status: complete_read_only_baseline
+        evidence:
+          - SLHAv2_PR_121_exact_head_00736ac9bb22521c1f8718a188a20d64f5268606_merge_10564eb50ab056fe51b58a8f45f625b85d129c10
+          - W512_preserves_slot_generation_tier_resident_bytes_and_backing_bytes_as_independent_lanes
+          - exact_head_CI_MSRV_supply_chain_NUMA_AArch64_and_llama_shim_completed_success
+          - no_live_control_plane_replacement_memory_saving_latency_bandwidth_or_quality_claim
     goals:
       - expose_HOT_WARM_COLD_representation_and_cost_capabilities_to_ElasticXxx
       - let_ElasticXxx_plan_only_with_explicit_quality_and_budget_invariants
