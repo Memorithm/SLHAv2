@@ -28,6 +28,29 @@ quality gates, and the validated physical llama.cpp experiment is **K-only**
 (V remains in the ordinary engine cache). Cache-owned residency counters are
 not presented as total process/GPU memory savings.
 
+## September 26 adaptive-KV extension
+
+The revision now also records the evidence-driven pivot from a single fixed
+compressed-score design toward an **importance-preserving adaptive KV**
+programme. The new material is blue and is explicitly prospective: it does not
+turn the current real-model NO-GO into a positive result.
+
+The extension adds:
+
+- current 2025 comparison classes (low-rank projection, adaptive/layer-wise
+  mixed precision, vector quantization, coarse+fine sparse KV, query-agnostic
+  importance);
+- ranking/top-set preservation and retained softmax mass as separate
+  mechanistic objectives;
+- KVLab as the upstream falsification bench;
+- ElasticXxx as the generic representation-transition controller;
+- FLAT-ATTENTION and NNIS as the portable/native physical qualification paths;
+- explicit rules preventing logical candidate density or bit width from being
+  presented as physical speed/memory evidence.
+
+The canonical implementation roadmap is `../ROADMAP.md` and the evidence
+handoff contract is `../docs/KVLAB_FEEDBACK_CONTRACT.md`.
+
 ## Build
 
 Self-contained -- only standard LaTeX packages, no external `.bib`, no custom
@@ -45,7 +68,8 @@ latexmk -pdf -interaction=nonstopmode -halt-on-error slhav2.tex
 ```
 
 The repository CI rebuilds and render-checks the committed PDF when the paper
-source changes.
+source changes. Research branches that modify the paper are included in this
+rebuild gate so the committed PDF cannot silently drift from the LaTeX source.
 
 ## arXiv submission
 

@@ -223,3 +223,85 @@ generations, and exact-versus-approximate reconstruction. Approximate contracts
 must name a domain quality verifier. The implementation performs no
 reconstruction and therefore adds no quality, memory, latency, or equivalence
 claim; RPL-1 remains the first execution gate.
+
+
+---
+
+## Extension 2026-09-26 — importance-preserving adaptive KV
+
+The real-model ranking diagnosis changes the critical path. The next SLHA
+generation must optimize the information actually consumed by attention rather
+than treating reconstruction error or uniform score RMSE as sufficient.
+
+### AKV-0 — frozen quality target
+
+- LR1 remains the only currently frozen ranking-projection candidate;
+- no protected-holdout retuning;
+- ranking/top-set metrics are paired with real-model PPL/NLL;
+- retained softmax mass becomes a co-primary mechanistic diagnostic.
+
+### AKV-1 — KVLab mass/ranking campaign
+
+KVLab owns a large upstream campaign over:
+
+- top-k recall, boundary inversions and rank stability;
+- retained/omitted softmax mass;
+- mass-weighted false negatives;
+- sign/Hamming signatures;
+- key/query norms;
+- age/position/frequency;
+- layer/head sensitivity;
+- query-aware versus query-agnostic importance;
+- page/block geometry;
+- elastic packed widths 64/128/256/512/1024/2048 bits;
+- tiering/offload/replay interactions.
+
+Every candidate is compared with matched-density/budget controls. Positive,
+negative and no-effect results are retained.
+
+### AKV-2 — Boolean-indexed numerical attention
+
+The first production-oriented sparse architecture is BIKV-like, not native
+Boolean attention:
+
+```text
+Boolean/signature admission -> numerical SLHA/FLAT score on survivors
+```
+
+Exact numerical K/V remains authoritative. Candidate density is not a speed
+claim. Promotion requires end-to-end quality and measured total front-end plus
+survivor-attention time.
+
+### AKV-3 — adaptive representation ladder
+
+After evidence exists, expose representation states to ElasticXxx. Candidate
+states may include full-fidelity, mixed 8/4, compact SLHA, residual-free,
+index-only and replay/offload states. K and V are optimized separately.
+
+A transition is accepted only after VALIDATE -> ACT -> VERIFY and remains
+rollback-capable. Transition/controller cost is part of the comparison.
+
+### AKV-4 — adaptive repair
+
+Use monotonic repair to widen an initially sparse survivor set when a
+deployable confidence signal is insufficient. Dense exact-score or exact
+softmax-mass information may be used as an evaluation oracle only, never as a
+hidden runtime trigger.
+
+### AKV-5 — physical K+V and Thor
+
+Only after quality qualification:
+
+- complete physical V handling;
+- measure actual GPU allocation/traffic rather than tile projections;
+- qualify native execution through NNIS on Thor;
+- compare TTFT, TPOT/tokens/s, peak/steady memory and quality against the same
+  dense model/runtime path.
+
+### AKV-6 — search engines
+
+Forge, ADA, BooleanLab and TDI may search policies only after the evaluator and
+budget are frozen. Their output is a candidate, never an automatic promotion.
+
+Canonical implementation roadmap: `ROADMAP.md`.
+Cross-repository evidence contract: `docs/KVLAB_FEEDBACK_CONTRACT.md`.

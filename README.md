@@ -1,4 +1,4 @@
-# SLHA v2 — Faites tourner une IA locale sans carte graphique
+# SLHA v2 — Adaptive KV research for memory-bandwidth-bound LLM inference
 
 [![CI](https://github.com/Memorithm/SLHAv2/actions/workflows/ci.yml/badge.svg)](https://github.com/Memorithm/SLHAv2/actions)
 [![Rust](https://img.shields.io/badge/rust-2021+-blue.svg)](https://rust-lang.org)
@@ -10,15 +10,17 @@ graphique hors de prix : à chaque mot généré, l'IA doit se souvenir de tout 
 qui précède, et ce « souvenir » — le **KV-cache** — grossit sans cesse jusqu'à
 saturer la VRAM.
 
-**SLHA v2** compresse ce KV-cache en tuiles de **128 octets** alignées
-cache-line — l'équivalent d'une ligne de texte par token, au lieu de plusieurs
-kilo-octets. Deux lignes de cache de 64 octets, conçues pour rester proches du
-processeur (caches L1/L2/L3) plutôt que de dépendre d'un GPU.
+**SLHA v2** étudie une représentation KV compressée et adaptative. Le noyau
+historique encode une clé dans une tuile HOT de **128 octets** alignée sur deux
+lignes de cache de 64 octets, avec latent bas-rang et résidu binaire.
 
-> **Concrètement (projection) :** en compressant le KV-cache, un LLM qui
-> nécessite ~8 Go de VRAM pourrait tenir sur un CPU avec ~4 Go de RAM. C'est
-> l'objectif du projet — **à valider sur un modèle réel** : aucune mesure de bout
-> en bout n'existe encore (voir les *Réserves d'honnêteté* plus bas).
+> **État réel (septembre 2026) :** le mécanisme et les kernels sont validés,
+> mais le remplacement direct des scores échoue actuellement au gate qualité
+> réel : sur Qwen2.5-1.5B-Instruct/WikiText-2, la perplexité passe de 11,8831
+> (contrôle apparié) à 16,9173 (**+42,36 %**, NO-GO). Le travail prioritaire
+> n'est donc plus de « compresser davantage à tout prix », mais de préserver
+> l'information d'attention utile - en particulier le ranking/top-k et la masse
+> softmax - puis de choisir dynamiquement la représentation KV adaptée.
 
 
 ## Comment ça marche (en 30 secondes)
@@ -30,16 +32,60 @@ mémoire.
 SLHA v2 compresse chaque souvenir en une **tuile de 128 octets** — l'équivalent
 d'une ligne de texte — au lieu de plusieurs kilo-octets normalement.
 
-| Sans SLHA v2 | Avec SLHA v2 |
-|---|---|
-| ~500 Mo pour 32k tokens¹ | ~4 Mo pour 32k tokens¹ |
-| Obligé d'avoir un GPU | Fonctionne sur CPU |
-| RAM saturée rapidement | Cache L1/L2/L3 utilisé intelligemment |
+| Dimension | Baseline de comparaison | État SLHA v2 |
+|---|---|---|
+| Stockage K au niveau kernel | clé bf16 : 256 o/token | tuile HOT : 128 o/token |
+| Débit de scoring AVX2 | référence bf16 | ~2,5× plus de scores/s sur le banc publié |
+| Qualité réelle | contrôle apparié PPL 11,8831 | strict SLHA PPL 16,9173 : **NO-GO** |
+| Intégration physique | KV moteur ordinaire | external-K qualifié ; V reste ordinaire |
+| Objectif suivant | score dense | préserver top-k/masse softmax puis adapter la représentation |
 
-> ¹ *Projection* par tuile de 128 o/token (basée sur une clé non compressée
-> ~15,6 ko/token). Le ratio **mesuré** au niveau kernel est 128 o vs 256 o pour
-> une clé bf16 = **2× moins d'octets/token** (§7.5) ; le facteur de bout en bout
-> sur un LLM réel reste à mesurer.
+Les chiffres de tuile ou de kernel ne sont **pas** convertis en économie mémoire
+LLM de bout en bout sans mesure physique correspondante.
+
+## Direction de recherche active : KV adaptatif guidé par l'importance
+
+Le diagnostic réel a changé la feuille de route. Restaurer l'ordre baseline des
+clés récupère 65,9 % du déficit qualité observé sur Qwen ; restaurer seulement
+le **top-16** capture 98,42 % du bénéfice de cet oracle de ranking. Cet oracle
+n'est pas déployable, mais il indique où chercher.
+
+SLHA v2 évolue donc vers un **substrat KV adaptatif sous contrainte de qualité** :
+
+```text
+Q / état de décodage
+  -> preuve compacte d'importance
+     (ranking, masse softmax retenue, signature booléenne, norme, âge, couche/tête)
+  -> ensemble de survivants admissibles
+  -> classe de représentation
+       CRITICAL  -> fidélité maximale qualifiée
+       IMPORTANT -> précision mixte + résidu
+       ORDINARY  -> représentation SLHA compacte
+       LOW       -> index/filtrage booléen seulement si qualifié
+       COLD      -> éviction / replay borné
+  -> attention numérique
+  -> vérification qualité + coût
+  -> COMMIT / ROLLBACK via ElasticXxx
+```
+
+Cette évolution est menée avec **KVLab** comme banc amont de falsification et de
+sélection, **FLAT-ATTENTION** pour vérifier que le routage évite réellement des
+lectures/calculs numériques, **ElasticXxx** pour les transitions de
+représentation/résidence, **NNIS** pour la qualification GPU native sur Thor,
+et **BooleanLab / Forge / ADA** pour rechercher des politiques candidates sans
+court-circuiter les gates de preuve.
+
+Les résultats KVLab ne deviennent jamais automatiquement des fonctions SLHA :
+le contrat de remontée est documenté dans
+[`docs/KVLAB_FEEDBACK_CONTRACT.md`](docs/KVLAB_FEEDBACK_CONTRACT.md) et la
+feuille de route dans [`ROADMAP.md`](ROADMAP.md).
+
+Premier résultat remonté (KVLab SKV-1, commit `90a94e01`) :
+à densité 25 % et rappel top-2 identique de 0,5, deux erreurs de ranking
+contrôlées retiennent respectivement **0,000638** et **0,998532** de masse
+softmax. Cela ne prouve aucun gain LLM, mais démontre pourquoi le rappel top-k
+seul est insuffisant pour piloter le futur cache adaptatif.
+
 
 ## Le projet en bref — ce que vous pouvez faire
 
@@ -215,7 +261,11 @@ Voir le [guide d'intégration](docs/INTEGRATION.md) — **esquisse de conception
 - ✅ **Fidélité** : cosinus 0,95–0,997 vs attention complète (sortie `softmax·V`)
 - ✅ **Soft-Paging** : cache KV élastique (`ccos::ElasticKvCache`) — pager la moitié des tuiles HOT→WARM laisse la sortie à **cos 0,9995** (`examples/ccos_softpaging`, §4)
 - ✅ **Auto-audit + accès agent** : outil `slha-audit` (rapports JSON/Markdown) et serveur **MCP** `slha-mcp` (5 outils, zéro dépendance) — [`docs/MCP.md`](docs/MCP.md)
-- 🟡 **Intégration LLM réel** : *esquisse* — guide de conception + croquis pour llama.cpp/vLLM disponibles ([`docs/INTEGRATION.md`](docs/INTEGRATION.md)), **non intégrée** dans un moteur d'inférence ; perplexité non mesurée.
+- ✅ **Qualité LLM réellement mesurée** : Qwen2.5-1.5B-Instruct/WikiText-2 rejette le remplacement strict (**+42,36 % PPL**) ; ce NO-GO est conservé comme résultat.
+- ✅ **Chemin physique external-K** : intégration llama.cpp K-only avec comptabilité propre ; V reste dans le cache ordinaire.
+- 🟡 **LR1 top-16** : candidat de projection pairwise préenregistré, en qualification sans accès au holdout protégé.
+- 🟡 **KV adaptatif** : campagne KVLab lancée pour ranking, masse softmax, Boolean-KV, largeurs 64→2048 bits, tiering/replay et politiques Elastic ; aucune promotion sans preuve destination.
+- 🟡 **Gain mémoire/performance end-to-end** : non établi ; doit être mesuré sur le même modèle, matériel et protocole que le baseline.
 
 > Réserves d'honnêteté (projections synthétiques, `perf`/perplexité hors banc) :
 > voir [`FINDINGS.md`](FINDINGS.md) et `SLHAv2.md` §6–7.

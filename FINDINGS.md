@@ -252,3 +252,59 @@ protocole et débit : section « Research: rank-transplant oracle » du
 
 ---
 *Réf. : crate `scirust/` (suite automatisée incluant property/fuzz, doctests, calibration λ et CCOS ; Criterion et CI), paper `SLHAv2.md` §1–8.*
+
+
+## 7. Remontées KVLab vers le programme adaptive-KV (26 septembre 2026)
+
+La campagne amont est désormais active dans `Memorithm/KVLab`. Ces résultats
+sont volontairement classés par niveau de preuve : ils ne modifient pas le
+verdict LLM réel de SLHAv2 tant qu'un candidat n'a pas passé les gates
+destination.
+
+### SKV-0 — évidence canonique recomputable
+
+KVLab merge `4370949e91aed76f746d12c8314228b7d34a99f5` ajoute un format canonique
+qui lie une ligne de scores de référence, un ensemble de survivants et les
+métriques dérivées. Le décodeur recalcule les métriques et rejette leur
+falsification. C'est un contrat de preuve, pas une amélioration de qualité.
+
+### SKV-1 — top-k seul est insuffisant
+
+KVLab merge `90a94e0165a38926835c766a45b4803bc0540317` conserve un résultat
+synthétique contrôlé important pour SLHAv2.
+
+À densité fixe de 25 %, deux sélections ont exactement le même rappel top-2
+(0,5) sur un cas à clé dominante :
+
+| erreur contrôlée | masse softmax retenue | masse top-k manquée |
+|---|---:|---:|
+| supprimer la clé dominante, ajouter la rank-3 | **0,000638** | **0,998229** |
+| conserver la dominante, remplacer seulement la frontière top-2 | **0,998532** | **0,000335** |
+
+Conclusion limitée mais nette : **un compteur top-k identique peut masquer des
+pertes informationnelles opposées**. Le programme SLHAv2 conserve donc
+dorénavant la masse softmax retenue et les faux négatifs pondérés par masse
+comme diagnostics obligatoires aux côtés du ranking.
+
+Ce résultat est synthétique : aucune conclusion de perplexité, mémoire ou
+performance LLM n'en découle.
+
+### SKV-3 — Boolean-KV devient mass-aware
+
+KVLab merge `24d9d7488d5b4f2080a35241f971ec1e93acc4f1` compose le handoff BIKV
+existant avec le nouvel évaluateur. Chaque ensemble de pages admises peut
+désormais être associé à une sémantique explicite de score de page puis évalué
+en rappel top-k et masse softmax. Le score dense est marqué
+`evaluation_oracle_only=true` et ne peut pas être présenté comme signal
+déployable du routeur.
+
+Conséquence pour SLHAv2 : la piste prioritaire n'est plus « Boolean-KV parce
+qu'il réduit le nombre de pages », mais **Boolean-indexed numerical KV sous
+contrainte de masse/qualité**, avant toute hypothèse de KV nativement booléen.
+
+### Prochaine preuve attendue
+
+La prochaine promotion utile nécessite des scores/activations de modèle réel
+(SKV-2/3), des contrôles à densité égale, puis une mesure dans FLAT-ATTENTION.
+Seule une politique gelée qui conserve la qualité pourra ensuite être testée
+physiquement via NNIS/Thor et proposée à SLHAv2.

@@ -1,3 +1,33 @@
+# Adaptive-KV strategy update — 2026-09-26
+
+The current quality target is **not** generic score RMSE and **not** maximum
+compression ratio. Real-model evidence makes ranking/top-set preservation the
+first optimization target, with retained softmax mass as a co-primary
+mechanistic diagnostic.
+
+Before changing scoring, representation, paging, eviction, Boolean routing,
+word width, replay, layer/head precision or KV placement:
+
+1. read `ROADMAP.md` and `docs/KVLAB_FEEDBACK_CONTRACT.md`;
+2. inspect the relevant KVLab evidence identity and exact producer revision;
+3. require matched controls and destination-owned SLHAv2 requalification;
+4. keep the dense/full-fidelity fallback available until the candidate passes;
+5. route generic adaptation through ElasticXxx rather than adding a second
+   unversioned controller;
+6. never infer physical traffic, latency, memory or model quality from logical
+   candidate density or packed bit width.
+
+KVLab is the primary upstream research bench for adaptive KV hypotheses.
+FLAT-ATTENTION owns numerical attention consumption and portable GPU timing.
+NNIS owns native NVIDIA runtime qualification. BooleanLab/Forge/ADA may propose
+or search policies; their output has no runtime authority until promoted by the
+owning consumer.
+
+The frozen LR1 candidate from issue #107 remains the immediate score-quality
+gate. New KVLab work must not retune that candidate using its protected holdout.
+
+---
+
 # SLHAv2 Agent Bootstrap Contract
 
 Before any autonomous coding, real-model integration, KV-format change, performance/quality promotion, cross-repository integration, PR creation, or merge decision, fetch and read the persistent roadmap:
