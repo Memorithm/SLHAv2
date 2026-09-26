@@ -44,6 +44,31 @@ pub const SLHAV2_ELASTIC_WORD_CONTROL_BITS_V1: u16 = 512;
 /// Number of u64 lanes in the v1 SLHAv2 control word.
 pub const SLHAV2_ELASTIC_WORD_CONTROL_LANES_V1: usize = 8;
 
+/// Versioned dense physical-slot control-plane projection.
+pub const SLHAV2_ELASTIC_WORD_DENSE_CONTROL_V2: &str =
+    "slhav2.elastic-word-dense-control@2.0.0";
+/// Lossless v2 dense width: one generation lane plus one Boolean state bitfield.
+pub const SLHAV2_ELASTIC_WORD_DENSE_CONTROL_BITS_V2: u16 = 128;
+/// Every dense v2 word contains exactly two native u64 lanes.
+pub const SLHAV2_ELASTIC_WORD_DENSE_CONTROL_LANES_V2: usize = 2;
+
+/// Dense v2 state bit: the physical slot currently owns a logical KV value.
+pub const SLHA_SLOT_PRESENT_BIT_V2: u64 = 1 << 0;
+/// Dense v2 mutually-exclusive HOT tier bit.
+pub const SLHA_SLOT_HOT_BIT_V2: u64 = 1 << 1;
+/// Dense v2 mutually-exclusive WARM tier bit.
+pub const SLHA_SLOT_WARM_BIT_V2: u64 = 1 << 2;
+/// Dense v2 mutually-exclusive COLD tier bit.
+pub const SLHA_SLOT_COLD_BIT_V2: u64 = 1 << 3;
+/// Dense v2 mutually-exclusive PINNED tier bit.
+pub const SLHA_SLOT_PINNED_BIT_V2: u64 = 1 << 4;
+/// All state bits currently defined by the v2 schema.
+pub const SLHA_SLOT_STATE_MASK_V2: u64 = SLHA_SLOT_PRESENT_BIT_V2
+    | SLHA_SLOT_HOT_BIT_V2
+    | SLHA_SLOT_WARM_BIT_V2
+    | SLHA_SLOT_COLD_BIT_V2
+    | SLHA_SLOT_PINNED_BIT_V2;
+
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
 pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "1206b431d6cc05f85e2d16d17d0239d1200650c5";
 /// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
@@ -155,6 +180,48 @@ impl SlhaKvCacheHandleV1 {
         }
 
         let width = ElasticWordWidthV1::from_bits(SLHAV2_ELASTIC_WORD_CONTROL_BITS_V1)
+            .map_err(|error| error.to_string())?;
+        ElasticWordPlaneV1::new(width, lanes).map_err(|error| error.to_string())
+    }
+
+    /// Snapshot every physical slot position into a dense W128 Boolean control plane.
+    ///
+    /// Word index is the stable physical slot identity. Each word is:
+    ///
+    /// `[generation_or_zero, state_bitfield]`
+    ///
+    /// An absent slot is exactly `[0, 0]`. A present slot sets PRESENT and
+    /// exactly one tier bit. Resident/backing byte counts are not repeated in
+    /// the word: they are re-derived from SLHAv2's authoritative tier invariants
+    /// and compared with the physical slot before the snapshot is accepted.
+    ///
+    /// This is read-only evidence. It does not authorize residency mutation,
+    /// codec changes, eviction, compaction or runtime promotion.
+    pub fn elastic_word_dense_control_plane_v2(&self) -> Result<ElasticWordPlaneV1, String> {
+        let cache = self.lock()?;
+        let slot_count = cache.slot_control_metadata_dense().len();
+        let lane_capacity = slot_count
+            .checked_mul(SLHAV2_ELASTIC_WORD_DENSE_CONTROL_LANES_V2)
+            .ok_or_else(|| "SLHAv2 dense ElasticWord lane capacity overflow".to_owned())?;
+        let mut lanes = Vec::with_capacity(lane_capacity);
+
+        for metadata in cache.slot_control_metadata_dense() {
+            match metadata {
+                None => lanes.extend_from_slice(&[0, 0]),
+                Some((generation, tier, resident_bytes, backing_bytes)) => {
+                    let (expected_resident, expected_backing) = derived_bytes_for_tier_v2(tier);
+                    if resident_bytes != expected_resident || backing_bytes != expected_backing {
+                        return Err(format!(
+                            "SLHAv2 tier {tier:?} byte accounting drifted: resident={resident_bytes} backing={backing_bytes}, expected resident={expected_resident} backing={expected_backing}"
+                        ));
+                    }
+                    lanes.push(generation);
+                    lanes.push(dense_state_bits_v2(tier));
+                }
+            }
+        }
+
+        let width = ElasticWordWidthV1::from_bits(SLHAV2_ELASTIC_WORD_DENSE_CONTROL_BITS_V2)
             .map_err(|error| error.to_string())?;
         ElasticWordPlaneV1::new(width, lanes).map_err(|error| error.to_string())
     }
@@ -636,6 +703,27 @@ fn descriptor(
     })
 }
 
+const fn dense_state_bits_v2(tier: PhysicalTier) -> u64 {
+    SLHA_SLOT_PRESENT_BIT_V2
+        | match tier {
+            PhysicalTier::Hot => SLHA_SLOT_HOT_BIT_V2,
+            PhysicalTier::Warm => SLHA_SLOT_WARM_BIT_V2,
+            PhysicalTier::Cold => SLHA_SLOT_COLD_BIT_V2,
+            PhysicalTier::Pinned => SLHA_SLOT_PINNED_BIT_V2,
+        }
+}
+
+const fn derived_bytes_for_tier_v2(tier: PhysicalTier) -> (usize, usize) {
+    match tier {
+        PhysicalTier::Hot | PhysicalTier::Pinned => (codec::TILE_BYTES, 0),
+        PhysicalTier::Warm => (codec::WARM_PACKED_BYTES, codec::RESIDUAL_WORDS * 8),
+        // COLD stores either a 128-byte HOT image or a 96-byte WARM image plus
+        // its retained 32-byte residual. Both cases therefore retain one full
+        // 128-byte logical tile outside the resident budget.
+        PhysicalTier::Cold => (0, codec::TILE_BYTES),
+    }
+}
+
 const fn physical_tier_code(tier: PhysicalTier) -> u64 {
     match tier {
         PhysicalTier::Hot => 0,
@@ -779,6 +867,128 @@ mod tests {
             now,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn dense_w128_control_plane_uses_word_index_as_slot_identity() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-dense-w128");
+        let slot0 = physical.insert(tile(1));
+        let slot1 = physical.insert(tile(2));
+        let slot2 = physical.insert(tile(3));
+        assert_eq!((slot0, slot1, slot2), (0, 1, 2));
+        assert!(physical.clear_slot(slot1));
+        physical.demote_slot(slot2).unwrap();
+        let handle = SlhaKvCacheHandleV1::new(physical);
+
+        let plane = handle.elastic_word_dense_control_plane_v2().unwrap();
+        assert_eq!(plane.width().bits(), SLHAV2_ELASTIC_WORD_DENSE_CONTROL_BITS_V2);
+        assert_eq!(plane.word_count(), 3);
+        assert_eq!(
+            plane.word(slot0).unwrap(),
+            &[0, SLHA_SLOT_PRESENT_BIT_V2 | SLHA_SLOT_HOT_BIT_V2]
+        );
+        assert_eq!(plane.word(slot1).unwrap(), &[0, 0]);
+        assert_eq!(
+            plane.word(slot2).unwrap(),
+            &[2, SLHA_SLOT_PRESENT_BIT_V2 | SLHA_SLOT_WARM_BIT_V2]
+        );
+    }
+
+    #[test]
+    fn dense_w128_bitfield_is_one_hot_over_present_tiers() {
+        for tier in [
+            PhysicalTier::Hot,
+            PhysicalTier::Warm,
+            PhysicalTier::Cold,
+            PhysicalTier::Pinned,
+        ] {
+            let bits = dense_state_bits_v2(tier);
+            assert_ne!(bits & SLHA_SLOT_PRESENT_BIT_V2, 0);
+            assert_eq!(bits & !SLHA_SLOT_STATE_MASK_V2, 0);
+            let tier_bits = bits & !SLHA_SLOT_PRESENT_BIT_V2;
+            assert_eq!(tier_bits.count_ones(), 1);
+        }
+    }
+
+    #[test]
+    fn dense_w128_derives_exact_physical_byte_accounting_for_all_tiers() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-dense-bytes");
+        let hot = physical.insert(tile(10));
+        let warm = physical.insert(tile(20));
+        let cold = physical.insert(tile(30));
+        let pinned = physical.insert(tile(40));
+
+        physical.demote_slot(warm).unwrap();
+        physical.demote_slot(cold).unwrap();
+        physical.evict_slot(cold).unwrap();
+        assert!(physical.pin(pinned));
+
+        for (slot, tier) in [
+            (hot, PhysicalTier::Hot),
+            (warm, PhysicalTier::Warm),
+            (cold, PhysicalTier::Cold),
+            (pinned, PhysicalTier::Pinned),
+        ] {
+            assert_eq!(physical.tier(slot), Some(tier));
+            let actual_resident = physical
+                .slot_control_metadata()
+                .find(|(index, _, _, _, _)| *index == slot)
+                .map(|(_, _, _, resident, backing)| (resident, backing))
+                .unwrap();
+            assert_eq!(actual_resident, derived_bytes_for_tier_v2(tier));
+        }
+
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let plane = handle.elastic_word_dense_control_plane_v2().unwrap();
+        assert_eq!(plane.word_count(), 4);
+        assert_eq!(
+            plane.word(hot).unwrap()[1],
+            SLHA_SLOT_PRESENT_BIT_V2 | SLHA_SLOT_HOT_BIT_V2
+        );
+        assert_eq!(
+            plane.word(warm).unwrap()[1],
+            SLHA_SLOT_PRESENT_BIT_V2 | SLHA_SLOT_WARM_BIT_V2
+        );
+        assert_eq!(
+            plane.word(cold).unwrap()[1],
+            SLHA_SLOT_PRESENT_BIT_V2 | SLHA_SLOT_COLD_BIT_V2
+        );
+        assert_eq!(
+            plane.word(pinned).unwrap()[1],
+            SLHA_SLOT_PRESENT_BIT_V2 | SLHA_SLOT_PINNED_BIT_V2
+        );
+    }
+
+    #[test]
+    fn dense_w128_generation_zero_is_unambiguous_for_present_slot() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-dense-generation-zero");
+        let slot = physical.insert(tile(5));
+        assert_eq!(slot, 0);
+        assert_eq!(physical.slot_generation(slot), Some(0));
+        let handle = SlhaKvCacheHandleV1::new(physical);
+
+        let plane = handle.elastic_word_dense_control_plane_v2().unwrap();
+        assert_eq!(plane.word(0).unwrap()[0], 0);
+        assert_ne!(
+            plane.word(0).unwrap()[1] & SLHA_SLOT_PRESENT_BIT_V2,
+            0
+        );
+    }
+
+    #[test]
+    fn dense_w128_can_expand_without_reintroducing_redundant_fields() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-dense-expand");
+        physical.insert(tile(9));
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let baseline = handle.elastic_word_dense_control_plane_v2().unwrap();
+
+        let expanded = baseline
+            .reference_repack_zero_extended(ElasticWordWidthV1::from_bits(512).unwrap())
+            .unwrap();
+        assert_eq!(expanded.width().bits(), 512);
+        assert_eq!(expanded.word_count(), 1);
+        assert_eq!(&expanded.word(0).unwrap()[..2], baseline.word(0).unwrap());
+        assert!(expanded.word(0).unwrap()[2..].iter().all(|value| *value == 0));
     }
 
     #[test]
