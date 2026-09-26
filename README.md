@@ -80,6 +80,13 @@ le contrat de remontée est documenté dans
 [`docs/KVLAB_FEEDBACK_CONTRACT.md`](docs/KVLAB_FEEDBACK_CONTRACT.md) et la
 feuille de route dans [`ROADMAP.md`](ROADMAP.md).
 
+Premier résultat remonté (KVLab SKV-1, commit `90a94e01`) :
+à densité 25 % et rappel top-2 identique de 0,5, deux erreurs de ranking
+contrôlées retiennent respectivement **0,000638** et **0,998532** de masse
+softmax. Cela ne prouve aucun gain LLM, mais démontre pourquoi le rappel top-k
+seul est insuffisant pour piloter le futur cache adaptatif.
+
+
 ## Le projet en bref — ce que vous pouvez faire
 
 SLHA v2 est un **workspace Cargo de 5 crates** (`scirust` 0.2.0, `slha-mcp`
