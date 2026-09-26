@@ -802,10 +802,53 @@ dropping the 16-byte correction plane degrades gracefully to a pure
 \textsc{hot}$\to$\textsc{warm} (not yet wired into the cache manager).
 Crucially, INT8 does \emph{not}
 beat INT4 on \textsc{warm} ($\approx 0.61$): doubling the bits does not
-lift the coarse ceiling. \textbf{The limiting factor is therefore the
+lift the coarse ceiling. \deleted{\textbf{The limiting factor is therefore the
 low-rank projection, not latent quantization.} This corrects an earlier
 hypothesis that blamed INT4, and refocuses the real levers on (a)~a
-better (learned) projection and (b)~the 1-bit residual.
+better (learned) projection and (b)~the 1-bit residual.}
+\added{This remains valid for the synthetic coarse-term ablation, but it is too
+broad as a statement about real activations. On held-out GPT-2 layer-6
+activations, \emph{where} precision is allocated matters sharply: the mixed
+8/4 codec and MIX3 preserve output cosine near 0.984, whereas grouped INT4 and
+TQ3 are substantially worse. The stricter KL gate still rejects all four
+configurations, so codec placement helps but does not close the end-to-end
+quality gap.}
+
+
+\subsection{Real-activation codec requalification (September 2026)}
+\label{sec:codec-real}
+\begin{addedblock}
+The synthetic codec ablation above did not predict behavior on a steep,
+real activation spectrum. The repository therefore re-ran the codec comparison
+on held-out GPT-2 layer-6 activations. Table~\ref{tab:codec-real} reports the
+joint-projection HOT result. The preregistered local gate for this proxy is
+cosine $\ge 0.98$ \emph{and} KL $\le 0.03$.
+
+\begin{table}[t]
+\centering
+\caption{\added{Held-out GPT-2 layer-6 activation proxy, joint projection.}}
+\label{tab:codec-real}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Codec & output cosine $\uparrow$ & rel-$L_2$ $\downarrow$ & KL $\downarrow$ \\
+\midrule
+Grouped INT4 & 0.8835 & 0.4386 & 0.5804 \\
+Mixed 8/4 & \textbf{0.9846} & 0.1492 & \textbf{0.0553} \\
+TQ3 & 0.7908 & 0.6078 & 1.0956 \\
+MIX3 & 0.9835 & 0.1552 & 0.0599 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+TQ3 is therefore a measured NO-GO as a HOT codec on this real-activation
+regime. MIX3, which combines an 8-bit salient head with a separable TQ3 body,
+recovers mixed-codec-level cosine while preserving a correction plane usable as
+a finer CCOS paging rung. Neither mixed nor MIX3 passes the strict KL threshold,
+so this is an improvement in representation allocation, not an end-task GO.
+A subsequent score-aware SGD experiment on these activations degraded held-out
+quality, another negative result retained in the repository.
+\end{addedblock}
 
 \subsection{$\lambda$ calibration}
 \label{sec:calib}
@@ -939,26 +982,104 @@ DRAM; the gain comes from byte volume and uops, not a DRAM limit. On a
 smaller LLC or a genuinely DRAM-bound decode, SLHA's advantage would be
 larger.
 
+
+\subsection{Real-model quality gates and physical external-K}
+\label{sec:realmodel}
+\begin{addedblock}
+Two later experiment families replace the June draft's ``real-model
+perplexity is unmeasured'' statement.
+
+\paragraph{Qwen2.5-1.5B-Instruct score-replacement gate.}
+A CPU-only llama.cpp experiment used Qwen2.5-1.5B-Instruct Q8\_0 and WikiText-2
+raw test text, 12 chunks at context 512, with three repeated runs per rung.
+The matched custom-op/no-substitution control averaged PPL 11.8831; strict SLHA
+compressed-score substitution averaged 16.9173. The primary paired contrast is
+$+5.0342$ PPL, or $+42.36\%$. The unpatched baseline processed about
+213.0 evaluation tokens/s while strict replacement processed 54.5 tokens/s.
+This configuration therefore fails the registered quality gate and carries no
+end-to-end speed claim.
+
+\begin{table}[t]
+\centering
+\caption{\added{Qwen2.5-1.5B-Instruct Q8\_0, WikiText-2, 12 chunks, context 512.}}
+\label{tab:qwen-ppl}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Configuration & Mean PPL & Interpretation \\
+\midrule
+Unpatched llama.cpp & 11.8779 & external baseline \\
+Matched no-substitution control & 11.8831 & primary control \\
+Strict SLHA score replacement & 16.9173 & NO-GO ($+42.36\%$ vs control) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{TinyStories physical external-K CCOS.}
+A separate 24.41M-parameter TinyStories Q8\_0 smoke physically removed the
+engine K allocation from the active path and served K through the SLHA fixed-slot
+external-K cache; V remained in ordinary llama.cpp storage. On a
+repository-authored, non-standard two-chunk held-out story control, ordinary KV
+measured PPL 42.201 and the external SLHA/CCOS arm measured 49.0024
+($+16.12\%$). Replacement coverage was 100\% of active logits with zero
+fallback/failure. An 8-token generation matched exactly in that run, but this
+short agreement does not offset the perplexity degradation. In the companion
+short decode smoke the external path was also slower and peak process RSS was
+higher; cache-owned resident-byte counters are not total-process memory.
+\end{addedblock}
+
+\subsection{Ranking diagnosis and the current optimization target}
+\label{sec:rankdiag}
+\begin{addedblock}
+The Qwen failure was followed by controlled, non-deployable rank interventions.
+On the 12-chunk validation, pass-through PPL was 11.8644 and strict replacement
+PPL was 16.8855. Replacing only the ordering of causally visible SLHA scores
+with baseline ordering, while retaining the SLHA score-value multiset, reduced
+PPL to 13.5756: 65.92\% of the full quality gap was recovered. Restoring only
+the baseline top-16 ordering reached PPL 13.6278 and captured 98.42\% of the
+full ranking-oracle recovery. A complementary intervention that kept the wrong
+SLHA ordering while transplanting baseline values worsened PPL, showing a strong
+interaction rather than proving that score geometry is irrelevant.
+
+The evidence therefore promotes \emph{ranking preservation}---especially the
+top set---above generic score-magnitude calibration as the next quality lever.
+The score-temperature hypothesis was tested separately and rejected. The
+repository now preregisters one deployable-compatible candidate,
+\texttt{slha-lr1-pairwise-top16-all-layers-v1}, with a non-protected Stage-A
+trainer/evaluator. This is research plumbing, not a protected-holdout success:
+no protected result may be used to retune that frozen candidate.
+\end{addedblock}
+
 \section{Discussion: real levers and false levers}
 \label{sec:discussion}
 Synthesizing the evaluation:
 
 \begin{itemize}[leftmargin=1.4em,itemsep=2pt]
-  \item \textbf{Lever \#1 --- the low-rank projection.} A learned,
+  \item \deleted{\textbf{Lever \#1 --- the low-rank projection.} A learned,
     task-aware projection beats PCA decisively under $Q/K$ shift
-    (\textsc{warm} $0.16 \to 0.86$, \S\ref{sec:taskaware}).
+    (\textsc{warm} $0.16 \to 0.86$, \S\ref{sec:taskaware}).}
+    \added{\textbf{Lever \#1 --- ranking preservation under real-model
+    replacement.} The rank oracle recovers 65.9\% of the Qwen quality gap,
+    and top-16 restoration captures 98.42\% of the oracle's benefit
+    (\S\ref{sec:rankdiag}). The low-rank projection remains a mechanism for
+    achieving that objective, but reconstruction energy alone is insufficient.}
   \item \textbf{Lever \#2 --- the 1-bit residual.} It recovers much of
     what the coarse term misses (\textsc{hot} $\gg$ \textsc{warm} at high
     $\rho$), once $\lambda$ is calibrated.
-  \item \textbf{False lever --- latent bit-width.} INT8 does not beat
+  \item \deleted{\textbf{False lever --- latent bit-width.} INT8 does not beat
     INT4 on the coarse term; NF4 and MX grouping improve reconstruction
-    but barely move end-to-end ranking (\S\ref{sec:ablation}).
+    but barely move end-to-end ranking (\S\ref{sec:ablation}).}
+    \added{\textbf{Refined lever --- precision placement, not uniform width.}
+    Uniform INT8 did not lift the synthetic coarse ceiling, but real GPT-2
+    activations favor mixed 8/4 and MIX3 over grouped INT4/TQ3
+    (\S\ref{sec:codec-real}).}
   \item \textbf{False lever --- SIMD width.} AVX-512 adds only
     $\sim\!23\%$ over AVX2; the kernel is unpack/load-bound, not
     FMA-width-bound.
 \end{itemize}
 
-\noindent\textbf{Assumed negative results.} Latent whitening degrades
+\noindent\deleted{\textbf{Assumed negative results.}}\added{\textbf{Measured negative results.}}
+Latent whitening degrades
 fidelity; MX/NF4 grouping yields marginal end-to-end gains; and our own
 earlier conclusion that INT4 was the bottleneck was refuted by the INT8
 measurement and corrected. We report these because they are as
@@ -969,13 +1090,21 @@ informative as the positive results.
 We are explicit about the boundaries of these results.
 
 \begin{itemize}[leftmargin=1.4em,itemsep=2pt]
-  \item \textbf{Synthetic data, random $Z$.} All fidelity numbers use
+  \item \deleted{\textbf{Synthetic data, random $Z$.} All fidelity numbers use
     synthetic keys/queries and a random sign-LSH projection. They
-    validate the \emph{mechanism}, not (yet) quality on a real model.
-  \item \textbf{No real-model perplexity.} The closest proxy is the
+    validate the \emph{mechanism}, not (yet) quality on a real model.}
+    \added{\textbf{Mixed evidence populations.} The mechanism tables in the
+    original draft remain synthetic; later GPT-2 activation, Qwen2.5-1.5B,
+    and TinyStories experiments are real-model/activation evidence with
+    different protocols and must not be pooled as one benchmark.}
+  \item \deleted{\textbf{No real-model perplexity.} The closest proxy is the
     attention-output cosine (\S\ref{sec:output}); a real perplexity
-    measurement requires a model and dataset not available in our
-    sandbox.
+    measurement requires a model and dataset not available in our sandbox.}
+    \added{\textbf{Real-model perplexity exists but is currently negative.}
+    The Qwen registered gate degrades by 42.36\%, and the small TinyStories
+    physical external-K control degrades by 16.12\%. The TinyStories corpus
+    is repository-authored and only two 128-token chunks, while the Qwen run
+    is CPU-only and does not establish production-scale behavior.}
   \item \textbf{No hardware cache counters.} \texttt{perf} is
     unavailable (\texttt{perf\_event\_paranoid=2}); cache effects are
     shown only indirectly via throughput decay with context size
@@ -992,6 +1121,17 @@ We are explicit about the boundaries of these results.
     hardware-counter caveat applies.
   \item \textbf{Projection not jointly trained.} The task-aware result
     optimizes $P$ alone, not end-to-end with a transformer.
+  \item \added{\textbf{Physical integration is K-only today.} The validated
+    llama.cpp external path replaces K storage/scoring while V remains in the
+    engine's ordinary cache. No claim of full physical KV compression is made.}
+  \item \added{\textbf{No end-to-end memory/performance win yet.} In the tiny
+    CPU physical smoke, external SLHA was slower and peak process RSS was
+    higher. Cache-owned byte counters establish internal residency behavior,
+    not process RSS, GPU memory, or application-level savings.}
+  \item \added{\textbf{Ranking oracle is diagnostic, not deployable.} It reads
+    baseline information unavailable to compressed-only inference. LR1 is a
+    preregistered attempt to learn the desired behavior without oracle access;
+    protected-holdout success has not been established.}
 \end{itemize}
 
 \section{Future Work}
@@ -1073,11 +1213,27 @@ where it helps. The remaining directions are proposals (not measured here).
     a guess.
 \end{enumerate}
 
-Beyond these: larger $\ds$ to lift the near-orthogonal resolution limit
+\deleted{Beyond these: larger $\ds$ to lift the near-orthogonal resolution limit
 (\S\ref{sec:bincore}); \textbf{joint} training of $W_{\text{down}},
 W_{\text{up}}$ with a real model (\S\ref{sec:taskaware} establishes the
 principle); and real hardware validation (\texttt{perf} cache counters,
-end-to-end decode throughput, perplexity).
+end-to-end decode throughput, perplexity).}
+
+\begin{addedblock}
+The September 2026 priority order is now evidence-driven:
+(i) complete the frozen LR1 top-16 pairwise Stage-A qualification without
+protected-holdout tuning and only then run a preregistered protected gate;
+(ii) preserve the physical external-K accounting proof while reducing the
+observed quality and CPU-performance gaps before claiming end-to-end benefit;
+(iii) extend physical integration beyond the present K-only path or keep that
+scope explicit; (iv) measure hardware cache counters, GPU residency and total
+process/application memory on representative devices; (v) continue the
+source-bound ElasticXxx capacity/precision work without converting planning
+evidence into performance claims; and (vi) implement and evaluate bounded replay
+only after the RPL-0 identity contract can reconstruct state reproducibly.
+Larger $\ds$ and joint model/projection training remain open mechanisms, but
+ranking preservation is the immediate quality target.
+\end{addedblock}
 
 \section{Conclusion}
 \label{sec:conclusion}
@@ -1092,15 +1248,23 @@ working set is paged); SIMD reaches $\sim\!13\times$;
 SLHA scores $\sim\!2.5\times$ more tokens/s than bf16 at the kernel
 level; a learned projection beats PCA under $Q/K$ shift; and the
 attention output stays at cosine $0.95$--$0.997$ versus full precision. A
-controlled ablation reframes the problem: the coarse-score ceiling is set
-by the low-rank projection, not by latent quantization. What remains is
-real-hardware and real-model validation. We release the reference
-implementation, benchmarks, and tests to make every claim reproducible.
+controlled ablation reframes the synthetic coarse-score problem:
+the ceiling is set more by the low-rank projection than by uniform latent
+bit-width. \deleted{What remains is real-hardware and real-model validation.}
+\added{Real-model validation has now been executed and currently rejects the
+tested direct score-replacement configurations. The main empirical target has
+shifted to deployable ranking preservation, followed by renewed physical
+memory/performance validation only after quality clears its preregistered
+gates.} We release the reference implementation, benchmarks, and tests to make
+every claim reproducible.
 
 \paragraph{Reproducibility.}
-The reference crate (\textsc{SciRust}), all benchmarks, and the 51 tests
-backing the numbers in \S\ref{sec:eval} are available in the project
-repository; every measurement uses fixed random seeds.
+The reference crate (\textsc{SciRust}), committed experiment harnesses,
+machine-readable result summaries, and \deleted{the 51 tests}\added{the current
+workspace test/CI suite} backing the evidence are available in the project
+repository. Seeded synthetic measurements remain deterministic; real-model
+results additionally bind model, dataset, code revision, and run provenance
+where recorded.
 
 \begin{thebibliography}{99}
 \setlength{\itemsep}{2pt}
