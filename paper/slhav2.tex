@@ -1088,6 +1088,14 @@ that retaining a small top set alone need not preserve softmax-quality
 diagnostics. Retained mass is therefore added as a co-primary mechanistic
 metric, while real-model perplexity remains the promotion authority.
 
+A first bounded KVLab falsification already demonstrates why the distinction
+matters. On a synthetic dominant-key row at fixed 25\% survivor density, two
+selections both have top-2 recall $0.5$, yet one that drops the strongest key
+retains only $0.000638$ softmax mass while one that keeps it and misses only
+the weaker boundary key retains $0.998532$. This retained result is bound to
+KVLab revision \texttt{90a94e0165a38926}; it is synthetic mechanistic
+evidence, not a real-model quality result.
+
 The target architecture is a quality-constrained representation ladder rather
 than a single immutable tile policy:
 \begin{center}
