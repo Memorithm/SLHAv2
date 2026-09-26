@@ -418,7 +418,7 @@ adaptive_kv_program_2026_09_26:
     - PLAN.md
 
 elastic_word_control_plane_2026_09_26:
-  status: active_read_only_qualification
+  status: W512_read_only_baseline_qualified
   generic_contract:
     repository: Memorithm/ElasticXxx
     revision: 1206b431d6cc05f85e2d16d17d0239d1200650c5
@@ -428,9 +428,8 @@ elastic_word_control_plane_2026_09_26:
     - external_ElasticWord_projection_is_read_only_until_destination_requalification
     - no_second_generic_Elastic_runtime_is_created
   active:
-    - SLHAv2_PR_121_lossless_W512_present_slot_projection_slot_generation_tier_resident_bytes_backing_bytes
+    - SLHAv2_PR_121_exact_head_00736ac9bb22521c1f8718a188a20d64f5268606_merge_10564eb50ab056fe51b58a8f45f625b85d129c10_lossless_W512_present_slot_projection
   next:
-    - qualify_PR_121_exact_head_CI
     - test_dense_slot_index_implicit_identity_before_removing_explicit_slot_lane
     - prove_which_resident_and_backing_byte_counts_are_derivable_from_tier_and_codec_invariants
     - only_then_evaluate_W128_or_W64_control_words
