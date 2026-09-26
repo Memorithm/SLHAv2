@@ -478,7 +478,7 @@ eviction. Each tile occupies one of three states
 used by the budget.}
 \label{tab:states}
 \small
-\begin{tabular}{@{}llr@{}}
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{0.62\linewidth}r@{}}
 \toprule
 State & Behavior & Footprint \\
 \midrule
@@ -560,7 +560,7 @@ invariant in the hot loops. Salient engineering properties:
   \item \textbf{Branchless residual.} The Hamming term is a fixed
     four-word reduction with no data branches. It dispatches at run time to
     a single \texttt{vpopcntq} over all 256 residual bits
-    (\texttt{\_mm256\_popcnt\_epi64}) on x86-64 CPUs advertising AVX-512
+    (\texttt{\_mm256\_\allowbreak popcnt\_\allowbreak epi64}) on x86-64 CPUs advertising AVX-512
     \textsc{vpopcntdq}+\textsc{vl}, otherwise to \texttt{count\_ones()}
     ($\to$\,\texttt{POPCNT}/\texttt{CNT}). The two are asserted bit-equal on
     capable hardware and compile-checked elsewhere.
