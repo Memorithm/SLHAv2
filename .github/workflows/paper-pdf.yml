@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'docs/**'
+      - 'research/**'
     paths:
       - 'paper/slhav2.tex'
       - 'paper/README.md'
