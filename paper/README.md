@@ -68,7 +68,8 @@ latexmk -pdf -interaction=nonstopmode -halt-on-error slhav2.tex
 ```
 
 The repository CI rebuilds and render-checks the committed PDF when the paper
-source changes.
+source changes. Research branches that modify the paper are included in this
+rebuild gate so the committed PDF cannot silently drift from the LaTeX source.
 
 ## arXiv submission
 
