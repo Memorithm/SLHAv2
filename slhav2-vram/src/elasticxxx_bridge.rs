@@ -13,9 +13,9 @@ use std::time::Instant;
 
 use elasticxxx::kv::boolean_admission::KvCapacityObservationV1;
 use elasticxxx::kv::{
-    CapabilitySet, KeyEncodingPipeline, KeyTransformScope, KvPageDescriptor, KvPageId, KvPrecision,
-    KvRecoverySource, KvResidency, KvTargetMaterialization, KvTransitionBackendV1,
-    ElasticWordPlaneV1, ElasticWordWidthV1, KvTransitionPlan, RepresentationEpoch,
+    CapabilitySet, ElasticWordPlaneV1, ElasticWordWidthV1, KeyEncodingPipeline, KeyTransformScope,
+    KvPageDescriptor, KvPageId, KvPrecision, KvRecoverySource, KvResidency,
+    KvTargetMaterialization, KvTransitionBackendV1, KvTransitionPlan, RepresentationEpoch,
     RepresentationId, RepresentationPrecisionKvBindingV1, RepresentationState,
     TransactionalKvPageV1, TransitionAttestations,
 };
@@ -136,12 +136,10 @@ impl SlhaKvCacheHandleV1 {
             .ok_or_else(|| "SLHAv2 ElasticWord lane capacity overflow".to_owned())?;
         let mut lanes = Vec::with_capacity(lane_capacity);
 
-        for (slot, generation, tier, resident_bytes, backing_bytes) in
-            cache.slot_control_metadata()
+        for (slot, generation, tier, resident_bytes, backing_bytes) in cache.slot_control_metadata()
         {
             lanes.push(
-                u64::try_from(slot)
-                    .map_err(|_| "SLHAv2 slot index does not fit u64".to_owned())?,
+                u64::try_from(slot).map_err(|_| "SLHAv2 slot index does not fit u64".to_owned())?,
             );
             lanes.push(generation);
             lanes.push(physical_tier_code(tier));
@@ -809,16 +807,7 @@ mod tests {
         );
         assert_eq!(
             plane.word(1).unwrap(),
-            &[
-                slot1 as u64,
-                1,
-                0,
-                codec::TILE_BYTES as u64,
-                0,
-                0,
-                0,
-                0,
-            ]
+            &[slot1 as u64, 1, 0, codec::TILE_BYTES as u64, 0, 0, 0, 0,]
         );
     }
 
