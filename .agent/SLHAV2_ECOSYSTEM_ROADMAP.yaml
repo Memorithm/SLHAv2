@@ -1,7 +1,7 @@
 schema_version: 2
 kind: slhav2_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-09-04T21:28+0200"
+last_updated: "2026-09-26T22:38+0200"
 repository: Memorithm/SLHAv2
 intended_consumer: autonomous_coding_agent
 visibility_note: >-
@@ -353,3 +353,53 @@ deepseek_v41_storage_recompute_program_2026_09_24:
     - storage_savings_must_use_physical_bytes_when_physical_savings_are_claimed
     - no_source_report_ratio_is_reused_as_a_SLHAv2_result
 
+
+
+adaptive_kv_program_2026_09_26:
+  status: active_primary_research_direction
+  trigger_evidence:
+    - direct_real_model_score_replacement_remains_NO_GO
+    - full_baseline_ranking_transplant_recovers_a_large_fraction_of_quality_gap
+    - baseline_top16_ordering_captures_nearly_all_of_the_rank_oracle_recovery
+    - top_k_count_alone_is_not_sufficient_so_retained_softmax_mass_is_a_co_primary_mechanistic_metric
+  mission: >-
+    Evolve SLHAv2 from a fixed compressed-score representation into a
+    quality-constrained adaptive KV substrate that preserves important attention
+    information first, then reduces numerical KV work and physical bytes.
+  upstream_research_owner:
+    repository: Memorithm/KVLab
+    role: primary_KV_hypothesis_falsification_and_evidence_bench
+  immediate_sequence:
+    - keep_LR1_as_the_only_frozen_current_ranking_projection_candidate
+    - launch_KVLab_mass_ranking_boolean_width_and_tiering_campaign
+    - require_matched_density_and_budget_controls
+    - qualify_Boolean_indexed_numerical_attention_before_native_Boolean_KV
+    - expose_only_evidence_backed_representation_states_to_ElasticXxx
+    - add_monotonic_adaptive_repair_with_no_hidden_dense_runtime_oracle
+    - complete_physical_K_plus_V_only_after_quality_gate
+    - qualify_native_Thor_execution_through_NNIS_after_candidate_freeze
+  required_metrics:
+    - real_model_PPL_or_NLL_or_task_quality
+    - top_k_recall_and_boundary_inversions
+    - retained_and_omitted_softmax_mass
+    - mass_weighted_false_negative_cost
+    - exact_logical_byte_accounting
+    - physical_memory_and_traffic_for_physical_claims
+    - TTFT_TPOT_tokens_per_second_and_latency_distribution_for_performance_claims
+  candidate_dimensions:
+    - Boolean_signatures_and_Hamming
+    - norm_position_age_frequency_layer_and_head_features
+    - HOT_WARM_COLD_and_replay
+    - mixed_8_4_INT4_MIX3_and_separately_qualified_codecs
+    - elastic_control_index_widths_64_128_256_512_1024_2048_bits
+    - K_and_V_sensitivity_separately
+  promotion_rule: >-
+    A KVLab/FLAT/BooleanLab/Forge/ADA candidate has no SLHAv2 runtime authority.
+    It must be source-bound, compared against matched controls, imported as a
+    non-default candidate, requalified by SLHAv2, frozen before protected
+    evaluation where applicable, and physically measured before any physical
+    memory/performance claim.
+  canonical_default_branch_docs:
+    - ROADMAP.md
+    - docs/KVLAB_FEEDBACK_CONTRACT.md
+    - PLAN.md
