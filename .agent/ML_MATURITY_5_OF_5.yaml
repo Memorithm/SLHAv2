@@ -63,3 +63,21 @@ completion_definition: >-
   baseline parity is available, quality/memory/throughput are jointly measured,
   TurboQuant semantics are converged, and Elastic adaptation is explicit,
   versioned and rollback-safe.
+
+
+adaptive_kv_extension_2026_09_26:
+  required_before_quality_promotion:
+    - ranking_or_top_set_evidence_when_selection_or_low_rank_scoring_changes_order
+    - retained_softmax_mass_or_an_explicitly_justified_alternative_when_pruning_or_routing_is_used
+    - matched_density_or_matched_budget_controls
+    - real_model_quality_under_identical_baseline_and_candidate_semantics
+  required_before_adaptive_policy_promotion:
+    - observation_planning_transition_verification_and_rollback_cost_included
+    - every_required_static_representation_baseline_reported
+    - dense_or_full_fidelity_fallback_remains_available
+  ecosystem_rule:
+    - KVLab_generates_KV_hypotheses_and_evidence
+    - SLHAv2_owns_destination_quality_and_representation_promotion
+    - ElasticXxx_owns_generic_adaptation_transactions
+    - FLAT_ATTENTION_owns_attention_execution_evidence
+    - NNIS_owns_native_NVIDIA_physical_qualification
