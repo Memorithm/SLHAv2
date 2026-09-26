@@ -478,6 +478,27 @@ impl ElasticKvCache {
             })
     }
 
+    /// Iterate every physical slot position, including holes, without allocation.
+    ///
+    /// Word position is therefore sufficient to recover stable slot identity in
+    /// a dense external control plane. Present entries expose
+    /// `(generation, tier, resident_bytes, backing_bytes)`; absent slots are
+    /// `None`.
+    pub fn slot_control_metadata_dense(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Option<(u64, PhysicalTier, usize, usize)>> + '_ {
+        self.slots.iter().map(|state| {
+            state.as_ref().map(|state| {
+                (
+                    state.seq,
+                    state.tier,
+                    state.allocated_bytes(),
+                    state.offloaded_bytes(),
+                )
+            })
+        })
+    }
+
     /// Bytes held outside the resident budget for reversible restoration of one slot.
     pub fn slot_backing_bytes(&self, slot: usize) -> Option<usize> {
         self.slots
