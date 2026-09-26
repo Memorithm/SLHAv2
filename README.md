@@ -1,4 +1,4 @@
-# SLHA v2 — Faites tourner une IA locale sans carte graphique
+# SLHA v2 — Adaptive KV research for memory-bandwidth-bound LLM inference
 
 [![CI](https://github.com/Memorithm/SLHAv2/actions/workflows/ci.yml/badge.svg)](https://github.com/Memorithm/SLHAv2/actions)
 [![Rust](https://img.shields.io/badge/rust-2021+-blue.svg)](https://rust-lang.org)
