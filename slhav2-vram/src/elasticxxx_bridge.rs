@@ -23,6 +23,9 @@ use elasticxxx::resource::{
     AdmissibleTransition, CapabilityRequirement, DimensionId, Invariant, InvariantKind,
     LogicalResourceId, RepresentationalDeclaration, ResourceClassId, ResourceSpec,
 };
+use elasticxxx::runtime::representation_payload_selector::{
+    select_minimum_payload_v1, RepresentationPayloadCandidateV1, RepresentationPayloadMinimumV1,
+};
 use elasticxxx::{
     representation_precision_floor_signal, BooleanRepresentationPrecisionPreplannerV1,
     BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, Plan,
@@ -79,7 +82,7 @@ pub const SLHAV2_ELASTIC_CONTROL_PROFILE_ACCOUNTING_V4: &str =
     "slhav2.elastic-control-profile-accounting@4.0.0";
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "1206b431d6cc05f85e2d16d17d0239d1200650c5";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "778133e90088d388783d3b7ae0099ba34f978edc";
 /// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
 pub const ELASTICXXX_ELANG8A_CONTRACT_REVISION: &str = ELASTICXXX_BE14D_CONTRACT_REVISION;
 
@@ -272,6 +275,27 @@ impl SlhaElasticControlProfileAccountingV4 {
                 payload_bits: self.hybrid_w64_boolean_payload_bits,
             },
         ]
+    }
+
+    /// Ask the generic ElasticXxx selector for the exact minimum structural
+    /// payload set across the three SLHAv2-owned control profiles.
+    ///
+    /// This method converts only stable profile identity + structural payload
+    /// bits. It does not supply semantic admissibility, transition cost,
+    /// quality evidence, stability evidence or actuation authority.
+    pub fn minimum_payload_profiles_v5(self) -> Result<RepresentationPayloadMinimumV1, String> {
+        let candidates = self
+            .candidates()
+            .into_iter()
+            .map(|candidate| {
+                let bits = u64::try_from(candidate.payload_bits())
+                    .map_err(|_| "SLHAv2 profile payload bits do not fit u64".to_owned())?;
+                RepresentationPayloadCandidateV1::new(candidate.profile_id(), bits)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        select_minimum_payload_v1(candidates).map_err(|error| error.to_string())
     }
 
     /// V1 sparse layout: one explicit 512-bit word per present slot.
@@ -1340,6 +1364,62 @@ mod tests {
         assert_eq!(sparse.sparse_w512_payload_bits(), 512);
         assert_eq!(sparse.dense_w128_payload_bits(), 8192);
         assert_eq!(sparse.hybrid_w64_boolean_payload_bits(), 4288);
+    }
+
+    #[test]
+    fn generic_payload_selector_preserves_unique_and_tied_slha_minima() {
+        let tiny = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 1,
+            present_slots: 1,
+            sparse_w512_payload_bits: 512,
+            dense_w128_payload_bits: 128,
+            hybrid_w64_boolean_payload_bits: 256,
+        };
+        let selected = tiny.minimum_payload_profiles_v5().unwrap();
+        assert!(selected.is_unique());
+        assert_eq!(selected.minimum_payload_bits(), 128);
+        assert_eq!(
+            selected.profiles()[0].profile_id(),
+            SlhaElasticControlProfileV4::DenseW128.id()
+        );
+
+        let three_dense = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 3,
+            present_slots: 3,
+            sparse_w512_payload_bits: 1536,
+            dense_w128_payload_bits: 384,
+            hybrid_w64_boolean_payload_bits: 384,
+        };
+        let tied = three_dense.minimum_payload_profiles_v5().unwrap();
+        assert!(!tied.is_unique());
+        assert_eq!(tied.minimum_payload_bits(), 384);
+        assert_eq!(
+            tied.profiles()
+                .iter()
+                .map(RepresentationPayloadCandidateV1::profile_id)
+                .collect::<Vec<_>>(),
+            vec![
+                SlhaElasticControlProfileV4::DenseW128.id(),
+                SlhaElasticControlProfileV4::HybridW64Boolean.id(),
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_payload_selector_does_not_mutate_cache_state() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-profile-selector-readonly");
+        let slot = physical.insert(tile(17));
+        physical.demote_slot(slot).unwrap();
+        let before = physical.slot_generation(slot).unwrap();
+
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let report = handle.elastic_control_profile_accounting_v4().unwrap();
+        let _ = report.minimum_payload_profiles_v5().unwrap();
+
+        let after = handle
+            .with_cache(|cache| cache.slot_generation(slot).unwrap())
+            .unwrap();
+        assert_eq!(after, before);
     }
 
     #[test]
