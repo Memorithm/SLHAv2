@@ -69,8 +69,7 @@ pub const SLHA_SLOT_STATE_MASK_V2: u64 = SLHA_SLOT_PRESENT_BIT_V2
     | SLHA_SLOT_PINNED_BIT_V2;
 
 /// Versioned hybrid Boolean control-plane projection.
-pub const SLHAV2_ELASTIC_WORD_HYBRID_CONTROL_V3: &str =
-    "slhav2.elastic-word-hybrid-control@3.0.0";
+pub const SLHAV2_ELASTIC_WORD_HYBRID_CONTROL_V3: &str = "slhav2.elastic-word-hybrid-control@3.0.0";
 /// Generation remains one exact W64 lane per physical slot.
 pub const SLHAV2_ELASTIC_WORD_HYBRID_GENERATION_BITS_V3: u16 = 64;
 /// Hybrid state uses one presence and two tier bitplanes.
@@ -167,7 +166,10 @@ impl SlhaElasticHybridControlPlaneV3 {
             3 => PhysicalTier::Pinned,
             _ => unreachable!("two Boolean tier planes encode only 0..=3"),
         };
-        let generation = self.generations.word(slot).map_err(|error| error.to_string())?[0];
+        let generation = self
+            .generations
+            .word(slot)
+            .map_err(|error| error.to_string())?[0];
         Ok(Some((generation, tier)))
     }
 }
@@ -359,9 +361,8 @@ impl SlhaKvCacheHandleV1 {
             }
         }
 
-        let width =
-            ElasticWordWidthV1::from_bits(SLHAV2_ELASTIC_WORD_HYBRID_GENERATION_BITS_V3)
-                .map_err(|error| error.to_string())?;
+        let width = ElasticWordWidthV1::from_bits(SLHAV2_ELASTIC_WORD_HYBRID_GENERATION_BITS_V3)
+            .map_err(|error| error.to_string())?;
         let generations =
             ElasticWordPlaneV1::new(width, generations).map_err(|error| error.to_string())?;
         Ok(SlhaElasticHybridControlPlaneV3 {
@@ -1116,10 +1117,7 @@ mod tests {
 
         let handle = SlhaKvCacheHandleV1::new(physical);
         let hybrid = handle.elastic_word_hybrid_control_plane_v3().unwrap();
-        assert_eq!(
-            hybrid.slot_state(0).unwrap(),
-            Some((0, PhysicalTier::Hot))
-        );
+        assert_eq!(hybrid.slot_state(0).unwrap(), Some((0, PhysicalTier::Hot)));
         assert_eq!(hybrid.generations().as_lanes(), &[0]);
         assert_eq!(hybrid.presence_words()[0] & 1, 1);
     }
