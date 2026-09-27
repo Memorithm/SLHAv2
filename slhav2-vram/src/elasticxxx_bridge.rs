@@ -74,6 +74,9 @@ pub const SLHAV2_ELASTIC_WORD_HYBRID_CONTROL_V3: &str = "slhav2.elastic-word-hyb
 pub const SLHAV2_ELASTIC_WORD_HYBRID_GENERATION_BITS_V3: u16 = 64;
 /// Hybrid state uses one presence and two tier bitplanes.
 pub const SLHAV2_ELASTIC_WORD_HYBRID_BOOLEAN_PLANES_V3: usize = 3;
+/// Versioned structural accounting across the retained SLHAv2 control profiles.
+pub const SLHAV2_ELASTIC_CONTROL_PROFILE_ACCOUNTING_V4: &str =
+    "slhav2.elastic-control-profile-accounting@4.0.0";
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
 pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "1206b431d6cc05f85e2d16d17d0239d1200650c5";
@@ -171,6 +174,57 @@ impl SlhaElasticHybridControlPlaneV3 {
             .word(slot)
             .map_err(|error| error.to_string())?[0];
         Ok(Some((generation, tier)))
+    }
+}
+
+/// Exact backing-payload accounting for the three retained SLHAv2 control
+/// representations.
+///
+/// These values count only representation payload bits. They deliberately
+/// exclude Rust Vec/struct headers, allocator slack, cache-line effects and
+/// physical DRAM/HBM traffic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlhaElasticControlProfileAccountingV4 {
+    slot_count: usize,
+    present_slots: usize,
+    sparse_w512_payload_bits: usize,
+    dense_w128_payload_bits: usize,
+    hybrid_w64_boolean_payload_bits: usize,
+}
+
+impl SlhaElasticControlProfileAccountingV4 {
+    #[must_use]
+    pub const fn slot_count(self) -> usize {
+        self.slot_count
+    }
+
+    #[must_use]
+    pub const fn present_slots(self) -> usize {
+        self.present_slots
+    }
+
+    #[must_use]
+    pub const fn absent_slots(self) -> usize {
+        self.slot_count - self.present_slots
+    }
+
+    /// V1 sparse layout: one explicit 512-bit word per present slot.
+    #[must_use]
+    pub const fn sparse_w512_payload_bits(self) -> usize {
+        self.sparse_w512_payload_bits
+    }
+
+    /// V2 dense layout: one 128-bit word per physical slot position.
+    #[must_use]
+    pub const fn dense_w128_payload_bits(self) -> usize {
+        self.dense_w128_payload_bits
+    }
+
+    /// V3 hybrid layout: one W64 generation lane per slot plus three packed
+    /// Boolean bitplanes shared across the slot domain.
+    #[must_use]
+    pub const fn hybrid_w64_boolean_payload_bits(self) -> usize {
+        self.hybrid_w64_boolean_payload_bits
     }
 }
 
@@ -371,6 +425,47 @@ impl SlhaKvCacheHandleV1 {
             presence,
             tier_low,
             tier_high,
+        })
+    }
+
+    /// Compute exact representation-payload accounting for the retained V1/V2/V3
+    /// control-plane layouts over the current physical slot domain.
+    ///
+    /// This report is evidence only. It does not select or promote a
+    /// representation because the narrowest payload depends on slot count and
+    /// sparsity, while transition/runtime costs require separate measurement.
+    pub fn elastic_control_profile_accounting_v4(
+        &self,
+    ) -> Result<SlhaElasticControlProfileAccountingV4, String> {
+        let cache = self.lock()?;
+        let dense = cache.slot_control_metadata_dense();
+        let slot_count = dense.len();
+        let present_slots = dense.filter(Option::is_some).count();
+        let bitmap_words = slot_count.div_ceil(64);
+
+        let sparse_w512_payload_bits = present_slots
+            .checked_mul(usize::from(SLHAV2_ELASTIC_WORD_CONTROL_BITS_V1))
+            .ok_or_else(|| "SLHAv2 sparse W512 payload accounting overflow".to_owned())?;
+        let dense_w128_payload_bits = slot_count
+            .checked_mul(usize::from(SLHAV2_ELASTIC_WORD_DENSE_CONTROL_BITS_V2))
+            .ok_or_else(|| "SLHAv2 dense W128 payload accounting overflow".to_owned())?;
+        let hybrid_generation_bits = slot_count
+            .checked_mul(usize::from(SLHAV2_ELASTIC_WORD_HYBRID_GENERATION_BITS_V3))
+            .ok_or_else(|| "SLHAv2 hybrid generation payload accounting overflow".to_owned())?;
+        let hybrid_boolean_bits = bitmap_words
+            .checked_mul(SLHAV2_ELASTIC_WORD_HYBRID_BOOLEAN_PLANES_V3)
+            .and_then(|words| words.checked_mul(64))
+            .ok_or_else(|| "SLHAv2 hybrid Boolean payload accounting overflow".to_owned())?;
+        let hybrid_w64_boolean_payload_bits = hybrid_generation_bits
+            .checked_add(hybrid_boolean_bits)
+            .ok_or_else(|| "SLHAv2 hybrid total payload accounting overflow".to_owned())?;
+
+        Ok(SlhaElasticControlProfileAccountingV4 {
+            slot_count,
+            present_slots,
+            sparse_w512_payload_bits,
+            dense_w128_payload_bits,
+            hybrid_w64_boolean_payload_bits,
         })
     }
 
@@ -1137,6 +1232,66 @@ mod tests {
         assert_eq!(hybrid.tier_low_words().len(), 1);
         assert_eq!(hybrid.tier_high_words().len(), 1);
         assert_eq!(hybrid.payload_bits(), 64 * 64 + 3 * 64);
+    }
+
+    #[test]
+    fn profile_accounting_shows_no_universal_structural_winner() {
+        // One present slot: dense W128 has the smallest declared payload because
+        // the hybrid representation still pays one full 64-bit word per bitplane.
+        let mut tiny = ElasticKvCache::new(1024, "slhav2-accounting-tiny");
+        tiny.insert(tile(1));
+        let tiny = SlhaKvCacheHandleV1::new(tiny)
+            .elastic_control_profile_accounting_v4()
+            .unwrap();
+        assert_eq!(tiny.slot_count(), 1);
+        assert_eq!(tiny.present_slots(), 1);
+        assert_eq!(tiny.sparse_w512_payload_bits(), 512);
+        assert_eq!(tiny.dense_w128_payload_bits(), 128);
+        assert_eq!(tiny.hybrid_w64_boolean_payload_bits(), 256);
+
+        // Sixty-four dense slots amortize the three Boolean words across the
+        // whole domain: hybrid is structurally narrower than dense W128.
+        let mut dense64 = ElasticKvCache::new(64 * codec::TILE_BYTES, "slhav2-accounting-dense64");
+        for seed in 0..64_u8 {
+            dense64.insert(tile(seed));
+        }
+        let dense64 = SlhaKvCacheHandleV1::new(dense64)
+            .elastic_control_profile_accounting_v4()
+            .unwrap();
+        assert_eq!(dense64.sparse_w512_payload_bits(), 64 * 512);
+        assert_eq!(dense64.dense_w128_payload_bits(), 64 * 128);
+        assert_eq!(dense64.hybrid_w64_boolean_payload_bits(), 64 * 64 + 3 * 64);
+
+        // A large sparse physical domain can make the explicit sparse W512
+        // representation structurally narrower than either dense layout.
+        let mut sparse = ElasticKvCache::new(4096, "slhav2-accounting-sparse");
+        sparse.write_at(63, tile(9)).unwrap();
+        let sparse = SlhaKvCacheHandleV1::new(sparse)
+            .elastic_control_profile_accounting_v4()
+            .unwrap();
+        assert_eq!(sparse.slot_count(), 64);
+        assert_eq!(sparse.present_slots(), 1);
+        assert_eq!(sparse.sparse_w512_payload_bits(), 512);
+        assert_eq!(sparse.dense_w128_payload_bits(), 8192);
+        assert_eq!(sparse.hybrid_w64_boolean_payload_bits(), 4288);
+    }
+
+    #[test]
+    fn profile_accounting_tracks_holes_without_treating_them_as_present() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-accounting-holes");
+        physical.write_at(7, tile(1)).unwrap();
+        physical.write_at(15, tile(2)).unwrap();
+        assert!(physical.clear_slot(7));
+
+        let report = SlhaKvCacheHandleV1::new(physical)
+            .elastic_control_profile_accounting_v4()
+            .unwrap();
+        assert_eq!(report.slot_count(), 16);
+        assert_eq!(report.present_slots(), 1);
+        assert_eq!(report.absent_slots(), 15);
+        assert_eq!(report.sparse_w512_payload_bits(), 512);
+        assert_eq!(report.dense_w128_payload_bits(), 2048);
+        assert_eq!(report.hybrid_w64_boolean_payload_bits(), 16 * 64 + 3 * 64);
     }
 
     #[test]
