@@ -23,8 +23,9 @@ use elasticxxx::resource::{
     AdmissibleTransition, CapabilityRequirement, DimensionId, Invariant, InvariantKind,
     LogicalResourceId, RepresentationalDeclaration, ResourceClassId, ResourceSpec,
 };
-use elasticxxx::runtime::representation_payload_selector::select_minimum_payload_v1;
-use elasticxxx::runtime::{RepresentationPayloadCandidateV1, RepresentationPayloadMinimumV1};
+use elasticxxx::runtime::representation_payload_selector::{
+    select_minimum_payload_v1, RepresentationPayloadCandidateV1, RepresentationPayloadMinimumV1,
+};
 use elasticxxx::{
     representation_precision_floor_signal, BooleanRepresentationPrecisionPreplannerV1,
     BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, Plan,
