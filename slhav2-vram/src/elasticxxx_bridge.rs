@@ -23,6 +23,9 @@ use elasticxxx::resource::{
     AdmissibleTransition, CapabilityRequirement, DimensionId, Invariant, InvariantKind,
     LogicalResourceId, RepresentationalDeclaration, ResourceClassId, ResourceSpec,
 };
+use elasticxxx::runtime::representation_payload_decision::{
+    evaluate_representation_payload_v1, RepresentationPayloadDecisionV1,
+};
 use elasticxxx::runtime::representation_payload_selector::{
     select_minimum_payload_v1, RepresentationPayloadCandidateV1, RepresentationPayloadMinimumV1,
 };
@@ -82,7 +85,7 @@ pub const SLHAV2_ELASTIC_CONTROL_PROFILE_ACCOUNTING_V4: &str =
     "slhav2.elastic-control-profile-accounting@4.0.0";
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "778133e90088d388783d3b7ae0099ba34f978edc";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "533cca998407de6b77d329e4acdcf0fdef28b263";
 /// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
 pub const ELASTICXXX_ELANG8A_CONTRACT_REVISION: &str = ELASTICXXX_BE14D_CONTRACT_REVISION;
 
@@ -296,6 +299,32 @@ impl SlhaElasticControlProfileAccountingV4 {
             .collect::<Result<Vec<_>, _>>()?;
 
         select_minimum_payload_v1(candidates).map_err(|error| error.to_string())
+    }
+
+    /// Interpret exact structural payload evidence for the current SLHAv2
+    /// control profile using the generic ElasticXxx decision contract.
+    ///
+    /// A current profile that already belongs to the exact minimum set is held,
+    /// including ties. A non-current unique minimum becomes a planning-only
+    /// transition candidate; a non-current tie remains ambiguous. This method
+    /// does not perform semantic admission, stability gating or actuation.
+    pub fn payload_decision_v6(
+        self,
+        current: SlhaElasticControlProfileV4,
+    ) -> Result<RepresentationPayloadDecisionV1, String> {
+        let candidates = self
+            .candidates()
+            .into_iter()
+            .map(|candidate| {
+                let bits = u64::try_from(candidate.payload_bits())
+                    .map_err(|_| "SLHAv2 profile payload bits do not fit u64".to_owned())?;
+                RepresentationPayloadCandidateV1::new(candidate.profile_id(), bits)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        evaluate_representation_payload_v1(current.id(), candidates)
+            .map_err(|error| error.to_string())
     }
 
     /// V1 sparse layout: one explicit 512-bit word per present slot.
@@ -1403,6 +1432,70 @@ mod tests {
                 SlhaElasticControlProfileV4::HybridW64Boolean.id(),
             ]
         );
+    }
+
+    #[test]
+    fn generic_payload_decision_holds_current_exact_minimum_and_ties() {
+        let tiny = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 1,
+            present_slots: 1,
+            sparse_w512_payload_bits: 512,
+            dense_w128_payload_bits: 128,
+            hybrid_w64_boolean_payload_bits: 256,
+        };
+        assert!(matches!(
+            tiny.payload_decision_v6(SlhaElasticControlProfileV4::DenseW128)
+                .unwrap(),
+            RepresentationPayloadDecisionV1::HoldCurrentMinimum { .. }
+        ));
+
+        let three_dense = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 3,
+            present_slots: 3,
+            sparse_w512_payload_bits: 1536,
+            dense_w128_payload_bits: 384,
+            hybrid_w64_boolean_payload_bits: 384,
+        };
+        assert!(matches!(
+            three_dense
+                .payload_decision_v6(SlhaElasticControlProfileV4::DenseW128)
+                .unwrap(),
+            RepresentationPayloadDecisionV1::HoldCurrentMinimum { .. }
+        ));
+    }
+
+    #[test]
+    fn generic_payload_decision_preserves_unique_target_and_ambiguity() {
+        let tiny = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 1,
+            present_slots: 1,
+            sparse_w512_payload_bits: 512,
+            dense_w128_payload_bits: 128,
+            hybrid_w64_boolean_payload_bits: 256,
+        };
+        let unique = tiny
+            .payload_decision_v6(SlhaElasticControlProfileV4::SparseW512)
+            .unwrap();
+        match unique {
+            RepresentationPayloadDecisionV1::UniqueTransitionCandidate { target, .. } => {
+                assert_eq!(target.profile_id(), SlhaElasticControlProfileV4::DenseW128.id());
+            }
+            other => panic!("expected unique payload target, observed {other:?}"),
+        }
+
+        let three_dense = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 3,
+            present_slots: 3,
+            sparse_w512_payload_bits: 1536,
+            dense_w128_payload_bits: 384,
+            hybrid_w64_boolean_payload_bits: 384,
+        };
+        assert!(matches!(
+            three_dense
+                .payload_decision_v6(SlhaElasticControlProfileV4::SparseW512)
+                .unwrap(),
+            RepresentationPayloadDecisionV1::AmbiguousMinimum { .. }
+        ));
     }
 
     #[test]
