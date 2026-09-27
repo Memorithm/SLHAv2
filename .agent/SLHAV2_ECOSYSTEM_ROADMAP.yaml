@@ -443,3 +443,22 @@ elastic_word_control_plane_2026_09_26:
     - latency_or_throughput_gain
     - model_quality_preservation
     - live_control_plane_replacement
+
+
+ax_bounded_runtime_task_program:
+  source_review_date: "2026-09-27"
+  external_reference: google_ax_architecture_only
+  role: bounded_KV_and_model_runtime_task_consumer
+  objective: >-
+    Execute KV/model integration and qualification work in exact workspaces with
+    explicit RAM, VRAM, compute and wall-clock envelopes, while keeping SLHAv2
+    compression and KV semantics repository-owned.
+  phases:
+    - AXSL1_bind_benchmarks_to_exact_model_code_and_protocol_revisions
+    - AXSL2_publish_runtime_resource_requirements_for_Hub_admission
+    - AXSL3_consume_ElasticXxx_plans_only_inside_declared_invariants
+    - AXSL4_record_device_backend_and_task_identity_with_evidence
+  invariants:
+    - task_control_does_not_own_KV_semantics
+    - resource_adaptation_does_not_change_comparison_budget_silently
+    - accelerated_claims_require_exact_hardware_evidence
