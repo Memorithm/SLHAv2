@@ -1478,7 +1478,10 @@ mod tests {
             .unwrap();
         match unique {
             RepresentationPayloadDecisionV1::UniqueTransitionCandidate { target, .. } => {
-                assert_eq!(target.profile_id(), SlhaElasticControlProfileV4::DenseW128.id());
+                assert_eq!(
+                    target.profile_id(),
+                    SlhaElasticControlProfileV4::DenseW128.id()
+                );
             }
             other => panic!("expected unique payload target, observed {other:?}"),
         }
