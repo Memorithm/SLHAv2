@@ -81,7 +81,7 @@ pub const SLHAV2_ELASTIC_CONTROL_PROFILE_ACCOUNTING_V4: &str =
     "slhav2.elastic-control-profile-accounting@4.0.0";
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "0cb052ec129404a18d02223e22277c3561c7910e";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "778133e90088d388783d3b7ae0099ba34f978edc";
 /// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
 pub const ELASTICXXX_ELANG8A_CONTRACT_REVISION: &str = ELASTICXXX_BE14D_CONTRACT_REVISION;
 
@@ -282,9 +282,7 @@ impl SlhaElasticControlProfileAccountingV4 {
     /// This method converts only stable profile identity + structural payload
     /// bits. It does not supply semantic admissibility, transition cost,
     /// quality evidence, stability evidence or actuation authority.
-    pub fn minimum_payload_profiles_v5(
-        self,
-    ) -> Result<RepresentationPayloadMinimumV1, String> {
+    pub fn minimum_payload_profiles_v5(self) -> Result<RepresentationPayloadMinimumV1, String> {
         let candidates = self
             .candidates()
             .into_iter()
