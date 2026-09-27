@@ -177,6 +177,50 @@ impl SlhaElasticHybridControlPlaneV3 {
     }
 }
 
+/// Stable identity of one retained SLHAv2 control-plane representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlhaElasticControlProfileV4 {
+    SparseW512,
+    DenseW128,
+    HybridW64Boolean,
+}
+
+impl SlhaElasticControlProfileV4 {
+    /// Stable cross-repository profile identifier.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::SparseW512 => "slhav2-control-sparse-w512",
+            Self::DenseW128 => "slhav2-control-dense-w128",
+            Self::HybridW64Boolean => "slhav2-control-hybrid-w64-boolean",
+        }
+    }
+}
+
+/// One domain-owned profile plus exact structural payload evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlhaElasticControlProfileCandidateV4 {
+    profile: SlhaElasticControlProfileV4,
+    payload_bits: usize,
+}
+
+impl SlhaElasticControlProfileCandidateV4 {
+    #[must_use]
+    pub const fn profile(self) -> SlhaElasticControlProfileV4 {
+        self.profile
+    }
+
+    #[must_use]
+    pub const fn profile_id(self) -> &'static str {
+        self.profile.id()
+    }
+
+    #[must_use]
+    pub const fn payload_bits(self) -> usize {
+        self.payload_bits
+    }
+}
+
 /// Exact backing-payload accounting for the three retained SLHAv2 control
 /// representations.
 ///
@@ -206,6 +250,28 @@ impl SlhaElasticControlProfileAccountingV4 {
     #[must_use]
     pub const fn absent_slots(self) -> usize {
         self.slot_count - self.present_slots
+    }
+
+    /// Return all retained profiles in stable identity order.
+    ///
+    /// This is candidate evidence only. The order is not a preference and no
+    /// runtime profile is selected by this method.
+    #[must_use]
+    pub const fn candidates(self) -> [SlhaElasticControlProfileCandidateV4; 3] {
+        [
+            SlhaElasticControlProfileCandidateV4 {
+                profile: SlhaElasticControlProfileV4::SparseW512,
+                payload_bits: self.sparse_w512_payload_bits,
+            },
+            SlhaElasticControlProfileCandidateV4 {
+                profile: SlhaElasticControlProfileV4::DenseW128,
+                payload_bits: self.dense_w128_payload_bits,
+            },
+            SlhaElasticControlProfileCandidateV4 {
+                profile: SlhaElasticControlProfileV4::HybridW64Boolean,
+                payload_bits: self.hybrid_w64_boolean_payload_bits,
+            },
+        ]
     }
 
     /// V1 sparse layout: one explicit 512-bit word per present slot.
@@ -1274,6 +1340,35 @@ mod tests {
         assert_eq!(sparse.sparse_w512_payload_bits(), 512);
         assert_eq!(sparse.dense_w128_payload_bits(), 8192);
         assert_eq!(sparse.hybrid_w64_boolean_payload_bits(), 4288);
+    }
+
+    #[test]
+    fn profile_candidates_are_stable_and_do_not_imply_preference() {
+        let mut physical = ElasticKvCache::new(4096, "slhav2-profile-candidates");
+        physical.write_at(7, tile(1)).unwrap();
+        physical.write_at(15, tile(2)).unwrap();
+
+        let report = SlhaKvCacheHandleV1::new(physical)
+            .elastic_control_profile_accounting_v4()
+            .unwrap();
+        let candidates = report.candidates();
+
+        assert_eq!(
+            candidates.map(SlhaElasticControlProfileCandidateV4::profile_id),
+            [
+                "slhav2-control-sparse-w512",
+                "slhav2-control-dense-w128",
+                "slhav2-control-hybrid-w64-boolean",
+            ]
+        );
+        assert_eq!(
+            candidates.map(SlhaElasticControlProfileCandidateV4::payload_bits),
+            [
+                report.sparse_w512_payload_bits(),
+                report.dense_w128_payload_bits(),
+                report.hybrid_w64_boolean_payload_bits(),
+            ]
+        );
     }
 
     #[test]
