@@ -68,6 +68,14 @@ pub const SLHA_SLOT_STATE_MASK_V2: u64 = SLHA_SLOT_PRESENT_BIT_V2
     | SLHA_SLOT_COLD_BIT_V2
     | SLHA_SLOT_PINNED_BIT_V2;
 
+/// Versioned hybrid Boolean control-plane projection.
+pub const SLHAV2_ELASTIC_WORD_HYBRID_CONTROL_V3: &str =
+    "slhav2.elastic-word-hybrid-control@3.0.0";
+/// Generation remains one exact W64 lane per physical slot.
+pub const SLHAV2_ELASTIC_WORD_HYBRID_GENERATION_BITS_V3: u16 = 64;
+/// Hybrid state uses one presence and two tier bitplanes.
+pub const SLHAV2_ELASTIC_WORD_HYBRID_BOOLEAN_PLANES_V3: usize = 3;
+
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
 pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "1206b431d6cc05f85e2d16d17d0239d1200650c5";
 /// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
@@ -76,6 +84,93 @@ pub const ELASTICXXX_ELANG8A_CONTRACT_REVISION: &str = ELASTICXXX_BE14D_CONTRACT
 const REPRESENTATION_SCHEMA_V1: u32 = 1;
 const BACKEND_NAME: &str = "slhav2-elastic-kv-cache-v1";
 const SLHA_CACHE_RESIDENCY: &str = "slhav2-host-cache";
+
+/// Hybrid W64 + Boolean-bitplane snapshot of the physical slot control plane.
+///
+/// Slot identity is implicit in the position. Generation uses one exact W64
+/// lane per slot. Presence and the two-bit tier code are stored as three packed
+/// Boolean bitplanes shared by all slots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlhaElasticHybridControlPlaneV3 {
+    slot_count: usize,
+    generations: ElasticWordPlaneV1,
+    presence: Vec<u64>,
+    tier_low: Vec<u64>,
+    tier_high: Vec<u64>,
+}
+
+impl SlhaElasticHybridControlPlaneV3 {
+    /// Number of physical slot positions represented, including holes.
+    #[must_use]
+    pub const fn slot_count(&self) -> usize {
+        self.slot_count
+    }
+
+    /// Exact W64 generation plane.
+    #[must_use]
+    pub const fn generations(&self) -> &ElasticWordPlaneV1 {
+        &self.generations
+    }
+
+    /// Packed presence bitplane.
+    #[must_use]
+    pub fn presence_words(&self) -> &[u64] {
+        &self.presence
+    }
+
+    /// Packed low tier bitplane.
+    #[must_use]
+    pub fn tier_low_words(&self) -> &[u64] {
+        &self.tier_low
+    }
+
+    /// Packed high tier bitplane.
+    #[must_use]
+    pub fn tier_high_words(&self) -> &[u64] {
+        &self.tier_high
+    }
+
+    /// Exact payload bits in the generation and Boolean backing planes.
+    ///
+    /// This excludes Rust Vec/struct headers and makes no DRAM/cache-line claim.
+    #[must_use]
+    pub fn payload_bits(&self) -> usize {
+        self.generations.as_lanes().len() * 64
+            + (self.presence.len() + self.tier_low.len() + self.tier_high.len()) * 64
+    }
+
+    /// Decode one slot without reconstructing per-slot metadata objects.
+    pub fn slot_state(&self, slot: usize) -> Result<Option<(u64, PhysicalTier)>, String> {
+        if slot >= self.slot_count {
+            return Err(format!(
+                "SLHAv2 hybrid control slot {slot} out of range for {} slots",
+                self.slot_count
+            ));
+        }
+        let present = bitplane_get(&self.presence, slot);
+        let low = bitplane_get(&self.tier_low, slot);
+        let high = bitplane_get(&self.tier_high, slot);
+        if !present {
+            if low || high {
+                return Err(format!(
+                    "SLHAv2 hybrid absent slot {slot} carries non-zero tier bits"
+                ));
+            }
+            return Ok(None);
+        }
+
+        let code = u8::from(low) | (u8::from(high) << 1);
+        let tier = match code {
+            0 => PhysicalTier::Hot,
+            1 => PhysicalTier::Warm,
+            2 => PhysicalTier::Cold,
+            3 => PhysicalTier::Pinned,
+            _ => unreachable!("two Boolean tier planes encode only 0..=3"),
+        };
+        let generation = self.generations.word(slot).map_err(|error| error.to_string())?[0];
+        Ok(Some((generation, tier)))
+    }
+}
 
 /// SLHAv2 semantics that cannot be inferred from physical tile bytes alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +318,59 @@ impl SlhaKvCacheHandleV1 {
         let width = ElasticWordWidthV1::from_bits(SLHAV2_ELASTIC_WORD_DENSE_CONTROL_BITS_V2)
             .map_err(|error| error.to_string())?;
         ElasticWordPlaneV1::new(width, lanes).map_err(|error| error.to_string())
+    }
+
+    /// Snapshot every physical slot into a hybrid W64 + Boolean control plane.
+    ///
+    /// Slot identity is implicit by position. Generation remains full-width u64.
+    /// Presence and tier are packed into three shared Boolean bitplanes, so no
+    /// per-slot state lane is repeated. Resident/backing bytes are derived from
+    /// the authoritative tier invariants and verified before publication.
+    pub fn elastic_word_hybrid_control_plane_v3(
+        &self,
+    ) -> Result<SlhaElasticHybridControlPlaneV3, String> {
+        let cache = self.lock()?;
+        let slot_count = cache.slot_control_metadata_dense().len();
+        let bitmap_words = slot_count.div_ceil(64);
+        let mut generations = vec![0_u64; slot_count];
+        let mut presence = vec![0_u64; bitmap_words];
+        let mut tier_low = vec![0_u64; bitmap_words];
+        let mut tier_high = vec![0_u64; bitmap_words];
+
+        for (slot, metadata) in cache.slot_control_metadata_dense().enumerate() {
+            let Some((generation, tier, resident_bytes, backing_bytes)) = metadata else {
+                continue;
+            };
+            let (expected_resident, expected_backing) = derived_bytes_for_tier_v2(tier);
+            if resident_bytes != expected_resident || backing_bytes != expected_backing {
+                return Err(format!(
+                    "SLHAv2 tier {tier:?} byte accounting drifted: resident={resident_bytes} backing={backing_bytes}, expected resident={expected_resident} backing={expected_backing}"
+                ));
+            }
+
+            generations[slot] = generation;
+            bitplane_set(&mut presence, slot);
+            let tier_code = physical_tier_code(tier);
+            if tier_code & 1 != 0 {
+                bitplane_set(&mut tier_low, slot);
+            }
+            if tier_code & 2 != 0 {
+                bitplane_set(&mut tier_high, slot);
+            }
+        }
+
+        let width =
+            ElasticWordWidthV1::from_bits(SLHAV2_ELASTIC_WORD_HYBRID_GENERATION_BITS_V3)
+                .map_err(|error| error.to_string())?;
+        let generations =
+            ElasticWordPlaneV1::new(width, generations).map_err(|error| error.to_string())?;
+        Ok(SlhaElasticHybridControlPlaneV3 {
+            slot_count,
+            generations,
+            presence,
+            tier_low,
+            tier_high,
+        })
     }
 
     /// Publish current physical resident-budget headroom as source-bound
@@ -702,6 +850,20 @@ fn descriptor(
     })
 }
 
+fn bitplane_set(words: &mut [u64], slot: usize) {
+    let word = slot / 64;
+    let bit = slot % 64;
+    words[word] |= 1_u64 << bit;
+}
+
+fn bitplane_get(words: &[u64], slot: usize) -> bool {
+    let word = slot / 64;
+    let bit = slot % 64;
+    words
+        .get(word)
+        .is_some_and(|value| value & (1_u64 << bit) != 0)
+}
+
 const fn dense_state_bits_v2(tier: PhysicalTier) -> u64 {
     SLHA_SLOT_PRESENT_BIT_V2
         | match tier {
@@ -910,6 +1072,73 @@ mod tests {
             let tier_bits = bits & !SLHA_SLOT_PRESENT_BIT_V2;
             assert_eq!(tier_bits.count_ones(), 1);
         }
+    }
+
+    #[test]
+    fn hybrid_w64_boolean_planes_round_trip_sparse_all_tiers() {
+        let mut physical = ElasticKvCache::new(8192, "slhav2-hybrid-v3");
+        let hot = physical.insert(tile(10));
+        let warm = physical.insert(tile(20));
+        let cold = physical.insert(tile(30));
+        let pinned = physical.insert(tile(40));
+        let hole = physical.insert(tile(50));
+
+        physical.demote_slot(warm).unwrap();
+        physical.demote_slot(cold).unwrap();
+        physical.evict_slot(cold).unwrap();
+        assert!(physical.pin(pinned));
+        assert!(physical.clear_slot(hole));
+
+        let expected = [
+            (hot, Some((0, PhysicalTier::Hot))),
+            (warm, Some((1, PhysicalTier::Warm))),
+            (cold, Some((2, PhysicalTier::Cold))),
+            (pinned, Some((3, PhysicalTier::Pinned))),
+            (hole, None),
+        ];
+
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let hybrid = handle.elastic_word_hybrid_control_plane_v3().unwrap();
+        assert_eq!(hybrid.generations().width().bits(), 64);
+        assert_eq!(hybrid.slot_count(), 5);
+
+        for (slot, expected_state) in expected {
+            assert_eq!(hybrid.slot_state(slot).unwrap(), expected_state);
+        }
+    }
+
+    #[test]
+    fn hybrid_generation_zero_remains_present_via_boolean_plane() {
+        let mut physical = ElasticKvCache::new(1024, "slhav2-hybrid-zero");
+        let slot = physical.insert(tile(7));
+        assert_eq!(slot, 0);
+        assert_eq!(physical.slot_generation(slot), Some(0));
+
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let hybrid = handle.elastic_word_hybrid_control_plane_v3().unwrap();
+        assert_eq!(
+            hybrid.slot_state(0).unwrap(),
+            Some((0, PhysicalTier::Hot))
+        );
+        assert_eq!(hybrid.generations().as_lanes(), &[0]);
+        assert_eq!(hybrid.presence_words()[0] & 1, 1);
+    }
+
+    #[test]
+    fn hybrid_boolean_overhead_amortizes_to_three_bits_per_slot_at_64_slots() {
+        let mut physical = ElasticKvCache::new(64 * codec::TILE_BYTES, "slhav2-hybrid-64");
+        for seed in 0..64_u8 {
+            physical.insert(tile(seed));
+        }
+
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let hybrid = handle.elastic_word_hybrid_control_plane_v3().unwrap();
+        assert_eq!(hybrid.slot_count(), 64);
+        assert_eq!(hybrid.generations().as_lanes().len(), 64);
+        assert_eq!(hybrid.presence_words().len(), 1);
+        assert_eq!(hybrid.tier_low_words().len(), 1);
+        assert_eq!(hybrid.tier_high_words().len(), 1);
+        assert_eq!(hybrid.payload_bits(), 64 * 64 + 3 * 64);
     }
 
     #[test]
