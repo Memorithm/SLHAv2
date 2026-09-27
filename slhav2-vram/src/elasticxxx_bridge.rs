@@ -1251,10 +1251,7 @@ mod tests {
 
         // Sixty-four dense slots amortize the three Boolean words across the
         // whole domain: hybrid is structurally narrower than dense W128.
-        let mut dense64 = ElasticKvCache::new(
-            64 * codec::TILE_BYTES,
-            "slhav2-accounting-dense64",
-        );
+        let mut dense64 = ElasticKvCache::new(64 * codec::TILE_BYTES, "slhav2-accounting-dense64");
         for seed in 0..64_u8 {
             dense64.insert(tile(seed));
         }
@@ -1263,10 +1260,7 @@ mod tests {
             .unwrap();
         assert_eq!(dense64.sparse_w512_payload_bits(), 64 * 512);
         assert_eq!(dense64.dense_w128_payload_bits(), 64 * 128);
-        assert_eq!(
-            dense64.hybrid_w64_boolean_payload_bits(),
-            64 * 64 + 3 * 64
-        );
+        assert_eq!(dense64.hybrid_w64_boolean_payload_bits(), 64 * 64 + 3 * 64);
 
         // A large sparse physical domain can make the explicit sparse W512
         // representation structurally narrower than either dense layout.
