@@ -32,6 +32,7 @@ use elasticxxx::runtime::representation_payload_selector::{
 use elasticxxx::runtime::representation_payload_stability::{
     RepresentationPayloadStabilityControllerV1, RepresentationPayloadStableDecisionV1,
 };
+use elasticxxx::runtime::representation_payload_stability_trace::RepresentationPayloadStabilityTraceV1;
 use elasticxxx::{
     representation_precision_floor_signal, BooleanRepresentationPrecisionPreplannerV1,
     BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, ObservationSnapshot, Plan,
@@ -358,6 +359,22 @@ impl SlhaElasticControlProfileAccountingV4 {
         controller
             .evaluate(current.id(), candidates, observations, now)
             .map_err(|error| error.to_string())
+    }
+
+    /// Capture read-only stability-gated profile evidence without returning
+    /// the single-use permit itself.
+    ///
+    /// This helper may evaluate the generic stability gate exactly like V7,
+    /// but immediately converts the result into an authority-free trace.
+    pub fn stable_payload_trace_v8(
+        self,
+        current: SlhaElasticControlProfileV4,
+        controller: &mut RepresentationPayloadStabilityControllerV1,
+        observations: &ObservationSnapshot,
+        now: Instant,
+    ) -> Result<RepresentationPayloadStabilityTraceV1, String> {
+        let decision = self.stable_payload_decision_v7(current, controller, observations, now)?;
+        Ok(RepresentationPayloadStabilityTraceV1::capture(&decision))
     }
 
     /// V1 sparse layout: one explicit 512-bit word per present slot.
@@ -1606,6 +1623,54 @@ mod tests {
             }
             other => panic!("expected cooldown-deferred decision, observed {other:?}"),
         }
+    }
+
+    #[test]
+    fn stable_payload_trace_retains_explanation_without_permit_authority() {
+        use elasticxxx::{
+            RepresentationPayloadStabilityOutcomeV1, TransitionStabilityPolicyV1,
+        };
+        use std::time::Duration;
+
+        let report = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 64,
+            present_slots: 1,
+            sparse_w512_payload_bits: 512,
+            dense_w128_payload_bits: 8192,
+            hybrid_w64_boolean_payload_bits: 4288,
+        };
+        let policy = TransitionStabilityPolicyV1::new(
+            TransitionMechanism::Reencode,
+            DimensionId::REPRESENTATION,
+            None,
+            Some(Duration::from_secs(10)),
+            None,
+        )
+        .unwrap();
+        let mut controller = RepresentationPayloadStabilityControllerV1::new(policy).unwrap();
+        let now = Instant::now();
+        let observations = ObservationSnapshot::new(now, vec![]);
+
+        let trace = report
+            .stable_payload_trace_v8(
+                SlhaElasticControlProfileV4::DenseW128,
+                &mut controller,
+                &observations,
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(
+            trace.outcome(),
+            RepresentationPayloadStabilityOutcomeV1::Admitted
+        );
+        assert_eq!(
+            trace.decision().unique_target_profile_id(),
+            Some(SlhaElasticControlProfileV4::SparseW512.id())
+        );
+        assert_eq!(trace.permit_generation(), Some(0));
+        assert!(!trace.carries_authority());
+        assert_eq!(controller.stability_gate().generation(), 0);
     }
 
     #[test]
