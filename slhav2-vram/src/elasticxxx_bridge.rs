@@ -29,9 +29,12 @@ use elasticxxx::runtime::representation_payload_decision::{
 use elasticxxx::runtime::representation_payload_selector::{
     select_minimum_payload_v1, RepresentationPayloadCandidateV1, RepresentationPayloadMinimumV1,
 };
+use elasticxxx::runtime::representation_payload_stability::{
+    RepresentationPayloadStabilityControllerV1, RepresentationPayloadStableDecisionV1,
+};
 use elasticxxx::{
     representation_precision_floor_signal, BooleanRepresentationPrecisionPreplannerV1,
-    BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, Plan,
+    BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, ObservationSnapshot, Plan,
     RepresentationPrecisionCandidateV1, RuntimeError, TransitionMechanism, VerificationResult,
 };
 
@@ -85,7 +88,7 @@ pub const SLHAV2_ELASTIC_CONTROL_PROFILE_ACCOUNTING_V4: &str =
     "slhav2.elastic-control-profile-accounting@4.0.0";
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "533cca998407de6b77d329e4acdcf0fdef28b263";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "666ba4373fafb0e021bfbd8ef47250643096683c";
 /// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
 pub const ELASTICXXX_ELANG8A_CONTRACT_REVISION: &str = ELASTICXXX_BE14D_CONTRACT_REVISION;
 
@@ -324,6 +327,36 @@ impl SlhaElasticControlProfileAccountingV4 {
             .collect::<Result<Vec<_>, _>>()?;
 
         evaluate_representation_payload_v1(current.id(), candidates)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Apply ElasticXxx's generic transition-stability gate to one structural
+    /// profile decision.
+    ///
+    /// Hold and ambiguous structural minima do not consume stability state.
+    /// A unique non-current minimum may be Deferred or Admitted by the generic
+    /// representation/Reencode stability policy. Even Admitted carries no
+    /// SLHAv2 codec/residency actuation authority.
+    pub fn stable_payload_decision_v7(
+        self,
+        current: SlhaElasticControlProfileV4,
+        controller: &mut RepresentationPayloadStabilityControllerV1,
+        observations: &ObservationSnapshot,
+        now: Instant,
+    ) -> Result<RepresentationPayloadStableDecisionV1, String> {
+        let candidates = self
+            .candidates()
+            .into_iter()
+            .map(|candidate| {
+                let bits = u64::try_from(candidate.payload_bits())
+                    .map_err(|_| "SLHAv2 profile payload bits do not fit u64".to_owned())?;
+                RepresentationPayloadCandidateV1::new(candidate.profile_id(), bits)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        controller
+            .evaluate(current.id(), candidates, observations, now)
             .map_err(|error| error.to_string())
     }
 
@@ -1499,6 +1532,120 @@ mod tests {
                 .unwrap(),
             RepresentationPayloadDecisionV1::AmbiguousMinimum { .. }
         ));
+    }
+
+    #[test]
+    fn stable_payload_decision_uses_generic_stability_without_actuation() {
+        use elasticxxx::{TransitionStabilityPolicyV1, TransitionStabilityStatusV1};
+        use std::time::Duration;
+
+        let report = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 64,
+            present_slots: 1,
+            sparse_w512_payload_bits: 512,
+            dense_w128_payload_bits: 8192,
+            hybrid_w64_boolean_payload_bits: 4288,
+        };
+        let policy = TransitionStabilityPolicyV1::new(
+            TransitionMechanism::Reencode,
+            DimensionId::REPRESENTATION,
+            None,
+            Some(Duration::from_secs(10)),
+            None,
+        )
+        .unwrap();
+        let mut controller = RepresentationPayloadStabilityControllerV1::new(policy).unwrap();
+        let now = Instant::now();
+        let observations = ObservationSnapshot::new(now, vec![]);
+
+        let first = report
+            .stable_payload_decision_v7(
+                SlhaElasticControlProfileV4::DenseW128,
+                &mut controller,
+                &observations,
+                now,
+            )
+            .unwrap();
+        let permit = match first {
+            RepresentationPayloadStableDecisionV1::Admitted {
+                decision, permit, ..
+            } => {
+                assert!(matches!(
+                    decision,
+                    RepresentationPayloadDecisionV1::UniqueTransitionCandidate { .. }
+                ));
+                permit
+            }
+            other => panic!("expected admitted planning decision, observed {other:?}"),
+        };
+        controller.record_commit(permit, now).unwrap();
+
+        let later = now + Duration::from_secs(1);
+        let later_observations = ObservationSnapshot::new(later, vec![]);
+        let deferred = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 1,
+            present_slots: 1,
+            sparse_w512_payload_bits: 512,
+            dense_w128_payload_bits: 128,
+            hybrid_w64_boolean_payload_bits: 256,
+        }
+        .stable_payload_decision_v7(
+            SlhaElasticControlProfileV4::SparseW512,
+            &mut controller,
+            &later_observations,
+            later,
+        )
+        .unwrap();
+
+        match deferred {
+            RepresentationPayloadStableDecisionV1::Deferred { stability, .. } => {
+                assert_eq!(
+                    stability.status,
+                    TransitionStabilityStatusV1::CooldownActive
+                );
+            }
+            other => panic!("expected cooldown-deferred decision, observed {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stable_payload_decision_preserves_tie_without_touching_stability() {
+        use elasticxxx::TransitionStabilityPolicyV1;
+        use std::time::Duration;
+
+        let report = SlhaElasticControlProfileAccountingV4 {
+            slot_count: 3,
+            present_slots: 3,
+            sparse_w512_payload_bits: 1536,
+            dense_w128_payload_bits: 384,
+            hybrid_w64_boolean_payload_bits: 384,
+        };
+        let policy = TransitionStabilityPolicyV1::new(
+            TransitionMechanism::Reencode,
+            DimensionId::REPRESENTATION,
+            None,
+            Some(Duration::from_secs(10)),
+            None,
+        )
+        .unwrap();
+        let mut controller = RepresentationPayloadStabilityControllerV1::new(policy).unwrap();
+        let now = Instant::now();
+        let observations = ObservationSnapshot::new(now, vec![]);
+
+        let result = report
+            .stable_payload_decision_v7(
+                SlhaElasticControlProfileV4::SparseW512,
+                &mut controller,
+                &observations,
+                now,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            RepresentationPayloadStableDecisionV1::Ambiguous { .. }
+        ));
+        assert_eq!(controller.stability_gate().generation(), 0);
     }
 
     #[test]
