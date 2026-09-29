@@ -89,7 +89,7 @@ pub const SLHAV2_ELASTIC_CONTROL_PROFILE_ACCOUNTING_V4: &str =
     "slhav2.elastic-control-profile-accounting@4.0.0";
 
 /// Exact ElasticXxx revision pinned by the optional Cargo dependencies.
-pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "666ba4373fafb0e021bfbd8ef47250643096683c";
+pub const ELASTICXXX_BE14D_CONTRACT_REVISION: &str = "4900a4ae5dfc0311bf854e20bb7e644b40342384";
 /// Exact ElasticXxx ELANG7/ELANG8a source revision qualified by this consumer.
 pub const ELASTICXXX_ELANG8A_CONTRACT_REVISION: &str = ELASTICXXX_BE14D_CONTRACT_REVISION;
 
@@ -1627,9 +1627,10 @@ mod tests {
 
     #[test]
     fn stable_payload_trace_retains_explanation_without_permit_authority() {
-        use elasticxxx::{
-            RepresentationPayloadStabilityOutcomeV1, TransitionStabilityPolicyV1,
+        use elasticxxx::runtime::representation_payload_stability_trace::{
+            RepresentationPayloadStabilityOutcomeV1,
         };
+        use elasticxxx::TransitionStabilityPolicyV1;
         use std::time::Duration;
 
         let report = SlhaElasticControlProfileAccountingV4 {
