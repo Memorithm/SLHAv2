@@ -1627,9 +1627,7 @@ mod tests {
 
     #[test]
     fn stable_payload_trace_retains_explanation_without_permit_authority() {
-        use elasticxxx::runtime::representation_payload_stability_trace::{
-            RepresentationPayloadStabilityOutcomeV1,
-        };
+        use elasticxxx::runtime::representation_payload_stability_trace::RepresentationPayloadStabilityOutcomeV1;
         use elasticxxx::TransitionStabilityPolicyV1;
         use std::time::Duration;
 
