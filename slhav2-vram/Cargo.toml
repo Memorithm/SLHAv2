@@ -13,7 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 scirust = { version = "0.2", path = "../scirust" }
 elastic-core = { version = "0.1.0", path = "../elastic/elastic-core" }
-elasticxxx = { package = "memorithm-elastic", version = "0.1.0", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "666ba4373fafb0e021bfbd8ef47250643096683c", optional = true }
+elasticxxx = { package = "memorithm-elastic", version = "0.1.0", git = "https://github.com/Memorithm/ElasticXxx.git", rev = "4900a4ae5dfc0311bf854e20bb7e644b40342384", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
