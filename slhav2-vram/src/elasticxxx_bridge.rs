@@ -30,13 +30,12 @@ use elasticxxx::runtime::representation_payload_selector::{
     select_minimum_payload_v1, RepresentationPayloadCandidateV1, RepresentationPayloadMinimumV1,
 };
 use elasticxxx::runtime::representation_payload_stability::{
-    RepresentationPayloadStableDecisionV1, RepresentationPayloadStabilityControllerV1,
+    RepresentationPayloadStabilityControllerV1, RepresentationPayloadStableDecisionV1,
 };
 use elasticxxx::{
     representation_precision_floor_signal, BooleanRepresentationPrecisionPreplannerV1,
-    BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, ObservationSnapshot,
-    Plan, RepresentationPrecisionCandidateV1, RuntimeError, TransitionMechanism,
-    VerificationResult,
+    BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, ObservationSnapshot, Plan,
+    RepresentationPrecisionCandidateV1, RuntimeError, TransitionMechanism, VerificationResult,
 };
 
 use crate::codec;
@@ -1569,9 +1568,7 @@ mod tests {
             .unwrap();
         let permit = match first {
             RepresentationPayloadStableDecisionV1::Admitted {
-                decision,
-                permit,
-                ..
+                decision, permit, ..
             } => {
                 assert!(matches!(
                     decision,
