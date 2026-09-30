@@ -1390,6 +1390,32 @@ mod tests {
     }
 
     #[test]
+    fn scirust_bitplane_tail_is_zero_for_65_slot_hybrid_domain() {
+        let mut physical = ElasticKvCache::new(
+            65 * codec::TILE_BYTES,
+            "slhav2-hybrid-scirust-tail",
+        );
+        for seed in 0..65_u8 {
+            physical.insert(tile(seed));
+        }
+
+        let handle = SlhaKvCacheHandleV1::new(physical);
+        let hybrid = handle.elastic_word_hybrid_control_plane_v3().unwrap();
+
+        assert_eq!(hybrid.slot_count(), 65);
+        assert_eq!(hybrid.presence_words().len(), 2);
+        assert_eq!(hybrid.tier_low_words().len(), 2);
+        assert_eq!(hybrid.tier_high_words().len(), 2);
+        assert_eq!(hybrid.presence_words()[1], 1);
+        assert_eq!(hybrid.tier_low_words()[1], 0);
+        assert_eq!(hybrid.tier_high_words()[1], 0);
+        assert_eq!(
+            hybrid.slot_state(64).unwrap(),
+            Some((64, PhysicalTier::Hot))
+        );
+    }
+
+    #[test]
     fn hybrid_boolean_overhead_amortizes_to_three_bits_per_slot_at_64_slots() {
         let mut physical = ElasticKvCache::new(64 * codec::TILE_BYTES, "slhav2-hybrid-64");
         for seed in 0..64_u8 {
