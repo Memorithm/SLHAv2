@@ -126,3 +126,13 @@ SLHAV2_REQUIRE_CUDA=1 cargo test -p slhav2-vram --features cuda -- --ignored --n
 For bounded replay, recomputable short-horizon state, persistent-versus-session cache separation, FP4 KV comparison, or ElasticXxx storage/recompute policy work, also read the `deepseek_v41_storage_recompute_program_2026_09_24` section of the off-main roadmap and the DeepSeek-V4.1 extension in `PLAN.md`.
 
 The source report's SWA Bounded Replay is not assumed equivalent to SLHAv2. Any SLHAv2 replay path must define its own replayable state, exact source identity, approximation boundary, quality gate, and physical accounting. FP4 and the existing INT4/NF4/MIXED/TQ3/MIX3 codecs are distinct formats and must remain distinct evidence families.
+
+## CPS-2 destination verification
+
+Before importing compact-preselection diagnostics, read `docs/CPS2_IMPORT.md`
+and `docs/CPS2_IMPORT_EVIDENCE.md`. The `kvlab_cps2` Rust module checks only the
+frozen synthetic KVLab #175 CSV; it is not a runtime selector, model-quality
+gate or authenticated execution attestation. Keep the adverse dominant-key
+fixture, complete matched controls and exact producer identities. No LR1
+candidate, protected holdout, scorer, codec or cache default changes are
+permitted by a successful diagnostic import.
