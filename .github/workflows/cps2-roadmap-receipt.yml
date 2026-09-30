@@ -1,0 +1,35 @@
+name: CPS-2 merged roadmap receipt
+
+on:
+  push:
+    branches: [ci/cps2-evidence-worker-20260930]
+    paths:
+      - 'scripts/cps2-record-merged.sh'
+      - '.github/workflows/cps2-roadmap-receipt.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cps2-merged-roadmap-receipt
+  cancel-in-progress: false
+
+jobs:
+  record:
+    if: github.actor == 'CHECKUPAUTO' && github.repository == 'Memorithm/SLHAv2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Checkout exact recording implementation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record the actual merge without changing runtime or maturity gates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: timeout --signal=TERM --kill-after=10s 150 bash scripts/cps2-record-merged.sh
