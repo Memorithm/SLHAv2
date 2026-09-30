@@ -11,7 +11,6 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use scirust_modalg::PackedBitPlane;
 use elasticxxx::kv::boolean_admission::KvCapacityObservationV1;
 use elasticxxx::kv::{
     CapabilitySet, ElasticWordPlaneV1, ElasticWordWidthV1, KeyEncodingPipeline, KeyTransformScope,
@@ -39,6 +38,7 @@ use elasticxxx::{
     BooleanRepresentationPrecisionReportV2, EirResource, InvariantCheck, ObservationSnapshot, Plan,
     RepresentationPrecisionCandidateV1, RuntimeError, TransitionMechanism, VerificationResult,
 };
+use scirust_modalg::PackedBitPlane;
 
 use crate::codec;
 use crate::elastic_cache::{ElasticKvCache, PhysicalTier};
@@ -1391,10 +1391,8 @@ mod tests {
 
     #[test]
     fn scirust_bitplane_tail_is_zero_for_65_slot_hybrid_domain() {
-        let mut physical = ElasticKvCache::new(
-            65 * codec::TILE_BYTES,
-            "slhav2-hybrid-scirust-tail",
-        );
+        let mut physical =
+            ElasticKvCache::new(65 * codec::TILE_BYTES, "slhav2-hybrid-scirust-tail");
         for seed in 0..65_u8 {
             physical.insert(tile(seed));
         }
