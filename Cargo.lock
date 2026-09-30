@@ -510,6 +510,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "scirust-modalg"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/scirust.git?rev=6a9287dc3b55576f54275edf3f30d58686e3ed57#6a9287dc3b55576f54275edf3f30d58686e3ed57"
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -600,6 +605,7 @@ dependencies = [
  "libc",
  "memorithm-elastic",
  "scirust",
+ "scirust-modalg",
 ]
 
 [[package]]
