@@ -11,6 +11,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
+use scirust_modalg::PackedBitPlane;
 use elasticxxx::kv::boolean_admission::KvCapacityObservationV1;
 use elasticxxx::kv::{
     CapabilitySet, ElasticWordPlaneV1, ElasticWordWidthV1, KeyEncodingPipeline, KeyTransformScope,
@@ -106,9 +107,9 @@ const SLHA_CACHE_RESIDENCY: &str = "slhav2-host-cache";
 pub struct SlhaElasticHybridControlPlaneV3 {
     slot_count: usize,
     generations: ElasticWordPlaneV1,
-    presence: Vec<u64>,
-    tier_low: Vec<u64>,
-    tier_high: Vec<u64>,
+    presence: PackedBitPlane,
+    tier_low: PackedBitPlane,
+    tier_high: PackedBitPlane,
 }
 
 impl SlhaElasticHybridControlPlaneV3 {
@@ -127,19 +128,19 @@ impl SlhaElasticHybridControlPlaneV3 {
     /// Packed presence bitplane.
     #[must_use]
     pub fn presence_words(&self) -> &[u64] {
-        &self.presence
+        self.presence.words()
     }
 
     /// Packed low tier bitplane.
     #[must_use]
     pub fn tier_low_words(&self) -> &[u64] {
-        &self.tier_low
+        self.tier_low.words()
     }
 
     /// Packed high tier bitplane.
     #[must_use]
     pub fn tier_high_words(&self) -> &[u64] {
-        &self.tier_high
+        self.tier_high.words()
     }
 
     /// Exact payload bits in the generation and Boolean backing planes.
@@ -148,7 +149,9 @@ impl SlhaElasticHybridControlPlaneV3 {
     #[must_use]
     pub fn payload_bits(&self) -> usize {
         self.generations.as_lanes().len() * 64
-            + (self.presence.len() + self.tier_low.len() + self.tier_high.len()) * 64
+            + self.presence.backing_bits()
+            + self.tier_low.backing_bits()
+            + self.tier_high.backing_bits()
     }
 
     /// Decode one slot without reconstructing per-slot metadata objects.
@@ -159,9 +162,18 @@ impl SlhaElasticHybridControlPlaneV3 {
                 self.slot_count
             ));
         }
-        let present = bitplane_get(&self.presence, slot);
-        let low = bitplane_get(&self.tier_low, slot);
-        let high = bitplane_get(&self.tier_high, slot);
+        let present = self
+            .presence
+            .get(slot)
+            .expect("slot range checked against bitplane length");
+        let low = self
+            .tier_low
+            .get(slot)
+            .expect("slot range checked against bitplane length");
+        let high = self
+            .tier_high
+            .get(slot)
+            .expect("slot range checked against bitplane length");
         if !present {
             if low || high {
                 return Err(format!(
@@ -556,11 +568,10 @@ impl SlhaKvCacheHandleV1 {
     ) -> Result<SlhaElasticHybridControlPlaneV3, String> {
         let cache = self.lock()?;
         let slot_count = cache.slot_control_metadata_dense().len();
-        let bitmap_words = slot_count.div_ceil(64);
         let mut generations = vec![0_u64; slot_count];
-        let mut presence = vec![0_u64; bitmap_words];
-        let mut tier_low = vec![0_u64; bitmap_words];
-        let mut tier_high = vec![0_u64; bitmap_words];
+        let mut presence = PackedBitPlane::zeroed(slot_count);
+        let mut tier_low = PackedBitPlane::zeroed(slot_count);
+        let mut tier_high = PackedBitPlane::zeroed(slot_count);
 
         for (slot, metadata) in cache.slot_control_metadata_dense().enumerate() {
             let Some((generation, tier, resident_bytes, backing_bytes)) = metadata else {
@@ -574,13 +585,19 @@ impl SlhaKvCacheHandleV1 {
             }
 
             generations[slot] = generation;
-            bitplane_set(&mut presence, slot);
+            presence
+                .set(slot, true)
+                .map_err(|error| format!("SLHAv2 presence bitplane update failed: {error}"))?;
             let tier_code = physical_tier_code(tier);
             if tier_code & 1 != 0 {
-                bitplane_set(&mut tier_low, slot);
+                tier_low
+                    .set(slot, true)
+                    .map_err(|error| format!("SLHAv2 tier-low bitplane update failed: {error}"))?;
             }
             if tier_code & 2 != 0 {
-                bitplane_set(&mut tier_high, slot);
+                tier_high
+                    .set(slot, true)
+                    .map_err(|error| format!("SLHAv2 tier-high bitplane update failed: {error}"))?;
             }
         }
 
@@ -1113,20 +1130,6 @@ fn descriptor(
         key_encoding_pipeline: semantics.key_encoding_pipeline,
         recovery_source: semantics.recovery_source,
     })
-}
-
-fn bitplane_set(words: &mut [u64], slot: usize) {
-    let word = slot / 64;
-    let bit = slot % 64;
-    words[word] |= 1_u64 << bit;
-}
-
-fn bitplane_get(words: &[u64], slot: usize) -> bool {
-    let word = slot / 64;
-    let bit = slot % 64;
-    words
-        .get(word)
-        .is_some_and(|value| value & (1_u64 << bit) != 0)
 }
 
 const fn dense_state_bits_v2(tier: PhysicalTier) -> u64 {
