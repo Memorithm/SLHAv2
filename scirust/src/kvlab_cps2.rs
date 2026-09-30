@@ -136,7 +136,9 @@ fn integer(text: &str, line: usize, field: &'static str) -> Result<usize, Cps2Ev
 }
 
 fn number(text: &str, line: usize, field: &'static str) -> Result<f64, Cps2EvidenceError> {
-    let value: f64 = text.parse().map_err(|_| Cps2EvidenceError { line, field })?;
+    let value: f64 = text
+        .parse()
+        .map_err(|_| Cps2EvidenceError { line, field })?;
     require(value.is_finite() && value >= 0.0, line, field)?;
     Ok(value)
 }
@@ -228,7 +230,12 @@ fn parse_row(text: &str, line: usize) -> Result<DevelopmentRow, Cps2EvidenceErro
     let case = match fields[2] {
         "aligned_coordinate" => DevelopmentCase::AlignedCoordinate,
         "omitted_dominant_coordinate" => DevelopmentCase::OmittedDominantCoordinate,
-        _ => return Err(Cps2EvidenceError { line, field: "case" }),
+        _ => {
+            return Err(Cps2EvidenceError {
+                line,
+                field: "case",
+            })
+        }
     };
     let arm = match fields[3] {
         "all_accept" => Cps2Arm::AllAccept,
@@ -240,31 +247,62 @@ fn parse_row(text: &str, line: usize) -> Result<DevelopmentRow, Cps2EvidenceErro
     };
     let query_row = integer(fields[4], line, "query row")?;
     require(query_row < 5, line, "query row")?;
-    require(integer(fields[5], line, "eligible keys")? == 5, line, "eligible keys")?;
+    require(
+        integer(fields[5], line, "eligible keys")? == 5,
+        line,
+        "eligible keys",
+    )?;
     let selected = key_ids(fields[6], line, "selected IDs")?;
     let reference = key_ids(fields[7], line, "reference IDs")?;
-    require(selected == expected_selection(case, arm, query_row), line, "selection")?;
+    require(
+        selected == expected_selection(case, arm, query_row),
+        line,
+        "selection",
+    )?;
     require(reference == reference_keys(case), line, "reference IDs")?;
     let hits = integer(fields[8], line, "top-k hits")?;
-    let expected_hits = reference.iter().filter(|key| selected.contains(key)).count();
+    let expected_hits = reference
+        .iter()
+        .filter(|key| selected.contains(key))
+        .count();
     require(hits == expected_hits, line, "top-k hits")?;
     let recall = number(fields[9], line, "top-k recall")?;
     require(recall == hits as f64 / 2.0, line, "top-k recall")?;
     let mass = number(fields[10], line, "retained mass")?;
     let omitted = number(fields[11], line, "omitted mass")?;
     let density = number(fields[12], line, "density")?;
-    require(mass <= 1.0 && omitted <= 1.0 && density <= 1.0, line, "probability range")?;
+    require(
+        mass <= 1.0 && omitted <= 1.0 && density <= 1.0,
+        line,
+        "probability range",
+    )?;
     let (expected_mass, expected_error, expected_lse) = reference_statistics(case, &selected);
-    require(close(mass, expected_mass, MASS_TOLERANCE), line, "retained mass")?;
-    require(close(omitted, 1.0 - expected_mass, MASS_TOLERANCE), line, "omitted mass")?;
-    require(close(density, selected.len() as f64 / 5.0, MASS_TOLERANCE), line, "density")?;
+    require(
+        close(mass, expected_mass, MASS_TOLERANCE),
+        line,
+        "retained mass",
+    )?;
+    require(
+        close(omitted, 1.0 - expected_mass, MASS_TOLERANCE),
+        line,
+        "omitted mass",
+    )?;
+    require(
+        close(density, selected.len() as f64 / 5.0, MASS_TOLERANCE),
+        line,
+        "density",
+    )?;
     let components = integer(fields[13], line, "selector components")?;
     let expected_components = match arm {
         Cps2Arm::CompactProjected => 5,
         Cps2Arm::FullScoreTopK => 10,
         _ => 0,
     };
-    require(components == expected_components, line, "selector components")?;
+    require(
+        components == expected_components,
+        line,
+        "selector components",
+    )?;
     let pairs = integer(fields[14], line, "numerical pairs")?;
     require(pairs == selected.len(), line, "numerical pairs")?;
     let error = number(fields[15], line, "output error")?;
@@ -272,10 +310,22 @@ fn parse_row(text: &str, line: usize) -> Result<DevelopmentRow, Cps2EvidenceErro
     if arm == Cps2Arm::AllAccept {
         require(error == 0.0 && lse == 0.0, line, "all-accept parity")?;
     } else {
-        require(close(error, expected_error, OUTPUT_TOLERANCE), line, "output error")?;
-        require(close(lse, expected_lse, OUTPUT_TOLERANCE), line, "LSE error")?;
+        require(
+            close(error, expected_error, OUTPUT_TOLERANCE),
+            line,
+            "output error",
+        )?;
+        require(
+            close(lse, expected_lse, OUTPUT_TOLERANCE),
+            line,
+            "LSE error",
+        )?;
     }
-    require(fields[17..].iter().all(|value| *value == "false"), line, "claim flags")?;
+    require(
+        fields[17..].iter().all(|value| *value == "false"),
+        line,
+        "claim flags",
+    )?;
     Ok(DevelopmentRow {
         case,
         arm,
@@ -303,7 +353,11 @@ pub fn verify_development_csv(
     text: &str,
     asserted_kvlab_revision: &str,
 ) -> Result<DevelopmentEvidence, Cps2EvidenceError> {
-    require(asserted_kvlab_revision == KVLAB_REVISION, 0, "KVLab revision")?;
+    require(
+        asserted_kvlab_revision == KVLAB_REVISION,
+        0,
+        "KVLab revision",
+    )?;
     require(text.len() <= MAX_CSV_BYTES, 0, "input size")?;
     let mut lines = text.lines();
     require(lines.next() == Some(CSV_HEADER), 1, "header")?;
@@ -313,7 +367,11 @@ pub fn verify_development_csv(
         let line = index + 2;
         require(rows.len() < 50, line, "panel size")?;
         let row = parse_row(text, line)?;
-        require(seen.insert((row.case, row.arm, row.query_row)), line, "duplicate row")?;
+        require(
+            seen.insert((row.case, row.arm, row.query_row)),
+            line,
+            "duplicate row",
+        )?;
         rows.push(row);
     }
     // The key universe has exactly 2 * 5 * 5 entries. Uniqueness, bounds and

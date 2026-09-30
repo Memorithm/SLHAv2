@@ -7,7 +7,10 @@ use scirust::kvlab_cps2::{
 const CSV: &str = include_str!("fixtures/kvlab_cps2_v1.csv");
 
 fn replace_field(case: &str, arm: &str, query: &str, field: &str, replacement: &str) -> String {
-    let column = CSV_HEADER.split(',').position(|name| name == field).unwrap();
+    let column = CSV_HEADER
+        .split(',')
+        .position(|name| name == field)
+        .unwrap();
     let mut found = false;
     let lines = CSV
         .lines()
@@ -25,7 +28,13 @@ fn replace_field(case: &str, arm: &str, query: &str, field: &str, replacement: &
 }
 
 fn mutate(field: &str, value: &str) -> String {
-    replace_field("omitted_dominant_coordinate", "compact_projected", "4", field, value)
+    replace_field(
+        "omitted_dominant_coordinate",
+        "compact_projected",
+        "4",
+        field,
+        value,
+    )
 }
 
 #[test]
@@ -39,7 +48,10 @@ fn accepts_complete_pinned_panel_without_runtime_authority() {
 #[test]
 fn all_accept_preserves_dense_identity() {
     let evidence = verify_development_csv(CSV, KVLAB_REVISION).unwrap();
-    let rows = evidence.rows().iter().filter(|row| row.arm == Cps2Arm::AllAccept);
+    let rows = evidence
+        .rows()
+        .iter()
+        .filter(|row| row.arm == Cps2Arm::AllAccept);
     for row in rows {
         assert_eq!(row.retained_softmax_mass, 1.0);
         assert_eq!(row.output_max_abs_error, 0.0);
@@ -52,7 +64,8 @@ fn all_accept_preserves_dense_identity() {
 fn negative_control_is_accepted_as_negative_not_as_quality_success() {
     let evidence = verify_development_csv(CSV, KVLAB_REVISION).unwrap();
     let rows = evidence.rows().iter().filter(|row| {
-        row.case == DevelopmentCase::OmittedDominantCoordinate && row.arm == Cps2Arm::CompactProjected
+        row.case == DevelopmentCase::OmittedDominantCoordinate
+            && row.arm == Cps2Arm::CompactProjected
     });
     let mut count = 0;
     for row in rows {
@@ -69,8 +82,14 @@ fn negative_control_is_accepted_as_negative_not_as_quality_success() {
 #[test]
 fn rejects_source_and_schema_drift() {
     assert!(verify_development_csv(CSV, "main").is_err());
-    assert!(verify_development_csv(&mutate("schema", "kvlab.cps2-compact-quality/v2"), KVLAB_REVISION).is_err());
-    assert!(verify_development_csv(&mutate("flat_source_revision", "main"), KVLAB_REVISION).is_err());
+    assert!(verify_development_csv(
+        &mutate("schema", "kvlab.cps2-compact-quality/v2"),
+        KVLAB_REVISION
+    )
+    .is_err());
+    assert!(
+        verify_development_csv(&mutate("flat_source_revision", "main"), KVLAB_REVISION).is_err()
+    );
 }
 
 #[test]
@@ -151,30 +170,50 @@ fn rejects_nonfinite_negative_and_out_of_range_diagnostics() {
             assert!(verify_development_csv(&mutate(field, value), KVLAB_REVISION).is_err());
         }
     }
-    assert!(verify_development_csv(&mutate("retained_softmax_mass", "1.01"), KVLAB_REVISION).is_err());
+    assert!(
+        verify_development_csv(&mutate("retained_softmax_mass", "1.01"), KVLAB_REVISION).is_err()
+    );
 }
 
 #[test]
 fn checks_row_scoped_random_control_not_just_density() {
-    let changed = replace_field("aligned_coordinate", "matched_random", "0", "selected_ids", "3|4");
+    let changed = replace_field(
+        "aligned_coordinate",
+        "matched_random",
+        "0",
+        "selected_ids",
+        "3|4",
+    );
     assert!(verify_development_csv(&changed, KVLAB_REVISION).is_err());
     let evidence = verify_development_csv(CSV, KVLAB_REVISION).unwrap();
     let expected = [vec![0, 2], vec![1, 2], vec![0, 3], vec![0, 3], vec![0, 4]];
-    for row in evidence.rows().iter().filter(|row| row.arm == Cps2Arm::MatchedRandom) {
+    for row in evidence
+        .rows()
+        .iter()
+        .filter(|row| row.arm == Cps2Arm::MatchedRandom)
+    {
         assert_eq!(row.selected_keys, expected[row.query_row]);
     }
 }
 
 #[test]
 fn checks_exact_all_accept_identity_even_within_numeric_tolerance() {
-    let changed = replace_field("aligned_coordinate", "all_accept", "0", "output_max_abs_error", "0.000000001");
+    let changed = replace_field(
+        "aligned_coordinate",
+        "all_accept",
+        "0",
+        "output_max_abs_error",
+        "0.000000001",
+    );
     assert!(verify_development_csv(&changed, KVLAB_REVISION).is_err());
 }
 
 #[test]
 fn bounds_input_and_rejects_unknown_columns_and_blank_rows() {
     assert!(verify_development_csv(&"x".repeat(MAX_CSV_BYTES + 1), KVLAB_REVISION).is_err());
-    assert!(verify_development_csv(&CSV.replace(CSV_HEADER, "wrong_header"), KVLAB_REVISION).is_err());
+    assert!(
+        verify_development_csv(&CSV.replace(CSV_HEADER, "wrong_header"), KVLAB_REVISION).is_err()
+    );
     let extra_column = mutate("promotion_authorized", "false,extra");
     assert!(verify_development_csv(&extra_column, KVLAB_REVISION).is_err());
     assert!(verify_development_csv(&CSV.replacen('\n', "\n\n", 1), KVLAB_REVISION).is_err());

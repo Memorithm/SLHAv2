@@ -220,3 +220,17 @@ The paper should present three layers separately:
 
 A future positive result may be promoted only after it exists. The roadmap is
 not evidence.
+
+## CPS-2 destination verification — 2026-09-30
+
+The `scirust::kvlab_cps2` read-only consumer verifies the complete frozen
+KVLab #175 development panel against an independent scalar fixture oracle.
+The upstream producer is pinned to `265a2a65120b8f6f06c3cbb6604cf821ceda94d0`;
+FLAT CPS-1 is pinned to `ad1634fc922f6223dd3a83ac84154a82b1a35562`.
+See `docs/CPS2_IMPORT.md` and `docs/CPS2_IMPORT_EVIDENCE.md` for the protocol,
+actual execution provenance and limitations. Source/schema drift, missing
+controls, forged metrics and unsupported promotion flags are rejected.
+
+This completes a synthetic evidence-consumption slice under RK2/RK3 only.
+Real-model quality, physical systems gains and runtime adoption remain gated;
+RK1/LR1 and its protected holdout are unchanged.
