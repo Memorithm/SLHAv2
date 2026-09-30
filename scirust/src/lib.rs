@@ -33,6 +33,7 @@ pub mod eventlog;
 pub mod exec_binding;
 pub mod incoherence;
 pub mod json;
+pub mod kvlab_cps2;
 pub mod learned;
 pub mod linalg;
 pub mod lr1_contract;
