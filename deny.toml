@@ -39,4 +39,5 @@ unknown-git = "deny"
 # the compatible package version and exact revision; other Git sources remain denied.
 allow-git = [
     "https://github.com/Memorithm/ElasticXxx.git",
+    "https://github.com/Memorithm/scirust.git",
 ]
