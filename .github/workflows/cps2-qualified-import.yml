@@ -1,0 +1,39 @@
+name: CPS-2 qualified artifact import
+
+on:
+  push:
+    branches: [ci/cps2-evidence-worker-20260930]
+    paths:
+      - 'scripts/cps2-import-qualified.sh'
+      - '.github/workflows/cps2-qualified-import.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cps2-qualified-destination-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: github.actor == 'CHECKUPAUTO' && github.repository == 'Memorithm/SLHAv2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout exact import implementation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install Rust validation tools
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt, clippy
+      - name: Verify artifact and advance only the exact destination branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: timeout --signal=TERM --kill-after=30s 600 bash scripts/cps2-import-qualified.sh
