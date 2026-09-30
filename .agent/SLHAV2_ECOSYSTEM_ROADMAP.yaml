@@ -1,7 +1,7 @@
 schema_version: 2
 kind: slhav2_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-09-27T00:10+0200"
+last_updated: "2026-09-30"
 repository: Memorithm/SLHAv2
 intended_consumer: autonomous_coding_agent
 visibility_note: >-
@@ -462,3 +462,27 @@ ax_bounded_runtime_task_program:
     - task_control_does_not_own_KV_semantics
     - resource_adaptation_does_not_change_comparison_budget_silently
     - accelerated_claims_require_exact_hardware_evidence
+
+cps2_destination_verification_2026_09_30:
+  status: merged_synthetic_diagnostic_only
+  pull_request: 131
+  qualified_head: "1462533ebf43db0533843283f958d265b262ae02"
+  merge_revision: "35495421c62f33de474f54aaf305fd83fb923363"
+  kvlab_producer: "265a2a65120b8f6f06c3cbb6604cf821ceda94d0"
+  flat_producer: "ad1634fc922f6223dd3a83ac84154a82b1a35562"
+  schema: kvlab.cps2-compact-quality/v1
+  raw_csv_sha256: "2457b70e8e75cf29db366f8b11761efa084f1da3bec9ed49133c6436ac2c7216"
+  public_cpu_worker_run: 36773552599
+  checksum_gated_import_run: 36774007835
+  complete_synthetic_observations: 50
+  destination_regression_tests: 14
+  implementation: scirust/src/kvlab_cps2.rs
+  protocol: docs/CPS2_IMPORT.md
+  execution_evidence: docs/CPS2_IMPORT_EVIDENCE.md
+  invariants:
+    - read_only_diagnostic_not_a_runtime_selector
+    - revision_labels_are_assertions_not_authenticated_worker_attestations
+    - adverse_dominant_key_fixture_is_retained_as_negative_evidence
+    - no_LR1_candidate_protected_holdout_scorer_codec_or_cache_default_change
+    - no_model_quality_memory_traffic_latency_or_GPU_promotion
+    - ML_maturity_and_existing_real_model_quality_gates_remain_unchanged
