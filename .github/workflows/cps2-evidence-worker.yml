@@ -1,0 +1,41 @@
+name: CPS-2 public CPU evidence worker
+
+on:
+  push:
+    branches: [ci/cps2-evidence-worker-20260930]
+    paths:
+      - 'scripts/cps2-evidence-worker.sh'
+      - '.github/workflows/cps2-evidence-worker.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cps2-public-evidence-worker
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact worker revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install Rust qualification tools
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt, clippy
+      - name: Reproduce upstream CSV and verify destination
+        shell: bash
+        run: timeout --signal=TERM --kill-after=30s 720 bash scripts/cps2-evidence-worker.sh
+      - name: Retain diagnostic handoff artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cps2-destination-${{ github.sha }}
+          path: cps2-handoff
+          if-no-files-found: error
+          retention-days: 14
