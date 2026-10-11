@@ -486,3 +486,33 @@ cps2_destination_verification_2026_09_30:
     - no_LR1_candidate_protected_holdout_scorer_codec_or_cache_default_change
     - no_model_quality_memory_traffic_latency_or_GPU_promotion
     - ML_maturity_and_existing_real_model_quality_gates_remain_unchanged
+
+
+audit_global_rt_slha_02_2026_10_11:
+  status: candidate_pending_exact_head_ci
+  finding: RT-SLHA-02
+  pull_request: https://github.com/Memorithm/SLHAv2/pull/133
+  base_revision: 9c93500602f5d1bb0166a6aed9d34ff270674a3d
+  candidate_revision: fcd2281e3473c0dac28af71874a0ef699320a383
+  matrix: docs/integration/slhav2-elastic-boundary-v1.json
+  local_boundary:
+    package: elastic-core
+    path: ../elastic/elastic-core
+    version: 0.1.0
+    runtime_status: active_default_dependency
+  external_boundary:
+    package: memorithm-elastic
+    repository: https://github.com/Memorithm/ElasticXxx.git
+    revision: 4900a4ae5dfc0311bf854e20bb7e644b40342384
+    runtime_status: optional_feature_only
+  invariants:
+    - distinct_origins_are_not_a_Cargo_package_collision
+    - compilation_and_graph_resolution_are_not_runtime_parity
+    - local_retirement_requires_destination_owned_identical_trace_conformance
+    - preserve_local_and_dense_fallback_until_parity_and_rollback_pass
+    - no_memory_latency_throughput_quality_or_hardware_claim
+  next:
+    - require_new_exact_MSRV_boundary_workflow_and_existing_required_CI_green
+    - repair_any_review_or_CI_failure_on_a_new_exact_head
+    - merge_only_after_revalidating_base_head_review_and_policy
+    - update_this_record_with_integrated_master_SHA_and_target_validation
