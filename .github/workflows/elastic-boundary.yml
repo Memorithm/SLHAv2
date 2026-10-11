@@ -54,7 +54,7 @@ jobs:
             --default-tree /tmp/slhav2-elastic-default.txt \
             --feature-tree /tmp/slhav2-elastic-feature.txt \
             --nested-tree /tmp/slhav2-elastic-nested.txt
-      - name: Prove an unqualified external revision fails closed
+      - name: Prove drift and product imports fail closed
         run: |
           cp /tmp/slhav2-elastic-feature.txt /tmp/slhav2-elastic-unqualified.txt
           printf '\nmemorithm-elastic v0.2.0 (git+https://github.com/Memorithm/ElasticXxx.git?rev=deadbeef#deadbeef)\n' \
@@ -62,5 +62,14 @@ jobs:
           if python3 scripts/verify_elastic_boundary.py \
             --feature-tree /tmp/slhav2-elastic-unqualified.txt; then
             echo "unqualified ElasticXxx origin was accepted" >&2
+            exit 1
+          fi
+
+          cp /tmp/slhav2-elastic-nested.txt /tmp/slhav2-elastic-product-import.txt
+          printf '\nscirust v0.2.0 (/tmp/scirust)\n' \
+            >> /tmp/slhav2-elastic-product-import.txt
+          if python3 scripts/verify_elastic_boundary.py \
+            --nested-tree /tmp/slhav2-elastic-product-import.txt; then
+            echo "forbidden product package was accepted in nested Elastic" >&2
             exit 1
           fi
