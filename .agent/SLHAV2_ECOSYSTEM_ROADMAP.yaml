@@ -489,11 +489,16 @@ cps2_destination_verification_2026_09_30:
 
 
 audit_global_rt_slha_02_2026_10_11:
-  status: candidate_pending_exact_head_ci
+  status: merged_target_validated
   finding: RT-SLHA-02
   pull_request: https://github.com/Memorithm/SLHAv2/pull/133
   base_revision: 9c93500602f5d1bb0166a6aed9d34ff270674a3d
   candidate_revision: 5cfaab721d466892b680eafc99b21d55e078fe2c
+  merge_revision: 590a7135f23980ce1aac25d52abf34757b2cabea
+  target_validation:
+    matrix_run: 38135246978
+    ci_run: 38135247029
+    result: all_exact_integrated_master_checks_success
   matrix: docs/integration/slhav2-elastic-boundary-v1.json
   local_boundary:
     package: elastic-core
@@ -512,7 +517,6 @@ audit_global_rt_slha_02_2026_10_11:
     - preserve_local_and_dense_fallback_until_parity_and_rollback_pass
     - no_memory_latency_throughput_quality_or_hardware_claim
   next:
-    - require_new_exact_MSRV_boundary_workflow_and_existing_required_CI_green
-    - repair_any_review_or_CI_failure_on_a_new_exact_head
-    - merge_only_after_revalidating_base_head_review_and_policy
-    - update_this_record_with_integrated_master_SHA_and_target_validation
+    - keep_the_matrix_green_on_future_origin_feature_lockfile_or_workspace_changes
+    - require_destination_owned_identical_trace_conformance_before_any_local_retirement
+    - preserve_local_and_dense_fallback_until_parity_and_rollback_pass
