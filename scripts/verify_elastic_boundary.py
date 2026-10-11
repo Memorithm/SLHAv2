@@ -21,6 +21,13 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(f"SLHAv2 Elastic boundary mismatch: {message}")
 
 
+def cargo_tree_source_matches(source: str, revision: str) -> bool:
+    if f"rev={revision}" not in source or "#" not in source:
+        return False
+    resolved = source.rsplit("#", maxsplit=1)[1]
+    return len(resolved) >= 7 and revision.startswith(resolved)
+
+
 def load_toml(path: str) -> dict:
     with (ROOT / path).open("rb") as handle:
         return tomllib.load(handle)
@@ -127,8 +134,7 @@ def verify_graphs(
             (version, source)
             for version, source in observed
             if version != external["version"]
-            or f"rev={external['revision']}" not in source
-            or not source.endswith(f"#{external['revision']}")
+            or not cargo_tree_source_matches(source, external["revision"])
         )
         require(
             not unexpected,
