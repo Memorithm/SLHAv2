@@ -1,0 +1,55 @@
+{
+  "schema": "slhav2-elastic-boundary/v1",
+  "owner": "Memorithm/SLHAv2",
+  "base_sha": "9c93500602f5d1bb0166a6aed9d34ff270674a3d",
+  "msrv": "1.89.0",
+  "consumer": {
+    "manifest": "slhav2-vram/Cargo.toml",
+    "package": "slhav2-vram",
+    "default_graph": "local-incubator",
+    "opt_in_feature": "elasticxxx",
+    "opt_in_dependencies": [
+      "dep:elasticxxx",
+      "dep:scirust-modalg"
+    ]
+  },
+  "boundaries": [
+    {
+      "id": "local-incubator",
+      "role": "legacy in-repository generic Elastic incubator used by current SLHA cache implementation",
+      "ownership": "SLHAv2 preserves this path until destination-owned parity and rollback are proven",
+      "dependency_key": "elastic-core",
+      "package": "elastic-core",
+      "version": "0.1.0",
+      "path": "../elastic/elastic-core",
+      "workspace_manifest": "elastic/Cargo.toml",
+      "workspace_excluded_from_root": "elastic"
+    },
+    {
+      "id": "external-elasticxxx",
+      "role": "optional external generic adaptive-resource facade; no default runtime authority",
+      "ownership": "Memorithm/ElasticXxx",
+      "dependency_key": "elasticxxx",
+      "package": "memorithm-elastic",
+      "version": "0.1.0",
+      "repository": "https://github.com/Memorithm/ElasticXxx.git",
+      "revision": "4900a4ae5dfc0311bf854e20bb7e644b40342384",
+      "optional": true,
+      "feature": "elasticxxx"
+    }
+  ],
+  "parity_gate_before_local_retirement": [
+    "Map every local state, budget, transaction, journal and rollback semantic to a versioned external contract.",
+    "Run destination-owned conformance fixtures against both implementations on identical traces.",
+    "Require identical admissibility, state transitions, accounting and rollback outcomes for the promoted scope.",
+    "Keep the local path and dense/full-fidelity fallback until exact-head CI and destination evidence pass.",
+    "Measure real-model quality, physical memory and end-to-end throughput before making product claims.",
+    "Update this matrix, lockfile and migration evidence in the same reviewed change."
+  ],
+  "claims_not_authorized": [
+    "The distinct Cargo package origins are not a package-name collision.",
+    "Compilation or a resolved dependency graph is not runtime parity.",
+    "The optional external feature is not the default SLHAv2 control plane.",
+    "No memory, latency, throughput, quality or hardware qualification follows from this matrix."
+  ]
+}
