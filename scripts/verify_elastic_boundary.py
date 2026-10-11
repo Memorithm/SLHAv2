@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = ROOT / "docs/integration/slhav2-elastic-boundary-v1.json"
 EXTERNAL_PACKAGE_RE = re.compile(
-    r"\bmemorithm-elastic v([^\s]+) \((git\+[^)]+)\)"
+    r"\bmemorithm-elastic v([^\s]+) \(((?:git\+)?https://[^)]+)\)"
 )
 
 
