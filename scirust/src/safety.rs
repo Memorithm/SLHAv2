@@ -1,7 +1,9 @@
 //! Filtre géométrique d'anomalies dans l'espace latent (outlier filter).
 //!
-//! Ce module implémente un détecteur d'anomalies ultra-léger qui analyse la
-//! représentation géométrique des latents SLHA v2. L'API principale accepte une
+//! Ce module implémente un filtre d'anomalies ultra-léger qui analyse la
+//! représentation géométrique des latents SLHA v2. Ses signaux sont heuristiques,
+//! non spécifiques à une attaque et ne constituent pas une détection d'injection
+//! validée. L'API principale accepte une
 //! [`SciRustSlhaTile`] complète et réutilise son décodeur canonique afin de
 //! respecter le codec, les échelles par groupe et l'état éventuel du plan de
 //! correction.
@@ -150,9 +152,10 @@ const DRIFT_WINDOW: usize = 4;
 
 /// Filtre de sécurité géométrique dans l'espace latent.
 ///
-/// Analyse la géométrie des vecteurs latents SLHA v2 pour détecter des anomalies
-/// typiques des attaques par injection de prompts ou des dérives sémantiques. Pour une
-/// tuile réelle, [`Self::analyze_tile`] doit être utilisée afin de respecter son codec.
+/// Analyse la géométrie des vecteurs latents SLHA v2 pour signaler des anomalies
+/// non spécifiques. Un signal peut accompagner une attaque ou une dérive bénigne : il
+/// n'établit ni la nature ni l'intention de l'entrée. Pour une tuile réelle,
+/// [`Self::analyze_tile`] doit être utilisée afin de respecter son codec.
 ///
 /// ## Conception
 ///
