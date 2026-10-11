@@ -14,6 +14,10 @@ MATRIX_PATH = ROOT / "docs/integration/slhav2-elastic-boundary-v1.json"
 EXTERNAL_PACKAGE_RE = re.compile(
     r"\bmemorithm-elastic v([^\s]+) \(((?:git\+)?https://[^)]+)\)"
 )
+FORBIDDEN_NESTED_PACKAGE_RE = re.compile(
+    r"\b(?:scirust(?:-[A-Za-z0-9_-]+)?|slha(?:-[A-Za-z0-9_-]+)?|"
+    r"ccos(?:-[A-Za-z0-9_-]+)?|llama(?:-[A-Za-z0-9_-]+)?) v[^\s]+"
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -144,7 +148,11 @@ def verify_graphs(
     if nested_tree is not None:
         graph = nested_tree.read_text(encoding="utf-8")
         require(local_line in graph, "nested graph missing local elastic-core")
-        require("slhav2-vram v" not in graph, "nested graph imports SLHAv2 product")
+        forbidden = sorted(set(FORBIDDEN_NESTED_PACKAGE_RE.findall(graph)))
+        require(
+            not forbidden,
+            f"nested graph imports forbidden product packages {forbidden!r}",
+        )
         require(
             not EXTERNAL_PACKAGE_RE.search(graph),
             "nested graph imports external ElasticXxx runtime",
