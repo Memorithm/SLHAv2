@@ -59,7 +59,8 @@ def verify_manifests_and_lock(matrix: dict) -> None:
     require(external_dep.get("rev") == external["revision"], "external revision")
     require(external_dep.get("optional") is external["optional"], "external optionality")
     require(
-        features.get(external["feature"]) == [f"dep:{external['dependency_key']}"],
+        sorted(features.get(external["feature"], []))
+        == sorted(consumer["opt_in_dependencies"]),
         "external feature binding",
     )
 
