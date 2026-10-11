@@ -7,7 +7,11 @@
     "manifest": "slhav2-vram/Cargo.toml",
     "package": "slhav2-vram",
     "default_graph": "local-incubator",
-    "opt_in_feature": "elasticxxx"
+    "opt_in_feature": "elasticxxx",
+    "opt_in_dependencies": [
+      "dep:elasticxxx",
+      "dep:scirust-modalg"
+    ]
   },
   "boundaries": [
     {
