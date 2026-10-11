@@ -493,7 +493,7 @@ audit_global_rt_slha_02_2026_10_11:
   finding: RT-SLHA-02
   pull_request: https://github.com/Memorithm/SLHAv2/pull/133
   base_revision: 9c93500602f5d1bb0166a6aed9d34ff270674a3d
-  candidate_revision: 7b04d71042cd034ddd3bfa4ab8150d917e78074e
+  candidate_revision: 4a1b44672086c8bef81f429d2dcbb5f5095a0859
   matrix: docs/integration/slhav2-elastic-boundary-v1.json
   local_boundary:
     package: elastic-core
